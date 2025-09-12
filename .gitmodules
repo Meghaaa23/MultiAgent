@@ -1,0 +1,3 @@
+[submodule "multi-agent-llm"]
+	path = multi-agent-llm
+	url = https://github.com/Indrasena8/MultiAgentLLM.git
