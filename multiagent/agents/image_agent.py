@@ -1,47 +1,66 @@
+import asyncio
+from autogen_agentchat.messages import TextMessage, BaseMessage
+from langchain_core.documents import Document
+from PIL import Image
 import os
-import autogen
-from azure.ai.vision.imageanalysis import ImageAnalysisClient
-from azure.ai.vision.imageanalysis.models import VisualFeatures
-from azure.core.credentials import AzureKeyCredential
+import pytesseract
+import re
+import logging
+from transformers import pipeline
 
-def get_vision_client():
-    endpoint = os.getenv("AZURE_AI_VISION_ENDPOINT")
-    key = os.getenv("AZURE_AI_VISION_KEY")
-    if not endpoint or not key:
-        raise ValueError("Vision endpoint or key not set in environment variables.")
-    return ImageAnalysisClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+logger = logging.getLogger(__name__)
 
-def analyze_image_with_vision(image_file_path: str) -> str:
-    """Analyzes an image using Azure AI Vision for text and descriptions."""
-    client = get_vision_client()
-    
-    with open(image_file_path, "rb") as file_stream:
-        result = client.analyze(
-            image_data=file_stream,
-            visual_features=[VisualFeatures.DENSE_CAPTIONS, VisualFeatures.READ],
-        )
-    
+vectorstore = None
+
+def set_image_vectorstore(vs):
+    global vectorstore
+    vectorstore = vs
+
+# Initialize pipeline once globally
+try:
+    image_to_text_pipe = pipeline("image-to-text", model="Salesforce/blip-image-captioning-large")
+except Exception as e:
+    logger.error(f"Failed to initialize image-to-text pipeline: {e}")
+    image_to_text_pipe = None
+
+async def analyze_image_locally(image_file_path: str) -> BaseMessage:
+    if vectorstore is None:
+        raise ValueError("Vectorstore is not set. Please call set_image_vectorstore before processing.")
+
+    logger.info(f"Vectorstore initialized: {vectorstore}")
+
+    if not os.path.exists(image_file_path):
+        return TextMessage(content=f"Error: Image file not found at '{image_file_path}'.", source="analyze_image_locally")
+
     analysis_results = ""
-    if result.read and result.read.blocks:
-        extracted_text = " ".join([block.lines[0].text for block in result.read.blocks])
-        analysis_results += f"Extracted text from image: {extracted_text}\n"
-    
-    if result.dense_captions and result.dense_captions.list:
-        description = result.dense_captions.list[0].text
-        analysis_results += f"Image description: {description}"
-    
-    print(f"Image Agent: Processed {image_file_path}")
-    return analysis_results
 
-image_agent = autogen.UserProxyAgent(
-    name="Image_Agent",
-    human_input_mode="NEVER",
-    is_termination_msg=lambda x: "TERMINATE" in x.get("content", "").upper(),
-    llm_config=False,
-    code_execution_config={"work_dir": "images"}
-)
-image_agent.register_function(
-    function_map={
-        "analyze_image_with_vision": analyze_image_with_vision
-    }
-)
+    try:
+        image = await asyncio.to_thread(Image.open, image_file_path)
+        extracted_text = await asyncio.to_thread(pytesseract.image_to_string, image)
+        if extracted_text.strip():
+            cleaned_text = re.sub(r'\s+', ' ', extracted_text.strip())
+            analysis_results += f"Extracted text from image: {cleaned_text}\n"
+    except Exception as e:
+        logger.error(f"Failed to extract text from image: {e}")
+        analysis_results += f"Failed to extract text from image: {e}\n"
+
+    if image_to_text_pipe:
+        try:
+            description_result = await asyncio.to_thread(image_to_text_pipe, image)
+            description = description_result[0]['generated_text']
+            analysis_results += f"Image description: {description}"
+        except Exception as e:
+            logger.error(f"Failed to generate image description: {e}")
+            analysis_results += f"Failed to generate image description: {e}"
+    else:
+        logger.warning("Image-to-text pipeline not available, skipping image description.")
+
+    # Add to vectorstore in thread to avoid blocking
+    await asyncio.to_thread(vectorstore.add_documents, [
+        Document(page_content=analysis_results, metadata={"filename": os.path.basename(image_file_path)})
+    ])
+
+    return TextMessage(
+        content=f"Image analysis complete. The content has been added to the vector database. Results: {analysis_results[:200]}...",
+        source="analyze_image_locally"
+    )

@@ -1,52 +1,44 @@
+# agents/audio_agent.py
+
 import os
-import autogen
-import azure.cognitiveservices.speech as speechsdk
+import asyncio
+import logging
+import speech_recognition as sr
+from langchain_core.documents import Document
+from autogen_agentchat.messages import TextMessage
 
-def get_speech_recognizer():
-    speech_key = os.getenv("AZURE_AI_SPEECH_KEY")
-    speech_region = os.getenv("AZURE_AI_SPEECH_ENDPOINT").split(".")[1]
-    if not speech_key or not speech_region:
-        raise ValueError("Speech key or region not set in environment variables.")
-    
-    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=speech_region)
-    return speech_config
+logger = logging.getLogger(__name__)
+vectorstore = None
 
-def transcribe_audio_file(audio_file_path: str) -> str:
-    """Transcribes an audio file using Azure AI Speech."""
-    speech_config = get_speech_recognizer()
-    
+def set_vectorstore(vs):
+    global vectorstore
+    vectorstore = vs
+
+async def transcribe_audio_locally(audio_file_path: str) -> TextMessage:
+    if vectorstore is None:
+        raise ValueError("Vectorstore is not set. Please call set_vectorstore before processing.")
+
     if not os.path.exists(audio_file_path):
-        return "Error: Audio file not found."
-    
-    audio_config = speechsdk.audio.AudioConfig(filename=audio_file_path)
-    
-    recognizer = speechsdk.SpeechRecognizer(
-        speech_config=speech_config, 
-        audio_config=audio_config
-    )
-    
-    result = recognizer.recognize_once_async().get()
-    
-    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        print(f"Audio Agent: Transcribed {audio_file_path}")
-        return f"Audio transcription: {result.text}"
-    elif result.reason == speechsdk.ResultReason.NoMatch:
-        return "Audio transcription failed: No speech could be recognized."
-    elif result.reason == speechsdk.ResultReason.Canceled:
-        cancellation_details = result.cancellation_details
-        return f"Audio transcription canceled. Reason: {cancellation_details.reason}. Error: {cancellation_details.error_details}"
-    
-    return "An unknown error occurred during transcription."
+        return TextMessage(content=f"Error: Audio file not found at '{audio_file_path}'.", source="transcribe_audio_locally")
 
-audio_agent = autogen.UserProxyAgent(
-    name="Audio_Agent",
-    human_input_mode="NEVER",
-    is_termination_msg=lambda x: "TERMINATE" in x.get("content", "").upper(),
-    llm_config=False,
-    code_execution_config={"work_dir": "audio"}
-)
-audio_agent.register_function(
-    function_map={
-        "transcribe_audio_file": transcribe_audio_file
-    }
-)
+    transcript = ""
+    try:
+        r = sr.Recognizer()
+        with sr.AudioFile(audio_file_path) as source:
+            audio_data = await asyncio.to_thread(r.record, source)
+        transcript = await asyncio.to_thread(r.recognize_google, audio_data)
+
+        await asyncio.to_thread(vectorstore.add_documents, [
+            Document(page_content=transcript, metadata={"filename": os.path.basename(audio_file_path)})
+        ])
+
+        return TextMessage(
+            content=f"Audio transcription complete. Transcript added to vector database. Preview: {transcript[:200]}...",
+            source="transcribe_audio_locally"
+        )
+    except Exception as e:
+        logger.error(f"Failed to transcribe audio: {e}")
+        return TextMessage(
+            content=f"Audio transcription failed: {e}",
+            source="transcribe_audio_locally"
+        )
