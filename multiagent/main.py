@@ -74,10 +74,10 @@ vectorstore = MongoDBAtlasVectorSearch(
     index_name="vector_index"
 )
 
-from agents.audio_agent import transcribe_audio_locally, set_vectorstore
-from agents.image_agent import analyze_image_locally, set_image_vectorstore
-from agents.pdf_agent import set_vectorstore, process_pdf_locally
-from agents.qa_agent import set_vectorstore, set_config, answer_question_from_db
+from multiagent.agents.audio_agent import transcribe_audio_locally, set_vectorstore
+from multiagent.agents.image_agent import analyze_image_locally, set_image_vectorstore
+from multiagent.agents.pdf_agent import set_vectorstore, process_pdf_locally
+from multiagent.agents.qa_agent import set_vectorstore, set_config, answer_question_from_db
 
 set_image_vectorstore(vectorstore)
 set_vectorstore(vectorstore)
