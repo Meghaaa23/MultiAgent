@@ -6,6 +6,8 @@ import logging
 import speech_recognition as sr
 from langchain_core.documents import Document
 from autogen_agentchat.messages import TextMessage
+from .data_ingestion import ingest_text_with_chunking
+from .redis_manager import set_agent_state, publish_event
 
 logger = logging.getLogger(__name__)
 vectorstore = None
@@ -28,14 +30,9 @@ async def transcribe_audio_locally(audio_file_path: str) -> TextMessage:
             audio_data = await asyncio.to_thread(r.record, source)
         transcript = await asyncio.to_thread(r.recognize_google, audio_data)
 
-        await asyncio.to_thread(vectorstore.add_documents, [
-            Document(page_content=transcript, metadata={"filename": os.path.basename(audio_file_path)})
-        ])
+        # Ingest with chunking
+        return await ingest_text_with_chunking(audio_file_path, transcript)
 
-        return TextMessage(
-            content=f"Audio transcription complete. Transcript added to vector database. Preview: {transcript[:200]}...",
-            source="transcribe_audio_locally"
-        )
     except Exception as e:
         logger.error(f"Failed to transcribe audio: {e}")
         return TextMessage(

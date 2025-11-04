@@ -7,6 +7,9 @@ import pytesseract
 import re
 import logging
 from transformers import pipeline
+from .data_ingestion import ingest_text_with_chunking
+from .redis_manager import set_agent_state, publish_event
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +58,5 @@ async def analyze_image_locally(image_file_path: str) -> BaseMessage:
     else:
         logger.warning("Image-to-text pipeline not available, skipping image description.")
 
-    # Add to vectorstore in thread to avoid blocking
-    await asyncio.to_thread(vectorstore.add_documents, [
-        Document(page_content=analysis_results, metadata={"filename": os.path.basename(image_file_path)})
-    ])
-
-    return TextMessage(
-        content=f"Image analysis complete. The content has been added to the vector database. Results: {analysis_results[:200]}...",
-        source="analyze_image_locally"
-    )
+    # shared ingestion pipeline for chunking + embedding
+    return await ingest_text_with_chunking(image_file_path, analysis_results)

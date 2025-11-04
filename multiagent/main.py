@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from typing import Dict
 from pymongo import MongoClient
-from langchain_community.vectorstores import MongoDBAtlasVectorSearch
+from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_core.documents import Document
 import logging
@@ -67,21 +67,25 @@ app.add_middleware(
 )
 
 mongo_client = MongoClient(os.getenv("MONGODB_ATLAS_URI"))
-collection = mongo_client["multiagent"]["document_vectors"]
+collection = mongo_client["multiagentllm"]["RAG"]
 vectorstore = MongoDBAtlasVectorSearch(
     collection=collection,
     embedding=SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"),
     index_name="vector_index"
 )
 
-from multiagent.agents.audio_agent import transcribe_audio_locally, set_vectorstore
-from multiagent.agents.image_agent import analyze_image_locally, set_image_vectorstore
-from multiagent.agents.pdf_agent import set_vectorstore, process_pdf_locally
-from multiagent.agents.qa_agent import set_vectorstore, set_config, answer_question_from_db
+from agents.audio_agent import transcribe_audio_locally, set_vectorstore as set_audio_vectorstore
+from agents.image_agent import analyze_image_locally, set_image_vectorstore
+from agents.pdf_agent import set_vectorstore as set_pdf_vectorstore, process_pdf_locally
+from agents.qa_agent import set_vectorstore, set_config, answer_question_from_db
+from agents.data_ingestion import set_vectorstore as set_ingest_vectorstore
 
 set_image_vectorstore(vectorstore)
+set_pdf_vectorstore(vectorstore)
 set_vectorstore(vectorstore)
+set_audio_vectorstore(vectorstore)
 set_config(config_list)
+set_ingest_vectorstore(vectorstore)
 
 model_info = {
     "name": deployment_name,
@@ -219,7 +223,14 @@ model_client = AzureOpenAIChatCompletionClient(client, deployment_name)
 
 assistant = AssistantAgent(
     name="powerful_assistant",
-    system_message="""You are a powerful multi-modal assistant. You can process PDF, image, and audio files, and answer questions based on their content. You have access to specialized tools for each task.
+    system_message="""You are a helpful and concise AI assistant.
+
+    Always answer the user's question **directly** based on the uploaded document, image, or audio file.
+    Do not explain your reasoning, do not describe your process, and do not say things like
+    'let me check', 'processing', or 'retrieving'.
+
+    If the answer is found in the retrieved text, summarize it clearly.
+    If it's not found, respond with: "I couldn’t find that information in the uploaded content."
 
     Your workflow is as follows:
     1. A user provides a file and a question.
@@ -248,7 +259,7 @@ async def process_file(file: UploadFile = File(...)):
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        ext = file.filename.split('.')[-1].lower()
+        ext = file.filename.split('.')[-1].lower().replace(".", "")
         if ext not in ["pdf", "jpg", "jpeg", "png", "mp3", "wav"]:
              raise HTTPException(status_code=400, detail="Unsupported file type.")
 
