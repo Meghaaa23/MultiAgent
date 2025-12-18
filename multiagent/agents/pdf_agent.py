@@ -1,97 +1,129 @@
-# agents/pdf_agent.py
 import os
-import fitz
-import asyncio
 import logging
+import fitz  # PyMuPDF
+from pathlib import Path
 from langchain_core.documents import Document
+from typing import List
 from autogen_agentchat.messages import TextMessage
-from .redis_manager import set_agent_state, publish_event, cache_result, get_cached_result
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-vectorstore = None
-
-def set_vectorstore(vs):
-    global vectorstore
-    vectorstore = vs
-    logger.info("PDF agent vectorstore initialized")
+# Global vectorstore
+_vectorstore = None
 
 
-async def process_pdf_locally(file_path: str) -> TextMessage:
-    """Extract text from PDF and automatically process any URLs found"""
-    agent_name = "pdf_agent"
+def set_vectorstore(vectorstore):
+    """Set the vector store instance"""
+    global _vectorstore
+    _vectorstore = vectorstore
+    logger.info("✓ PDF Agent: Vector store configured")
+
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
+    """Split text into overlapping chunks"""
+    chunks = []
+    start = 0
+    text_length = len(text)
     
-    cached = get_cached_result(f"pdf:{file_path}")
-    if cached:
-        logger.info(f"Using cached PDF extraction for {file_path}")
-        import ast
-        try:
-            pages_data = ast.literal_eval(cached)
-            full_text = "\n".join([p["text"] for p in pages_data])
-            
-            # Process URLs from cached data
-            from .url_agent import process_pdf_urls
-            logger.info(" Processing URLs from cached PDF...")
-            url_result = await process_pdf_urls(full_text, os.path.basename(file_path))
-            logger.info(f"URL processing: {url_result.content}")
-        except:
-            logger.warning("Could not extract URLs from cached data")
+    while start < text_length:
+        end = start + chunk_size
+        chunk = text[start:end]
         
-        return await ingest_pdf_with_pages(file_path, cached)
+        if chunk.strip():  # Only add non-empty chunks
+            chunks.append(chunk)
+        
+        start += chunk_size - overlap
     
-    set_agent_state(agent_name, {"status": "running", "file": file_path})
-    
-    if not os.path.exists(file_path):
-        msg = f"Error: PDF not found at '{file_path}'"
-        logger.error(msg)
-        return TextMessage(content=msg, source=agent_name)
-    
+    return chunks
+
+
+async def process_pdf_locally(file_path: str) -> str:
+    """Process PDF and store chunks in MongoDB"""
     try:
-        doc = await asyncio.to_thread(fitz.open, file_path)
-        page_count = len(doc)
-        logger.info(f"Processing {page_count} pages from {os.path.basename(file_path)}")
+        logger.info(f"📄 PDF Agent: Processing {file_path}")
         
-        # Extract per-page
-        pages_data = []
-        full_text = ""
+        # Validate file exists
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return f"Error: File not found - {file_path}"
         
-        for page_num, page in enumerate(doc, start=1):
-            page_text = page.get_text()
-            if page_text.strip():
-                pages_data.append({
-                    "page_num": page_num,
-                    "text": page_text.strip()
-                })
-                full_text += f"\n{page_text}"
+        # Open PDF
+        try:
+            pdf_document = fitz.open(file_path)
+        except Exception as e:
+            logger.error(f"Failed to open PDF: {e}")
+            return f"Error: Could not open PDF - {str(e)}"
         
-        await asyncio.to_thread(doc.close)
+        filename = os.path.basename(file_path)
+        all_chunks = []
+        total_pages = len(pdf_document)
         
-        if not pages_data:
-            warning_msg = "Warning: No text extracted from PDF"
-            logger.warning(f"{warning_msg}: {file_path}")
-            return TextMessage(content=warning_msg, source=agent_name)
+        logger.info(f"  PDF has {total_pages} pages")
         
-        logger.info(f" Extracted {len(pages_data)} pages")
+        # Process each page
+        for page_num in range(total_pages):
+            try:
+                page = pdf_document[page_num]
+                text = page.get_text()
+                
+                # Skip empty pages
+                if not text or not text.strip():
+                    logger.debug(f"  Page {page_num + 1}: Empty, skipping")
+                    continue
+                
+                # Clean the text
+                text = text.strip()
+                
+                # Chunk the text
+                chunks = chunk_text(text, chunk_size=500, overlap=50)
+                
+                logger.info(f"  Page {page_num + 1}: {len(text)} chars → {len(chunks)} chunks")
+                
+                # Create documents for each chunk
+                for chunk_idx, chunk in enumerate(chunks):
+                    doc = Document(
+                        page_content=chunk,
+                        metadata={
+                            "filename": filename,
+                            "page": page_num + 1,
+                            "chunk": chunk_idx,
+                            "source": file_path,
+                            "total_pages": total_pages,
+                            "source_type": "pdf",
+                            "content_type": "document"
+                        }
+                    )
+                    all_chunks.append(doc)
+                    
+            except Exception as e:
+                logger.error(f"  Error processing page {page_num + 1}: {e}")
+                continue
         
-        cache_result(f"pdf:{file_path}", str(pages_data))
-        set_agent_state(agent_name, {"status": "completed", "file": file_path})
+        pdf_document.close()
         
-        # AUTOMATIC URL PROCESSING
-        from .url_agent import process_pdf_urls
-        logger.info("Automatically extracting URLs from PDF...")
-        url_result = await process_pdf_urls(full_text, os.path.basename(file_path))
-        logger.info(f"URL processing: {url_result.content}")
+        # Store in MongoDB
+        if not _vectorstore:
+            logger.error("❌ Vector store not initialized!")
+            return "Error: Vector store not initialized"
         
-        # Ingest PDF text
-        return await ingest_pdf_with_pages(file_path, pages_data)
+        if not all_chunks:
+            logger.warning("⚠️  No text extracted from PDF")
+            return f"Warning: No text found in {filename}"
+        
+        try:
+            logger.info(f"  Storing {len(all_chunks)} chunks in MongoDB...")
+            _vectorstore.add_documents(all_chunks)
+            logger.info(f"✓ Successfully stored {len(all_chunks)} chunks")
+        except Exception as e:
+            logger.error(f"❌ Failed to store in MongoDB: {e}")
+            return f"Error storing chunks: {str(e)}"
+        
+        return f"✓ Processed {filename}: {total_pages} pages, {len(all_chunks)} chunks"
     
     except Exception as e:
-        error_msg = f"PDF processing failed: {e}"
-        logger.error(f"{error_msg} for {file_path}", exc_info=True)
-        return TextMessage(content=error_msg, source=agent_name)
-
-
-async def ingest_pdf_with_pages(file_path: str, pages_data) -> TextMessage:
-    """Ingest PDF with page-level granularity"""
-    from .data_ingestion import ingest_pdf_pages
-    return await ingest_pdf_pages(file_path, pages_data)
+        logger.error(f"❌ PDF processing failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return f"Error: {str(e)}"

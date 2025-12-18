@@ -4,7 +4,7 @@ import asyncio
 import json
 import atexit
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 from enum import Enum
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
@@ -14,15 +14,19 @@ from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_core.documents import Document
+from typing import List, Dict, Any
 import logging
 import traceback
 
-
 from openai import OpenAI
-from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
-from autogen_agentchat.messages import TextMessage, UserMessage, BaseMessage
-from autogen_core import CancellationToken
+
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.teams import RoundRobinGroupChat
+from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermination
+from autogen_agentchat.messages import TextMessage, UserMessage
 from autogen_core.models import CreateResult, RequestUsage
+from autogen_agentchat.base import Response
+import certifi
 
 # Configure logging
 logging.basicConfig(
@@ -31,72 +35,52 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 load_dotenv()
 
 # ============================================================================
-# CONFIGURATION & VALIDATION
+# CONFIGURATION
 # ============================================================================
 
 class FinishReason(str, Enum):
     """Enum for completion finish reasons"""
     STOP = "stop"
     LENGTH = "length"
-    TOOL_CALLS = "tool_calls"
-    ERROR = "error"
-    OTHER = "other"
+    FUNCTION_CALLS = "function_calls"
+    CONTENT_FILTER = "content_filter"
+    UNKNOWN = "unknown"
     
     def __str__(self):
         return self.value
 
 
-
-'''
-# Initialize Azure OpenAI client
-client = AzureOpenAI(
-    api_version=api_version,
-    azure_endpoint=endpoint,
-    api_key=subscription_key,
-)
-
-config_list = [{
-    "model": deployment_name,
-    "api_type": "azure",
-    "openai_api_key": subscription_key,
-    "base_url": endpoint,
-    "api_version": api_version
-}]
-'''
-#LLAMA Model
-
+# LLM Configuration
 llama_base_url = os.getenv("LLAMA_BASE_URL", "http://localhost:8080")
 llama_model = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
 
 client = OpenAI(
     base_url=f"{llama_base_url}/v1", 
-    api_key="not-needed"  
+    api_key="not-needed"
 )
 
 config_list = [{
     "model": llama_model,
-    "api_type": "openai",  
+    "api_type": "openai",
     "openai_api_key": "not-needed",
     "base_url": f"{llama_base_url}/v1",
-    "api_version": None  
+    "api_version": None
 }]
 
 # ============================================================================
-# FASTAPI APP SETUP
+# FASTAPI SETUP
 # ============================================================================
 
 app = FastAPI(
-    title="Multi-Agent RAG System",
-    description="Process PDFs, images, and audio files with AI agents",
-    version="1.0.0"
+    title="Multi-Agent RAG System with AutoGen",
+    description="AutoGen-powered multi-agent system with conversation memory",
+    version="3.0.0"
 )
 
-# CORS configuration - frontend
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:4200,http://ems885-sidc-lab").split(",")
 
 app.add_middleware(
     CORSMiddleware,
@@ -107,7 +91,7 @@ app.add_middleware(
 )
 
 # ============================================================================
-# MONGODB & VECTOR STORE SETUP
+# MONGODB & VECTOR STORE
 # ============================================================================
 
 mongodb_uri = os.getenv("MONGODB_ATLAS_URI")
@@ -115,29 +99,41 @@ if not mongodb_uri:
     raise ValueError("MONGODB_ATLAS_URI environment variable is required")
 
 try:
+    logger.info("🔌 Connecting to MongoDB Atlas...")
+
     mongo_client = MongoClient(
         mongodb_uri,
-        maxPoolSize=50,
-        minPoolSize=10,
-        maxIdleTimeMS=30000,
-        connectTimeoutMS=5000,
-        serverSelectionTimeoutMS=5000
+        tls=True,
+        tlsAllowInvalidCertificates=False,
+        tlsCAFile=certifi.where()
     )
-    # Test connection
-    mongo_client.admin.command('ping')
-    logger.info("Connected to MongoDB Atlas")
-except Exception as e:
-    logger.error(f"Failed to connect to MongoDB: {e}")
-    raise
 
-collection = mongo_client["multiagentllm"]["RAG"]
-vectorstore = MongoDBAtlasVectorSearch(
-    collection=collection,
-    embedding=SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"),
-    index_name="vector_index",
-    text_key="page_content"
-)
-logger.info(f"Vector store initialized with model: {vectorstore.embeddings}")
+    logger.info("✓ MongoDB client initialized (TLS verified)")
+
+except Exception as e:
+    logger.warning(f"⚠️  MongoDB initialization warning: {e}")
+    logger.warning("⚠️  Will attempt connection when needed")
+    mongo_client = None
+
+if mongo_client:
+    try:
+        collection = mongo_client["multiagentllm"]["RAG"]
+
+        vectorstore = MongoDBAtlasVectorSearch(
+            collection=collection,
+            embedding=SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"),
+            index_name="vector_index",
+            text_key="page_content"
+        )
+        logger.info("✓ Vector store initialized")
+
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize vectorstore: {e}")
+        vectorstore = None
+else:
+    logger.error("❌ MongoDB not available - system will not work properly")
+    vectorstore = None
+
 
 # ============================================================================
 # AGENT IMPORTS & INITIALIZATION
@@ -150,7 +146,7 @@ from agents.qa_agent import set_vectorstore, set_config, answer_question_from_db
 from agents.data_ingestion import set_vectorstore as set_ingest_vectorstore
 from agents.url_agent import set_url_vectorstore
 
-# Set vectorstore for all agents
+# Initialize all agents
 set_image_vectorstore(vectorstore)
 set_pdf_vectorstore(vectorstore)
 set_vectorstore(vectorstore)
@@ -159,26 +155,61 @@ set_config(config_list)
 set_ingest_vectorstore(vectorstore)
 set_url_vectorstore(vectorstore)
 
+logger.info(" All agents initialized")
 
 # ============================================================================
-# MODEL CLIENT IMPLEMENTATION
+# CUSTOM LLM CLIENT FOR AUTOGEN
 # ============================================================================
-
 
 def message_to_openai_format(message):
     """Convert autogen message to OpenAI API format"""
     if isinstance(message, (UserMessage, TextMessage)):
+        if hasattr(message, 'source') and message.source and message.source not in ['user', None]:
+            return {"role": "assistant", "content": message.content}
         return {"role": "user", "content": message.content}
     
     elif hasattr(message, 'content'):
+        if hasattr(message, 'source'):
+            if message.source == 'user':
+                return {"role": "user", "content": message.content}
+            elif message.source:
+                return {"role": "assistant", "content": message.content}
         
         message_type = type(message).__name__.lower()
         if 'assistant' in message_type:
             return {"role": "assistant", "content": message.content}
         else:
-            return {"role": "system", "content": message.content}
+            return {"role": "user", "content": message.content}
     else:
-        return {"role": "system", "content": str(message)}
+        return {"role": "user", "content": str(message)}
+
+
+def clean_message_history(messages):
+    """Remove consecutive assistant messages and empty messages"""
+    cleaned = []
+    last_role = None
+    
+    for msg in messages:
+        current_role = msg.get("role")
+        content = msg.get("content", "")
+        
+        if not content or not str(content).strip():
+            continue
+        
+        if current_role == "assistant" and last_role == "assistant":
+            logger.warning(f"Skipping consecutive assistant message")
+            continue
+        
+        cleaned.append(msg)
+        last_role = current_role
+    
+    if cleaned and cleaned[0].get("role") == "assistant":
+        cleaned = cleaned[1:]
+    
+    if not cleaned:
+        cleaned = [{"role": "user", "content": "Hello"}]
+    
+    return cleaned
 
 
 class LocalLlamaChatCompletionClient:
@@ -193,35 +224,25 @@ class LocalLlamaChatCompletionClient:
             "context_length": 4096,
             "vision": False,
             "supports_chat": True,
-            "function_calling": True,
+            "function_calling": False,  # Disable function calling to avoid errors
             "json_output": False,
             "family": "llama"
         }
 
-    async def create(self, messages, max_tokens=4096, temperature=0.0, top_p=0.9, stream=False, **kwargs):
+    async def create(self, messages, max_tokens=4096, temperature=0.1, top_p=0.9, stream=False, **kwargs):
         """Create a chat completion"""
-        # Format messages
         api_messages = [message_to_openai_format(m) for m in messages]
+        api_messages = clean_message_history(api_messages)
         
-        # Handle tools 
-        autogen_tools = kwargs.get("tools", [])
-        api_kwargs = {}
-        
-        if autogen_tools:
-            functions_list = []
-            for t in autogen_tools:
-                try:
-                    if hasattr(t, "to_openai_tool"):
-                        functions_list.append(t.to_openai_tool())
-                except Exception as e:
-                    logger.warning(f"Failed to convert tool {t}: {e}")
-            
-            if functions_list:
-                api_kwargs["tools"] = functions_list
-                api_kwargs["tool_choice"] = kwargs.get("tool_choice", "auto")
+        if not api_messages:
+            return CreateResult(
+                content="No valid messages to process",
+                usage=RequestUsage(prompt_tokens=0, completion_tokens=0),
+                finish_reason=FinishReason.STOP,
+                cached=False
+            )
 
         try:
-            # Call local llama.cpp server
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 None,
@@ -231,147 +252,145 @@ class LocalLlamaChatCompletionClient:
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=top_p,
-                    stream=False,
-                    **api_kwargs
+                    stream=False
                 )
             )
             
             if not response or not response.choices:
                 return CreateResult(
-                    content="Llama server returned no response.", 
-                    usage=None, 
-                    finish_reason=FinishReason.ERROR, 
+                    content="No response from LLM", 
+                    usage=RequestUsage(prompt_tokens=0, completion_tokens=0),
+                    finish_reason=FinishReason.UNKNOWN, 
                     cached=False
                 )
 
             choice = response.choices[0]
             message = choice.message
             
-            # Extract usage
             usage_data = getattr(response, "usage", None)
             usage = RequestUsage(
                 prompt_tokens=getattr(usage_data, "prompt_tokens", 0),
                 completion_tokens=getattr(usage_data, "completion_tokens", 0)
-            ) if usage_data else None
+            ) if usage_data else RequestUsage(prompt_tokens=0, completion_tokens=0)
 
-            # Handle function calls
-            function_calls = []
-            if getattr(message, "tool_calls", None):
-                from autogen_agentchat.messages import FunctionCall
-                
-                for tc in message.tool_calls:
-                    try:
-                        args = tc.function.arguments
-                        if isinstance(args, str):
-                            args = json.loads(args) if args else {}
-                        
-                        function_calls.append(FunctionCall(
-                            id=tc.id, 
-                            name=tc.function.name,
-                            arguments=json.dumps(args) if not isinstance(args, str) else args,
-                        ))
-                    except Exception as e:
-                        logger.error(f"Failed to parse tool call: {e}")
-
-            # Determine content and finish reason
-            if function_calls:
-                content = function_calls
-                finish_reason = FinishReason.TOOL_CALLS
+            content = message.content if message.content else ""
+            
+            if choice.finish_reason == "stop":
+                finish_reason = FinishReason.STOP
+            elif choice.finish_reason == "length":
+                finish_reason = FinishReason.LENGTH
             else:
-                
-                raw_content = message.content
-                content = raw_content
-                
-                if choice.finish_reason == "stop":
-                    finish_reason = FinishReason.STOP
-                elif choice.finish_reason == "length":
-                    finish_reason = FinishReason.LENGTH
-                else:
-                    finish_reason = FinishReason.OTHER
+                finish_reason = FinishReason.UNKNOWN
 
             return CreateResult(
                 content=content, 
                 usage=usage,
                 finish_reason=finish_reason, 
-                cached=False 
+                cached=False
             )
 
         except Exception as e:
-            logger.exception(f"Error calling llama server at {llama_base_url}")
+            logger.exception(f"Error calling LLM: {e}")
             return CreateResult(
-                content=f"Error calling Llama: {str(e)}", 
-                usage=None, 
-                finish_reason=FinishReason.ERROR,
-                cached=False 
+                content=f"Error: {str(e)}", 
+                usage=RequestUsage(prompt_tokens=0, completion_tokens=0),
+                finish_reason=FinishReason.UNKNOWN,
+                cached=False
             )
 
     async def create_stream(self, messages, **kwargs):
         raise NotImplementedError("Streaming not implemented")
 
-# Initialize with local client
+
+# Initialize model client
 model_client = LocalLlamaChatCompletionClient(client, llama_model)
 
 # ============================================================================
-# AGENT SETUP
+# CONVERSATION MEMORY STORAGE
 # ============================================================================
 
-assistant = AssistantAgent(
-    name="powerful_assistant",
-    system_message="""You are a helpful and concise AI assistant.
+conversation_memory = {}
 
-    Always answer the user's question **directly** based on the uploaded document, image, or audio file.
-    Do not explain your reasoning, do not describe your process, and do not say things like
-    'let me check', 'processing', or 'retrieving'.
+def get_conversation_history(session_id: str) -> List[Dict]:
+    """Retrieve conversation history for a session"""
+    return conversation_memory.get(session_id, [])
 
-    If the answer is found in the retrieved text, summarize it clearly more than 500 words
+
+def add_to_conversation_history(session_id: str, role: str, content: str):
+    """Add message to conversation history"""
+    if session_id not in conversation_memory:
+        conversation_memory[session_id] = []
     
+    conversation_memory[session_id].append({
+        "role": role,
+        "content": content
+    })
+    
+    # Keep last 20 messages
+    if len(conversation_memory[session_id]) > 20:
+        conversation_memory[session_id] = conversation_memory[session_id][-20:]
 
-    Your workflow is as follows:
-    1. A user provides a file and a question.
-    2. Identify the file type (PDF, image, or audio) and use the correct tool to process the file and add its content to the vector database.
-    3. Once the content is in the database, use the 'answer_question_from_db' tool to find the answer to the user's question.
-    4. Provide the final answer to the user.
-    """,
-    model_client=model_client,
-    tools=[
-        process_pdf_locally,
-        analyze_image_locally,
-        transcribe_audio_locally,
-        answer_question_from_db
-    ]
-)
 
-user_proxy = UserProxyAgent(name="user_proxy")
+def format_conversation_context(session_id: str) -> str:
+    """Format conversation history as context string"""
+    history = get_conversation_history(session_id)
+    
+    if not history or len(history) == 0:
+        return ""
+    
+    # Get last 5 exchanges
+    recent_history = history[-10:]  # Last 5 Q&A pairs
+    
+    context = "\n\n**Previous Conversation:**\n"
+    for msg in recent_history:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        context += f"{role}: {msg['content'][:150]}...\n"
+    
+    return context
 
-logger.info(" Assistant agent configured with tools")
+# ============================================================================
+# AUTOGEN ORCHESTRATOR WITH MEMORY
+# ============================================================================
 
+async def create_conversational_assistant(session_id: str):
+    """Create assistant agent for conversation only (no tool calling)"""
+    
+    conversation_context = format_conversation_context(session_id)
+    
+    system_message = f"""You are an intelligent AI assistant that helps users understand their documents.
+
+**Your capabilities:**
+- You can remember and reference previous conversations
+- You provide detailed, accurate answers based on document content
+- You are conversational and natural
+
+{conversation_context}
+
+**Instructions:**
+- Be helpful and conversational
+- Reference previous discussion when relevant
+- Provide comprehensive answers
+- If you don't know something, say so honestly"""
+
+    # Create assistant WITHOUT tools (no function calling needed)
+    return AssistantAgent(
+        name="assistant",
+        model_client=model_client,
+        system_message=system_message
+    )
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
 
 def safe_file_path(filename: str) -> Path:
-    """
-    Ensure filename doesn't contain path traversal attacks.
-    
-    Args:
-        filename: The filename from user input
-        
-    Returns:
-        Safe Path object
-        
-    Raises:
-        HTTPException: If filename is invalid
-    """
-    # Remove any path separators and get just the filename
+    """Ensure filename doesn't contain path traversal attacks"""
     safe_name = os.path.basename(filename)
     
     if not safe_name or safe_name != filename:
-        raise HTTPException(status_code=400, detail="Invalid filename - path traversal not allowed")
+        raise HTTPException(status_code=400, detail="Invalid filename")
     
-    # Create path in uploads directory
     file_path = Path("uploads") / safe_name
     
-    # Verify it's actually in uploads dir
     try:
         resolved_path = file_path.resolve()
         upload_dir = Path("uploads").resolve()
@@ -382,38 +401,380 @@ def safe_file_path(filename: str) -> Path:
     
     return file_path
 
+
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
-async def validate_file_type(file: UploadFile) -> str:
-    """
-    Validate file type by extension.
+# ============================================================================
+# API ENDPOINTS
+# ============================================================================
+
+@app.get("/")
+async def root():
+    return {
+        "status": "healthy",
+        "service": "Multi-Agent RAG System with AutoGen Memory",
+        "version": "3.0.0",
+        "features": [
+            "AutoGen orchestration",
+            "Multi-file upload",
+            "Conversation memory",
+            "Intelligent agent routing"
+        ]
+    }
+
+
+@app.get("/health")
+async def health_check():
+    try:
+        mongo_client.admin.command('ping')
+        mongo_status = "connected"
+    except Exception as e:
+        mongo_status = f"error: {str(e)}"
     
-    Args:
-        file: Uploaded file
+    return {
+        "status": "healthy",
+        "mongodb": mongo_status,
+        "vectorstore": "initialized",
+        "agents": "ready",
+        "autogen": "enabled",
+        "active_sessions": len(conversation_memory)
+    }
+
+
+@app.post("/uploadfile/")
+async def upload_multiple_files(request: Request):
+    """Upload multiple files for processing"""
+    try:
+        logger.info("=" * 80)
+        logger.info(" UPLOAD REQUEST")
+        logger.info("=" * 80)
         
-    Returns:
-        File extension (lowercase)
+        form = await request.form()
+        logger.info(f"Form keys: {list(form.keys())}")
         
-    Raises:
-        HTTPException: If file type is invalid
-    """
-    # Check extension
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="Filename is required")
+        # Extract files
+        files_list = []
+        for key in form.keys():
+            value = form.getlist(key) if hasattr(form, 'getlist') else [form[key]]
+            for item in value:
+                if hasattr(item, 'filename') and item.filename:
+                    files_list.append(item)
+        
+        logger.info(f"📎 Found {len(files_list)} file(s)")
+        
+        if not files_list:
+            raise HTTPException(status_code=400, detail="No files provided")
+        
+        # Create uploads directory
+        os.makedirs("uploads", exist_ok=True)
+        
+        uploaded_files = []
+        errors = []
+        
+        for idx, file in enumerate(files_list):
+            try:
+                logger.info(f"Processing {idx + 1}/{len(files_list)}: {file.filename}")
+                
+                ext = file.filename.split('.')[-1].lower()
+                allowed = ["pdf", "jpg", "jpeg", "png", "mp3", "wav"]
+                
+                if ext not in allowed:
+                    errors.append({
+                        "filename": file.filename,
+                        "error": f"Unsupported type '.{ext}'"
+                    })
+                    continue
+                
+                file_path = safe_file_path(file.filename)
+                content = await file.read()
+                
+                if len(content) > MAX_FILE_SIZE:
+                    errors.append({
+                        "filename": file.filename,
+                        "error": "File too large"
+                    })
+                    continue
+                
+                with open(file_path, "wb") as buffer:
+                    buffer.write(content)
+                
+                uploaded_files.append({
+                    "filename": file.filename,
+                    "file_type": ext,
+                    "size_bytes": len(content),
+                    "path": str(file_path)
+                })
+                
+                logger.info(f" Saved: {file.filename}")
+                
+            except Exception as e:
+                logger.error(f"   Error: {e}")
+                errors.append({
+                    "filename": file.filename if hasattr(file, 'filename') else "unknown",
+                    "error": str(e)
+                })
+        
+        response = {
+            "message": f"Processed {len(uploaded_files)}/{len(files_list)} files",
+            "files": uploaded_files
+        }
+        
+        if errors:
+            response["errors"] = errors
+        
+        logger.info(f"Upload complete: {len(uploaded_files)} successful")
+        
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.post("/query/")
+async def query_with_autogen_memory(request: Request):
+    """Query with file processing + AutoGen memory"""
+    try:
+        logger.info("=" * 80)
+        logger.info("🤖 QUERY WITH AUTOGEN")
+        logger.info("=" * 80)
+        
+        body = await request.json()
+        
+        question = body.get("question")
+        filenames = body.get("filenames", [])
+        session_id = body.get("session_id", "default")
+        
+        if not question:
+            raise HTTPException(status_code=400, detail="Missing question")
+        
+        logger.info(f"Question: {question}")
+        logger.info(f"Files: {filenames}")
+        logger.info(f"Session: {session_id}")
+        logger.info(f"History: {len(get_conversation_history(session_id))} messages")
+        
+        # Add to memory
+        add_to_conversation_history(session_id, "user", question)
+        
+        # ========== STEP 1: PROCESS FILES FIRST ==========
+        processing_results = []
+        
+        if filenames and len(filenames) > 0:
+            logger.info("📁 STEP 1: PROCESSING FILES")
+            logger.info("-" * 80)
+            
+            for filename in filenames:
+                file_path = safe_file_path(filename)
+                
+                if not file_path.exists():
+                    error_msg = f"File not found: {filename}"
+                    logger.error(error_msg)
+                    raise HTTPException(status_code=404, detail=error_msg)
+                
+                ext = filename.split('.')[-1].lower()
+                
+                logger.info(f"  📄 Processing: {filename} (type: {ext})")
+                
+                try:
+                    if ext == 'pdf':
+                        # CRITICAL: Call PDF processor and LOG the result
+                        logger.info(f"    Calling process_pdf_locally for {file_path}")
+                        result = await process_pdf_locally(str(file_path))
+                        logger.info(f"    Result: {result}")
+                        
+                        if result and "Error" not in result:
+                            processing_results.append(f"✓ PDF: {filename}")
+                            logger.info(f"    ✅ PDF processed successfully")
+                        else:
+                            processing_results.append(f"❌ PDF Error: {filename}")
+                            logger.error(f"    ❌ PDF processing returned error: {result}")
+                        
+                    elif ext in ['jpg', 'jpeg', 'png']:
+                        logger.info(f"    Calling analyze_image_locally for {file_path}")
+                        result = await analyze_image_locally(str(file_path))
+                        logger.info(f"    Result: {result}")
+                        processing_results.append(f"✓ Image: {filename}")
+                        
+                    elif ext in ['mp3', 'wav']:
+                        logger.info(f"    Calling transcribe_audio_locally for {file_path}")
+                        result = await transcribe_audio_locally(str(file_path))
+                        logger.info(f"    Result: {result}")
+                        processing_results.append(f"✓ Audio: {filename}")
+                    
+                    else:
+                        logger.warning(f"    ⚠️  Unsupported file type: {ext}")
+                        processing_results.append(f"⚠️  Unsupported: {filename}")
+                    
+                except Exception as e:
+                    logger.error(f"    ❌ EXCEPTION processing {filename}: {e}")
+                    logger.error(f"    Traceback:")
+                    logger.error(traceback.format_exc())
+                    processing_results.append(f"❌ Error: {filename} - {str(e)}")
+            
+            logger.info(f"✓ File processing complete")
+            logger.info("-" * 80)
+        
+        # Add a small delay to ensure MongoDB indexing completes
+        await asyncio.sleep(0.5)
+        
+        # ========== STEP 2: QUERY DATABASE ==========
+        logger.info("🔍 STEP 2: QUERYING DATABASE")
+        logger.info("-" * 80)
+        
+        try:
+            # Query MongoDB for relevant chunks
+            logger.info(f"  Calling answer_question_from_db...")
+            logger.info(f"    Question: {question}")
+            logger.info(f"    Filenames: {filenames}")
+            
+            db_answer = await answer_question_from_db(
+                question=question,
+                filenames=filenames
+            )
+            
+            if isinstance(db_answer, str):
+                answer_from_db = db_answer
+            elif hasattr(db_answer, "content"):
+                answer_from_db = db_answer.content
+            else:
+                answer_from_db = str(db_answer)
+            
+            logger.info(f"✓ Database answer received: {len(answer_from_db)} chars")
+            logger.info(f"  Preview: {answer_from_db[:300]}...")
+            logger.info("-" * 80)
+            
+        except Exception as e:
+            logger.error(f"❌ Database query EXCEPTION: {e}")
+            logger.error(traceback.format_exc())
+            answer_from_db = f"Error querying database: {str(e)}"
+        
+        # ========== STEP 3: AUTOGEN FOR CONVERSATIONAL RESPONSE ==========
+        logger.info("💬 STEP 3: AUTOGEN CONVERSATION")
+        logger.info("-" * 80)
+        
+        try:
+            # Create assistant with memory
+            assistant = await create_conversational_assistant(session_id)
+            
+            # Build prompt with database answer
+            autogen_prompt = f"""You are answering based on information retrieved from uploaded documents.
+
+**User's Question:** {question}
+
+**Information Retrieved from Documents:**
+{answer_from_db}
+
+**Your Task:**
+- Answer the user's question using ONLY the information provided above
+- Be accurate and cite the document when appropriate
+- If the information doesn't fully answer the question, say so
+- Be conversational but stay factual
+- If this is a follow-up question, reference our previous conversation naturally"""
+
+            # Create team
+            termination = MaxMessageTermination(max_messages=3)
+            team = RoundRobinGroupChat(
+                participants=[assistant],
+                termination_condition=termination
+            )
+            
+            logger.info("🚀 Running AutoGen...")
+            
+            # Run AutoGen
+            result = await team.run(task=autogen_prompt)
+            
+            logger.info(f"✓ AutoGen completed with {len(result.messages)} messages")
+            
+            # Extract answer
+            final_answer = ""
+            if result.messages:
+                for msg in reversed(result.messages):
+                    if hasattr(msg, 'content') and msg.content:
+                        content = str(msg.content).strip()
+                        if content and len(content) > 20:
+                            final_answer = content
+                            logger.info(f"  Found answer: {len(final_answer)} chars")
+                            break
+            
+            if not final_answer:
+                logger.warning("  No answer from AutoGen, using database answer")
+                final_answer = answer_from_db
+                
+            logger.info("-" * 80)
+            
+        except Exception as e:
+            logger.error(f"❌ AutoGen EXCEPTION: {e}")
+            logger.error(traceback.format_exc())
+            final_answer = answer_from_db
+        
+        # ========== STEP 4: BUILD RESPONSE ==========
+        
+        # Combine processing results with answer
+        if processing_results:
+            full_response = "\n".join(processing_results) + "\n\n" + final_answer
+        else:
+            full_response = final_answer
+        
+        # Save to memory
+        add_to_conversation_history(session_id, "assistant", full_response)
+        
+        logger.info("=" * 80)
+        logger.info("✓ COMPLETE")
+        logger.info(f"  Response: {len(full_response)} chars")
+        logger.info(f"  Session turns: {len(get_conversation_history(session_id))}")
+        logger.info("=" * 80)
+        
+        return {
+            "answer": full_response,
+            "session_id": session_id,
+            "files_processed": filenames,
+            "conversation_turn": len(get_conversation_history(session_id)),
+            "processing_summary": processing_results
+        }
     
-    ext = file.filename.split('.')[-1].lower()
-    allowed = ["pdf", "jpg", "jpeg", "png", "mp3", "wav"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ QUERY FAILED WITH EXCEPTION: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/clear-session/{session_id}")
+async def clear_session(session_id: str):
+    """Clear conversation memory for a session"""
+    if session_id in conversation_memory:
+        del conversation_memory[session_id]
+        logger.info(f"  Cleared session: {session_id}")
+        return {"message": f"Session {session_id} cleared", "success": True}
+    return {"message": "Session not found", "success": False}
+
+
+@app.delete("/cleanup/{filename}")
+async def cleanup_file(filename: str):
+    """Delete an uploaded file"""
+    try:
+        file_path = safe_file_path(filename)
+        
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+        
+        file_path.unlink()
+        logger.info(f"  Deleted: {filename}")
+        
+        return {"message": f"Successfully deleted {filename}"}
     
-    if ext not in allowed:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(allowed)}"
-        )
-    
-    return ext
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================================================
-# FILE CLEANUP
+# CLEANUP
 # ============================================================================
 
 @atexit.register
@@ -430,202 +791,11 @@ def cleanup_uploads():
             except Exception as e:
                 logger.error(f"Failed to delete {file_path}: {e}")
         if file_count > 0:
-            logger.info(f"Cleaned up {file_count} uploaded files")
+            logger.info(f"🧹 Cleaned up {file_count} files")
+
 
 # ============================================================================
-# API ENDPOINTS
-# ============================================================================
-
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "Multi-Agent RAG System",
-        "version": "1.0.0"
-    }
-
-@app.get("/health")
-async def health_check():
-    """Detailed health check"""
-    try:
-        # Test MongoDB connection
-        mongo_client.admin.command('ping')
-        mongo_status = "connected"
-    except Exception as e:
-        mongo_status = f"error: {str(e)}"
-    
-    return {
-        "status": "healthy",
-        "mongodb": mongo_status,
-        "vectorstore": "initialized" if vectorstore else "not initialized",
-        "agents": "ready"
-    }
-
-@app.post("/uploadfile/")
-async def process_file(file: UploadFile = File(...)):
-    """
-    Upload a file for processing.
-    
-    Supported formats: PDF, JPG, JPEG, PNG, MP3, WAV
-    """
-    try:
-        logger.info(f"Received file upload: {file.filename}")
-        
-        # Validate file type
-        ext = await validate_file_type(file)
-        
-        # Create safe file path
-        file_path = safe_file_path(file.filename)
-        
-        # Create uploads directory
-        os.makedirs("uploads", exist_ok=True)
-        
-        # Check file size
-        content = await file.read()
-        if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"File too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB"
-            )
-        
-        # Write file
-        with open(file_path, "wb") as buffer:
-            buffer.write(content)
-        
-        logger.info(f" Saved file: {file.filename} ({len(content)} bytes)")
-        
-        return {
-            "message": f"{file.filename} uploaded successfully",
-            "filename": file.filename,
-            "file_type": ext,
-            "size_bytes": len(content)
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        tb = traceback.format_exc()
-        logger.error(f"Upload failed: {tb}")
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-    
-def clean_llm_response(content: str) -> str:
-    
-    return content
-
-@app.post("/query/")
-async def query_agents(request: Dict[str, str]):
-    question = request.get("question")
-    filename = request.get("filename")
-    file_type = request.get("file_type")
-
-    ext = filename.split('.')[-1].lower()
-    if file_type not in ["pdf", "jpg", "jpeg", "png", "mp3", "wav"]:
-        file_type = ext
-    elif file_type != ext:
-        logger.warning(f"File type mismatch: got {file_type}, actual {ext}. Using {ext}.")
-        file_type = ext
-
-    if not question or not filename or not file_type:
-        raise HTTPException(
-            status_code=400, 
-            detail="Missing required fields: question, filename, or file_type"
-        )
-
-    try:
-        file_path = safe_file_path(filename)
-        
-        if not file_path.exists():
-            raise HTTPException(
-                status_code=404, 
-                detail=f"File '{filename}' not found. Please upload it first."
-            )
-
-        logger.info(f"Processing query for {filename}: {question[:100]}...")
-
-        # ==================== STEP 1: PROCESS FILE ====================
-        try:
-            if file_type in ["jpg", "jpeg", "png"]:
-                file_processing_message = await analyze_image_locally(str(file_path))
-            elif file_type == "pdf":
-                file_processing_message = await process_pdf_locally(str(file_path))
-            elif file_type in ["mp3", "wav"]:
-                file_processing_message = await transcribe_audio_locally(str(file_path))
-            else:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Unsupported file type: {file_type}"
-                )
-        except Exception as e:
-            logger.error(f"File processing failed: {e}")
-            raise HTTPException(
-                status_code=500, 
-                detail=f"File processing failed: {str(e)}"
-            )
-
-        logger.info(f"✓ File processing complete: {file_processing_message.content[:100]}...")
-
-        # ==================== STEP 2: QUERY DIRECTLY ====================
-        try:
-            logger.info(f"🔍 Calling answer_question_from_db directly...")
-            
-            # CALL QA FUNCTION DIRECTLY - NO AUTOGEN WRAPPER
-            answer_message = await asyncio.wait_for(
-                answer_question_from_db(question=question, filename=filename),
-                timeout=60.0
-            )
-            
-            # Extract answer
-            if hasattr(answer_message, "content"):
-                answer = answer_message.content
-            else:
-                answer = str(answer_message)
-
-            logger.info(f"✓ Query completed for {filename}")
-            logger.info(f"   Answer length: {len(answer)} chars")
-            logger.info(f"   Answer preview: {answer[:150]}...")
-
-            return {"answer": answer}
-
-        except asyncio.TimeoutError:
-            logger.error("Query timeout")
-            raise HTTPException(
-                status_code=504, 
-                detail="Request timeout - processing took too long (>60s)"
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        tb = traceback.format_exc()
-        logger.error(f"Query failed:\n{tb}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Query processing failed: {str(e)}"
-        )
-
-@app.delete("/cleanup/{filename}")
-async def cleanup_file(filename: str):
-    """Delete an uploaded file"""
-    try:
-        file_path = safe_file_path(filename)
-        
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail=f"File '{filename}' not found")
-        
-        file_path.unlink()
-        logger.info(f"Deleted file: {filename}")
-        
-        return {"message": f"Successfully deleted {filename}"}
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Cleanup failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
-
-# ============================================================================
-# SERVER STARTUP
+# STARTUP
 # ============================================================================
 
 if __name__ == "__main__":
@@ -634,11 +804,11 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     host = os.getenv("HOST", "0.0.0.0")
     
-    logger.info(f"Starting server on {host}:{port}")
+    logger.info(f" Starting AutoGen Multi-Agent RAG System on {host}:{port}")
     
     uvicorn.run(
-        app, 
-        host=host, 
+        app,
+        host=host,
         port=port,
         log_level="info"
     )
