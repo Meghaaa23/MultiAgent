@@ -68,17 +68,17 @@ def initialize_redis() -> bool:
         
         # Test connection
         redis_client.ping()
-        logger.info(f"✓ Redis connected successfully to {connection_info}")
+        logger.info(f" Redis connected successfully to {connection_info}")
         return True
     
     except redis.ConnectionError as e:
-        logger.warning(f"⚠️  Redis connection failed: {e}")
-        logger.warning("⚠️  Continuing without Redis - caching will be disabled")
+        logger.warning(f"  Redis connection failed: {e}")
+        logger.warning("  Continuing without Redis - caching will be disabled")
         redis_client = None
         return False
     
     except Exception as e:
-        logger.error(f"❌ Unexpected error during Redis initialization: {e}")
+        logger.error(f" Unexpected error during Redis initialization: {e}")
         redis_client = None
         return False
 

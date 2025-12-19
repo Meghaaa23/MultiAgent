@@ -18,7 +18,7 @@ def set_vectorstore(vectorstore):
     """Set the vector store instance"""
     global _vectorstore
     _vectorstore = vectorstore
-    logger.info("✓ PDF Agent: Vector store configured")
+    logger.info(" PDF Agent: Vector store configured")
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
@@ -42,7 +42,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]
 async def process_pdf_locally(file_path: str) -> str:
     """Process PDF and store chunks in MongoDB"""
     try:
-        logger.info(f"📄 PDF Agent: Processing {file_path}")
+        logger.info(f" PDF Agent: Processing {file_path}")
         
         # Validate file exists
         if not os.path.exists(file_path):
@@ -105,25 +105,25 @@ async def process_pdf_locally(file_path: str) -> str:
         
         # Store in MongoDB
         if not _vectorstore:
-            logger.error("❌ Vector store not initialized!")
+            logger.error(" Vector store not initialized!")
             return "Error: Vector store not initialized"
         
         if not all_chunks:
-            logger.warning("⚠️  No text extracted from PDF")
+            logger.warning("  No text extracted from PDF")
             return f"Warning: No text found in {filename}"
         
         try:
             logger.info(f"  Storing {len(all_chunks)} chunks in MongoDB...")
             _vectorstore.add_documents(all_chunks)
-            logger.info(f"✓ Successfully stored {len(all_chunks)} chunks")
+            logger.info(f" Successfully stored {len(all_chunks)} chunks")
         except Exception as e:
-            logger.error(f"❌ Failed to store in MongoDB: {e}")
+            logger.error(f" Failed to store in MongoDB: {e}")
             return f"Error storing chunks: {str(e)}"
         
         return f"✓ Processed {filename}: {total_pages} pages, {len(all_chunks)} chunks"
     
     except Exception as e:
-        logger.error(f"❌ PDF processing failed: {e}")
+        logger.error(f" PDF processing failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return f"Error: {str(e)}"

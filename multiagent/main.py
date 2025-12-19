@@ -99,7 +99,7 @@ if not mongodb_uri:
     raise ValueError("MONGODB_ATLAS_URI environment variable is required")
 
 try:
-    logger.info("🔌 Connecting to MongoDB Atlas...")
+    logger.info(" Connecting to MongoDB Atlas...")
 
     mongo_client = MongoClient(
         mongodb_uri,
@@ -111,8 +111,8 @@ try:
     logger.info("✓ MongoDB client initialized (TLS verified)")
 
 except Exception as e:
-    logger.warning(f"⚠️  MongoDB initialization warning: {e}")
-    logger.warning("⚠️  Will attempt connection when needed")
+    logger.warning(f"  MongoDB initialization warning: {e}")
+    logger.warning(" Will attempt connection when needed")
     mongo_client = None
 
 if mongo_client:
@@ -125,13 +125,13 @@ if mongo_client:
             index_name="vector_index",
             text_key="page_content"
         )
-        logger.info("✓ Vector store initialized")
+        logger.info("Vector store initialized")
 
     except Exception as e:
-        logger.error(f"❌ Failed to initialize vectorstore: {e}")
+        logger.error(f" Failed to initialize vectorstore: {e}")
         vectorstore = None
 else:
-    logger.error("❌ MongoDB not available - system will not work properly")
+    logger.error(" MongoDB not available - system will not work properly")
     vectorstore = None
 
 
@@ -224,7 +224,7 @@ class LocalLlamaChatCompletionClient:
             "context_length": 4096,
             "vision": False,
             "supports_chat": True,
-            "function_calling": False,  # Disable function calling to avoid errors
+            "function_calling": False,  
             "json_output": False,
             "family": "llama"
         }
@@ -460,7 +460,7 @@ async def upload_multiple_files(request: Request):
                 if hasattr(item, 'filename') and item.filename:
                     files_list.append(item)
         
-        logger.info(f"📎 Found {len(files_list)} file(s)")
+        logger.info(f"Found {len(files_list)} file(s)")
         
         if not files_list:
             raise HTTPException(status_code=400, detail="No files provided")
@@ -539,7 +539,7 @@ async def query_with_autogen_memory(request: Request):
     """Query with file processing + AutoGen memory"""
     try:
         logger.info("=" * 80)
-        logger.info("🤖 QUERY WITH AUTOGEN")
+        logger.info("QUERY WITH AUTOGEN")
         logger.info("=" * 80)
         
         body = await request.json()
@@ -563,7 +563,7 @@ async def query_with_autogen_memory(request: Request):
         processing_results = []
         
         if filenames and len(filenames) > 0:
-            logger.info("📁 STEP 1: PROCESSING FILES")
+            logger.info(" STEP 1: PROCESSING FILES")
             logger.info("-" * 80)
             
             for filename in filenames:
@@ -576,7 +576,7 @@ async def query_with_autogen_memory(request: Request):
                 
                 ext = filename.split('.')[-1].lower()
                 
-                logger.info(f"  📄 Processing: {filename} (type: {ext})")
+                logger.info(f"  Processing: {filename} (type: {ext})")
                 
                 try:
                     if ext == 'pdf':
@@ -586,11 +586,11 @@ async def query_with_autogen_memory(request: Request):
                         logger.info(f"    Result: {result}")
                         
                         if result and "Error" not in result:
-                            processing_results.append(f"✓ PDF: {filename}")
-                            logger.info(f"    ✅ PDF processed successfully")
+                            processing_results.append(f"PDF: {filename}")
+                            logger.info(f"  PDF processed successfully")
                         else:
-                            processing_results.append(f"❌ PDF Error: {filename}")
-                            logger.error(f"    ❌ PDF processing returned error: {result}")
+                            processing_results.append(f" PDF Error: {filename}")
+                            logger.error(f"     PDF processing returned error: {result}")
                         
                     elif ext in ['jpg', 'jpeg', 'png']:
                         logger.info(f"    Calling analyze_image_locally for {file_path}")
@@ -605,23 +605,23 @@ async def query_with_autogen_memory(request: Request):
                         processing_results.append(f"✓ Audio: {filename}")
                     
                     else:
-                        logger.warning(f"    ⚠️  Unsupported file type: {ext}")
-                        processing_results.append(f"⚠️  Unsupported: {filename}")
+                        logger.warning(f"  Unsupported file type: {ext}")
+                        processing_results.append(f"  Unsupported: {filename}")
                     
                 except Exception as e:
-                    logger.error(f"    ❌ EXCEPTION processing {filename}: {e}")
+                    logger.error(f"  EXCEPTION processing {filename}: {e}")
                     logger.error(f"    Traceback:")
                     logger.error(traceback.format_exc())
-                    processing_results.append(f"❌ Error: {filename} - {str(e)}")
+                    processing_results.append(f"Error: {filename} - {str(e)}")
             
-            logger.info(f"✓ File processing complete")
+            logger.info(f"File processing complete")
             logger.info("-" * 80)
         
         # Add a small delay to ensure MongoDB indexing completes
         await asyncio.sleep(0.5)
         
         # ========== STEP 2: QUERY DATABASE ==========
-        logger.info("🔍 STEP 2: QUERYING DATABASE")
+        logger.info(" STEP 2: QUERYING DATABASE")
         logger.info("-" * 80)
         
         try:
@@ -642,17 +642,17 @@ async def query_with_autogen_memory(request: Request):
             else:
                 answer_from_db = str(db_answer)
             
-            logger.info(f"✓ Database answer received: {len(answer_from_db)} chars")
+            logger.info(f" Database answer received: {len(answer_from_db)} chars")
             logger.info(f"  Preview: {answer_from_db[:300]}...")
             logger.info("-" * 80)
             
         except Exception as e:
-            logger.error(f"❌ Database query EXCEPTION: {e}")
+            logger.error(f" Database query EXCEPTION: {e}")
             logger.error(traceback.format_exc())
             answer_from_db = f"Error querying database: {str(e)}"
         
         # ========== STEP 3: AUTOGEN FOR CONVERSATIONAL RESPONSE ==========
-        logger.info("💬 STEP 3: AUTOGEN CONVERSATION")
+        logger.info(" STEP 3: AUTOGEN CONVERSATION")
         logger.info("-" * 80)
         
         try:
@@ -681,12 +681,12 @@ async def query_with_autogen_memory(request: Request):
                 termination_condition=termination
             )
             
-            logger.info("🚀 Running AutoGen...")
+            logger.info(" Running AutoGen...")
             
             # Run AutoGen
             result = await team.run(task=autogen_prompt)
             
-            logger.info(f"✓ AutoGen completed with {len(result.messages)} messages")
+            logger.info(f"AutoGen completed with {len(result.messages)} messages")
             
             # Extract answer
             final_answer = ""
@@ -706,7 +706,7 @@ async def query_with_autogen_memory(request: Request):
             logger.info("-" * 80)
             
         except Exception as e:
-            logger.error(f"❌ AutoGen EXCEPTION: {e}")
+            logger.error(f" AutoGen EXCEPTION: {e}")
             logger.error(traceback.format_exc())
             final_answer = answer_from_db
         
@@ -722,7 +722,7 @@ async def query_with_autogen_memory(request: Request):
         add_to_conversation_history(session_id, "assistant", full_response)
         
         logger.info("=" * 80)
-        logger.info("✓ COMPLETE")
+        logger.info(" COMPLETE")
         logger.info(f"  Response: {len(full_response)} chars")
         logger.info(f"  Session turns: {len(get_conversation_history(session_id))}")
         logger.info("=" * 80)
@@ -738,9 +738,10 @@ async def query_with_autogen_memory(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ QUERY FAILED WITH EXCEPTION: {e}")
+        logger.error(f" QUERY FAILED WITH EXCEPTION: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/clear-session/{session_id}")
 async def clear_session(session_id: str):
@@ -791,7 +792,7 @@ def cleanup_uploads():
             except Exception as e:
                 logger.error(f"Failed to delete {file_path}: {e}")
         if file_count > 0:
-            logger.info(f"🧹 Cleaned up {file_count} files")
+            logger.info(f" Cleaned up {file_count} files")
 
 
 # ============================================================================
