@@ -69,7 +69,7 @@ async def ingest_pdf_pages(file_path: str, pages_data) -> TextMessage:
         logger.info(f"Storing {len(docs)} PDF chunks in vector database...")
         await asyncio.to_thread(vectorstore.add_documents, docs)
         
-        success_msg = f"✓ Ingested {len(docs)} PDF chunks from {filename}"
+        success_msg = f" Ingested {len(docs)} PDF chunks from {filename}"
         logger.info(success_msg)
         
         return TextMessage(content=success_msg, source="data_ingestion")
@@ -120,7 +120,7 @@ async def ingest_text_with_chunking(file_path: str, raw_text: str) -> TextMessag
         
         await asyncio.to_thread(vectorstore.add_documents, docs)
         
-        success_msg = f"✓ Ingested {len(chunks)} chunks from {filename}"
+        success_msg = f" Ingested {len(chunks)} chunks from {filename}"
         logger.info(success_msg)
         
         return TextMessage(content=success_msg, source="data_ingestion")

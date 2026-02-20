@@ -42,7 +42,7 @@ async def transcribe_audio_locally(audio_file_path: str) -> TextMessage:
     cached = get_cached_result(f"audio:{audio_file_path}")
     if cached:
         logger.info(f"Using cached transcript for {audio_file_path}")
-        print(f"✓ Cached transcription loaded ({len(cached)} characters)")
+        print(f" Cached transcription loaded ({len(cached)} characters)")
         # Ingest the cached transcript so RAG can retrieve it
         return await ingest_text_with_chunking(audio_file_path, cached)
     
@@ -69,8 +69,8 @@ async def transcribe_audio_locally(audio_file_path: str) -> TextMessage:
             logger.info("Transcribing audio with Google Speech Recognition...")
             transcript = await asyncio.to_thread(r.recognize_google, audio_data)
         
-        logger.info(f"✓ Transcribed {len(transcript)} characters from {os.path.basename(audio_file_path)}")
-        print(f"✓ Audio transcription complete: {len(transcript)} characters")
+        logger.info(f" Transcribed {len(transcript)} characters from {os.path.basename(audio_file_path)}")
+        print(f" Audio transcription complete: {len(transcript)} characters")
         
         # Cache the result
         cache_result(f"audio:{audio_file_path}", transcript)

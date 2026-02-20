@@ -14,6 +14,7 @@ from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_core.documents import Document
+from agents.threat_modeling_agent import ThreatModelingAgent
 from typing import List, Dict, Any
 import logging
 import traceback
@@ -99,7 +100,7 @@ if not mongodb_uri:
     raise ValueError("MONGODB_ATLAS_URI environment variable is required")
 
 try:
-    logger.info("🔗 Connecting to MongoDB Atlas...")
+    logger.info(" Connecting to MongoDB Atlas...")
 
     mongo_client = MongoClient(
         mongodb_uri,
@@ -108,11 +109,11 @@ try:
         tlsCAFile=certifi.where()
     )
 
-    logger.info("✓ MongoDB client initialized (TLS verified)")
+    logger.info(" MongoDB client initialized (TLS verified)")
 
 except Exception as e:
-    logger.warning(f"⚠ MongoDB initialization warning: {e}")
-    logger.warning("⚠ Will attempt connection when needed")
+    logger.warning(f"MongoDB initialization warning: {e}")
+    logger.warning("Will attempt connection when needed")
     mongo_client = None
 
 if mongo_client:
@@ -125,13 +126,13 @@ if mongo_client:
             index_name="vector_index",
             text_key="page_content"
         )
-        logger.info("✓ Vector store initialized")
+        logger.info(" Vector store initialized")
 
     except Exception as e:
-        logger.error(f"❌ Failed to initialize vectorstore: {e}")
+        logger.error(f" Failed to initialize vectorstore: {e}")
         vectorstore = None
 else:
-    logger.error("❌ MongoDB not available - system will not work properly")
+    logger.error(" MongoDB not available - system will not work properly")
     vectorstore = None
 
 
@@ -155,7 +156,17 @@ set_config(config_list)
 set_ingest_vectorstore(vectorstore)
 set_url_vectorstore(vectorstore)
 
-logger.info("✓ All agents initialized")
+try:
+    threat_modeling_agent = ThreatModelingAgent(
+        mongodb_client=mongo_client,
+        openai_client=client  
+    )
+    logger.info(" Threat Modeling Agent initialized")
+except Exception as e:
+    logger.warning(f" Threat Modeling Agent initialization failed: {e}")
+    threat_modeling_agent = None
+
+logger.info("All agents initialized")
 
 # ============================================================================
 # CUSTOM LLM CLIENT FOR AUTOGEN
@@ -320,10 +331,10 @@ async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
     Teams persist across requests and maintain conversation history.
     """
     if session_id in session_teams:
-        logger.info(f"♻️ Reusing existing team for session: {session_id}")
+        logger.info(f" Reusing existing team for session: {session_id}")
         return session_teams[session_id]
     
-    logger.info(f"🆕 Creating new AutoGen team for session: {session_id}")
+    logger.info(f" Creating new AutoGen team for session: {session_id}")
     
     # Create RAG assistant with document context
     rag_assistant = AssistantAgent(
@@ -357,7 +368,7 @@ async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
     # Store team for future use
     session_teams[session_id] = team
     
-    logger.info(f"✓ Team created and stored for session: {session_id}")
+    logger.info(f" Team created and stored for session: {session_id}")
     
     return team
 
@@ -366,7 +377,7 @@ def clear_session_team(session_id: str):
     """Clear AutoGen team for a session"""
     if session_id in session_teams:
         del session_teams[session_id]
-        logger.info(f"🗑️ Cleared team for session: {session_id}")
+        logger.info(f" Cleared team for session: {session_id}")
     
     if session_id in session_documents:
         del session_documents[session_id]
@@ -431,17 +442,24 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 async def root():
     return {
         "status": "healthy",
-        "service": "Multi-Agent RAG System with Full AutoGen",
-        "version": "4.0.0",
+        "service": "Multi-Agent RAG System with Threat Modeling",
+        "version": "5.0.0",  
         "features": [
             "Full AutoGen orchestration",
             "Persistent conversation teams",
             "Native conversation memory",
-            "Optional document upload",
-            "Multi-document RAG"
-        ]
+            "Multi-document RAG",
+            "Threat Modeling (STRIDE framework)",
+            "Security Analysis (CISA/IEEE/Intel TDX)"
+        ],
+        "endpoints": {
+            "/query/": "General queries with AutoGen (auto-routes security questions)",
+            "/threat-modeling/": "Dedicated security analysis endpoint",
+            "/health": "System health check",
+            "/documents": "List all documents",
+            "/sessions": "List active sessions"
+        }
     }
-
 
 @app.get("/health")
 async def health_check():
@@ -451,13 +469,24 @@ async def health_check():
     except Exception as e:
         mongo_status = f"error: {str(e)}"
     
+    
+    threat_modeling_status = "available" if threat_modeling_agent else "not initialized"
+    
     return {
         "status": "healthy",
         "mongodb": mongo_status,
         "vectorstore": "initialized",
         "agents": "ready",
         "autogen": "enabled",
-        "active_sessions": len(session_teams)
+        "threat_modeling": threat_modeling_status,  
+        "active_sessions": len(session_teams),
+        "features": [
+            "Multi-document RAG",
+            "AutoGen orchestration",
+            "Persistent conversations",
+            "Threat modeling (STRIDE framework)",  
+            "Security analysis (CISA/IEEE/Intel)"  
+        ]
     }
 
 
@@ -506,7 +535,7 @@ async def upload_multiple_files(request: Request):
     """Upload multiple files for processing"""
     try:
         logger.info("=" * 80)
-        logger.info("📤 UPLOAD REQUEST")
+        logger.info(" UPLOAD REQUEST")
         logger.info("=" * 80)
         
         form = await request.form()
@@ -563,10 +592,10 @@ async def upload_multiple_files(request: Request):
                     "path": str(file_path)
                 })
                 
-                logger.info(f"✓ Saved: {file.filename}")
+                logger.info(f" Saved: {file.filename}")
                 
             except Exception as e:
-                logger.error(f"❌ Error: {e}")
+                logger.error(f" Error: {e}")
                 errors.append({
                     "filename": file.filename if hasattr(file, 'filename') else "unknown",
                     "error": str(e)
@@ -584,14 +613,14 @@ async def upload_multiple_files(request: Request):
         if errors:
             response["errors"] = errors
         
-        logger.info(f"✓ Upload complete: {len(uploaded_files)} successful")
+        logger.info(f" Upload complete: {len(uploaded_files)} successful")
         
         return response
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Upload failed: {e}")
+        logger.error(f" Upload failed: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
@@ -599,10 +628,16 @@ async def upload_multiple_files(request: Request):
 async def query_with_full_autogen(request: Request):
     """
     Query with Full AutoGen - native conversation management
+    Enhanced with automatic threat modeling detection
+    
+    Routes:
+    - Security questions (no docs) → Threat Modeling Agent
+    - Security questions (with docs) → AutoGen RAG (future: hybrid)
+    - General questions → AutoGen RAG
     """
     try:
         logger.info("=" * 80)
-        logger.info("🤖 QUERY WITH FULL AUTOGEN")
+        logger.info(" QUERY REQUEST")
         logger.info("=" * 80)
         
         body = await request.json()
@@ -612,15 +647,82 @@ async def query_with_full_autogen(request: Request):
         session_id = body.get("session_id", "default")
         uploaded_files = body.get("uploaded_files", [])
         use_all_docs = body.get("use_all_docs", False)
+        force_threat_modeling = body.get("use_threat_modeling", False)  # NEW: explicit flag
         
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
         
         logger.info(f"Question: {question}")
+        logger.info(f"Session: {session_id}")
+        
+        # ========== NEW: THREAT MODELING ROUTING LOGIC ==========
+        
+        # Detect if this is a security query
+        is_security_query = (
+            threat_modeling_agent and 
+            threat_modeling_agent.is_security_query(question)
+        )
+        
+        # Check for document context
+        has_new_uploads = uploaded_files and len(uploaded_files) > 0
+        has_existing_files = (
+            (filenames and len(filenames) > 0) or 
+            (session_id in session_documents and session_documents[session_id]) or
+            use_all_docs
+        )
+        
+        # ROUTING DECISION: Use Threat Modeling if security query without documents
+        if force_threat_modeling or (is_security_query and not has_new_uploads and not has_existing_files):
+            logger.info("  ROUTING: Threat Modeling Agent")
+            logger.info("  Reason: Security query with no document context")
+            logger.info("-" * 80)
+            
+            try:
+                result = await threat_modeling_agent.analyze(
+                    user_query=question,
+                    verbose=True
+                )
+                
+                logger.info("=" * 80)
+                logger.info("✓ THREAT MODELING COMPLETE")
+                logger.info(f"  Report length: {len(result['report'])} chars")
+                logger.info(f"  Sources: {result['reasoning_chain']['research_summary']['sources_used']}")
+                logger.info("=" * 80)
+                
+                return {
+                    "answer": result["report"],
+                    "session_id": session_id,
+                    "query_type": "threat_modeling",
+                    "reasoning_chain": result["reasoning_chain"],
+                    "sources_used": result["reasoning_chain"]["research_summary"]["sources_used"],
+                    "total_findings": result["reasoning_chain"]["research_summary"]["total_findings"],
+                    "routed_to": "threat_modeling_agent",
+                    "files_searched": "knowledge_base",
+                    "files_processed": [],
+                    "conversation_messages": 0,
+                    "processing_summary": [],
+                    "search_scope": "security_knowledge_base",
+                    "team_persistent": False
+                }
+                
+            except Exception as e:
+                logger.error(f"  Threat modeling failed: {e}")
+                logger.error(traceback.format_exc())
+                logger.warning("  Falling back to AutoGen RAG flow")
+                # Fall through to normal AutoGen flow below
+        
+        else:
+            logger.info(" ROUTING: AutoGen Multi-Agent RAG")
+            if is_security_query:
+                logger.info("  Note: Security query but has document context - using RAG")
+                logger.info("  (Future enhancement: hybrid threat modeling + document analysis)")
+            logger.info("-" * 80)
+        
+        # ========== EXISTING AUTOGEN RAG FLOW (UNCHANGED) ==========
+        
         logger.info(f"Target Files: {filenames}")
         logger.info(f"Newly Uploaded: {uploaded_files}")
         logger.info(f"Use All Docs: {use_all_docs}")
-        logger.info(f"Session: {session_id}")
         
         # ========== STEP 1: PROCESS NEWLY UPLOADED FILES ==========
         processing_results = []
@@ -651,7 +753,7 @@ async def query_with_full_autogen(request: Request):
                             if filename not in session_documents[session_id]:
                                 session_documents[session_id].append(filename)
                         else:
-                            processing_results.append(f"❌ PDF Error: {filename}")
+                            processing_results.append(f"✗ PDF Error: {filename}")
                         
                     elif ext in ['jpg', 'jpeg', 'png']:
                         result = await analyze_image_locally(str(file_path))
@@ -673,19 +775,19 @@ async def query_with_full_autogen(request: Request):
                         processing_results.append(f"⚠ Unsupported: {filename}")
                     
                 except Exception as e:
-                    logger.error(f"  EXCEPTION processing {filename}: {e}")
-                    processing_results.append(f"❌ Error: {filename} - {str(e)}")
+                    logger.error(f"  ✗ EXCEPTION processing {filename}: {e}")
+                    processing_results.append(f"✗ Error: {filename} - {str(e)}")
             
             logger.info(f"✓ File processing complete")
             logger.info("-" * 80)
             
             await asyncio.sleep(0.5)
         else:
-            logger.info("📋 STEP 1: NO NEW FILES")
+            logger.info("📁 STEP 1: NO NEW FILES")
             logger.info("-" * 80)
         
         # ========== STEP 2: DETERMINE SEARCH SCOPE ==========
-        logger.info("🎯 STEP 2: DETERMINING SEARCH SCOPE")
+        logger.info("🔍 STEP 2: DETERMINING SEARCH SCOPE")
         logger.info("-" * 80)
         
         search_filenames = []
@@ -707,7 +809,7 @@ async def query_with_full_autogen(request: Request):
         logger.info("-" * 80)
         
         # ========== STEP 3: RETRIEVE RELEVANT CONTENT ==========
-        logger.info("🔍 STEP 3: RETRIEVING RELEVANT CONTENT")
+        logger.info("📚 STEP 3: RETRIEVING RELEVANT CONTENT")
         logger.info("-" * 80)
         
         try:
@@ -728,7 +830,7 @@ async def query_with_full_autogen(request: Request):
             logger.info("-" * 80)
             
         except Exception as e:
-            logger.error(f"❌ Retrieval EXCEPTION: {e}")
+            logger.error(f"✗ Retrieval EXCEPTION: {e}")
             logger.error(traceback.format_exc())
             retrieved_context = f"Error retrieving context: {str(e)}"
         
@@ -752,7 +854,7 @@ async def query_with_full_autogen(request: Request):
 - Cite document sources when appropriate
 - Be conversational and maintain context across our discussion"""
 
-            logger.info("🚀 Running AutoGen team (with conversation history)...")
+            logger.info("  Running AutoGen team (with conversation history)...")
             
             # Run team - it maintains its own conversation history!
             result: TaskResult = await team.run(task=task_message)
@@ -772,13 +874,13 @@ async def query_with_full_autogen(request: Request):
                             break
             
             if not final_answer:
-                logger.warning("  No answer from AutoGen, using retrieved context")
+                logger.warning("  ⚠ No answer from AutoGen, using retrieved context")
                 final_answer = retrieved_context
                 
             logger.info("-" * 80)
             
         except Exception as e:
-            logger.error(f"❌ AutoGen EXCEPTION: {e}")
+            logger.error(f"✗ AutoGen EXCEPTION: {e}")
             logger.error(traceback.format_exc())
             final_answer = retrieved_context
         
@@ -793,26 +895,101 @@ async def query_with_full_autogen(request: Request):
         history = await get_team_history(session_id)
         
         logger.info("=" * 80)
-        logger.info("✅ COMPLETE")
+        logger.info("✓ QUERY COMPLETE")
         logger.info(f"  Response: {len(full_response)} chars")
         logger.info(f"  Conversation messages: {len(history)}")
+        logger.info(f"  Routed to: AutoGen RAG")
         logger.info("=" * 80)
         
         return {
             "answer": full_response,
             "session_id": session_id,
+            "query_type": "autogen_rag",
             "files_searched": search_filenames if search_filenames else "all",
             "files_processed": uploaded_files,
             "conversation_messages": len(history),
             "processing_summary": processing_results,
             "search_scope": "all_documents" if not search_filenames else "specific_files",
-            "team_persistent": True
+            "team_persistent": True,
+            "routed_to": "autogen_rag"
         }
     
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ QUERY FAILED: {e}")
+        logger.error(f"✗ QUERY FAILED: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+  
+
+@app.post("/threat-modeling/")
+async def threat_modeling_query(request: Request):
+    """
+    Dedicated endpoint for threat modeling and security analysis.
+    Uses CISA/IEEE/Intel TDX knowledge base for security reasoning.
+    """
+    try:
+        logger.info("=" * 80)
+        logger.info("  THREAT MODELING QUERY")
+        logger.info("=" * 80)
+        
+        body = await request.json()
+        
+        question = body.get("question")
+        session_id = body.get("session_id", "default")
+        verbose = body.get("verbose", True)
+        
+        if not question:
+            raise HTTPException(status_code=400, detail="Missing question")
+        
+        if not threat_modeling_agent:
+            raise HTTPException(
+                status_code=503, 
+                detail="Threat Modeling Agent not available. Check knowledge base setup."
+            )
+        
+        logger.info(f"Security Question: {question}")
+        logger.info(f"Session: {session_id}")
+        
+        # Check if it's actually a security question
+        if not threat_modeling_agent.is_security_query(question):
+            logger.warning("⚠ Question doesn't appear to be security-related")
+            return {
+                "answer": "This doesn't appear to be a security-related question. "
+                         "Threat modeling is designed for cybersecurity analysis. "
+                         "Please use the regular /query/ endpoint for general questions.",
+                "is_security_query": False,
+                "session_id": session_id
+            }
+        
+        # Run threat modeling analysis
+        logger.info("🛡️  Running threat modeling analysis...")
+        
+        result = await threat_modeling_agent.analyze(
+            user_query=question,
+            verbose=verbose
+        )
+        
+        logger.info("=" * 80)
+        logger.info(" THREAT MODELING COMPLETE")
+        logger.info(f"  Report length: {len(result['report'])} chars")
+        logger.info(f"  Sources used: {result['reasoning_chain']['research_summary']['sources_used']}")
+        logger.info("=" * 80)
+        
+        return {
+            "answer": result["report"],
+            "session_id": session_id,
+            "query_type": "threat_modeling",
+            "reasoning_chain": result["reasoning_chain"],
+            "timestamp": result["timestamp"],
+            "sources_used": result["reasoning_chain"]["research_summary"]["sources_used"],
+            "total_findings": result["reasoning_chain"]["research_summary"]["total_findings"]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"  THREAT MODELING FAILED: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -893,7 +1070,7 @@ async def cleanup_file(filename: str):
             raise HTTPException(status_code=404, detail=f"File not found: {filename}")
         
         file_path.unlink()
-        logger.info(f"🗑️ Deleted: {filename}")
+        logger.info(f" Deleted: {filename}")
         
         return {"message": f"Successfully deleted {filename}"}
     
@@ -922,7 +1099,7 @@ def cleanup_uploads():
             except Exception as e:
                 logger.error(f"Failed to delete {file_path}: {e}")
         if file_count > 0:
-            logger.info(f"🧹 Cleaned up {file_count} files")
+            logger.info(f" Cleaned up {file_count} files")
 
 
 # ============================================================================
@@ -935,7 +1112,7 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     host = os.getenv("HOST", "0.0.0.0")
     
-    logger.info(f"🚀 Starting Full AutoGen Multi-Agent RAG System on {host}:{port}")
+    logger.info(f" Starting Full AutoGen Multi-Agent RAG System on {host}:{port}")
     
     uvicorn.run(
         app,

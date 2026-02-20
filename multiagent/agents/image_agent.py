@@ -30,7 +30,7 @@ def get_image_pipeline():
                 "image-to-text", 
                 model="Salesforce/blip-image-captioning-large"
             )
-            logger.info("✓ Image captioning model loaded successfully")
+            logger.info(" Image captioning model loaded successfully")
         except Exception as e:
             logger.error(f"Failed to initialize image-to-text pipeline: {e}")
             _image_to_text_pipe = False
@@ -42,7 +42,7 @@ async def analyze_image_locally(image_file_path: str) -> BaseMessage:
     cached = get_cached_result(f"image:{image_file_path}")  
     if cached:
         logger.info(f"Using cached analysis for {image_file_path}")
-        print(f"✓ Cached image analysis loaded ({len(cached)} characters)")
+        print(f" Cached image analysis loaded ({len(cached)} characters)")
         return await ingest_text_with_chunking(image_file_path, cached)
     
     set_agent_state(agent_name, {"status": "running", "file": image_file_path})
@@ -66,7 +66,7 @@ async def analyze_image_locally(image_file_path: str) -> BaseMessage:
         if extracted_text.strip():
             cleaned_text = re.sub(r'\s+', ' ', extracted_text.strip())
             analysis_results += f"Text from image: {cleaned_text}\n"
-            logger.info(f"✓ OCR extracted {len(cleaned_text)} characters")
+            logger.info(f" OCR extracted {len(cleaned_text)} characters")
         else:
             analysis_results += "No clear text detected via OCR. "
             logger.info("No text found via OCR")
@@ -85,7 +85,7 @@ async def analyze_image_locally(image_file_path: str) -> BaseMessage:
             result = await asyncio.to_thread(image_to_text_pipe, image)
             description = result[0]['generated_text']
             analysis_results += f"Image shows: {description}"
-            logger.info(f"✓ Generated caption: {description}")
+            logger.info(f" Generated caption: {description}")
         except Exception as e:
             error_msg = f"Image captioning failed: {e}"
             logger.error(f"{error_msg} for {image_file_path}")
@@ -97,7 +97,7 @@ async def analyze_image_locally(image_file_path: str) -> BaseMessage:
     if not analysis_results.strip():
         analysis_results = f"Image file: {os.path.basename(image_file_path)}. Unable to extract text or generate description."
     
-    logger.info(f"✓ Image analysis complete for {os.path.basename(image_file_path)}")
+    logger.info(f" Image analysis complete for {os.path.basename(image_file_path)}")
     
     cache_result(f"image:{image_file_path}", analysis_results)
     

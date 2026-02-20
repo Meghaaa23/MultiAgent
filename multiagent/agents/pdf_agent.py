@@ -112,7 +112,7 @@ async def process_pdf_locally(file_path: str) -> str:
         
         # Store in MongoDB
         if not _vectorstore:
-            logger.error("❌ Vector store not initialized!")
+            logger.error(" Vector store not initialized!")
             return "Error: Vector store not initialized"
         
         if not all_chunks:
@@ -122,14 +122,14 @@ async def process_pdf_locally(file_path: str) -> str:
         try:
             logger.info(f"  Storing {len(all_chunks)} chunks in MongoDB...")
             await asyncio.to_thread(_vectorstore.add_documents, all_chunks)
-            logger.info(f"✓ Successfully stored {len(all_chunks)} chunks")
+            logger.info(f" Successfully stored {len(all_chunks)} chunks")
         except Exception as e:
-            logger.error(f"❌ Failed to store in MongoDB: {e}")
+            logger.error(f" Failed to store in MongoDB: {e}")
             return f"Error storing chunks: {str(e)}"
         
         # ========== PROCESS URLs FROM PDF ==========
         try:
-            logger.info(f"🔗 Extracting and processing URLs from {filename}...")
+            logger.info(f" Extracting and processing URLs from {filename}...")
             
             # Import here to avoid circular dependency
             from agents.url_agent import process_pdf_urls
@@ -139,15 +139,15 @@ async def process_pdf_locally(file_path: str) -> str:
             logger.info(f"  URL Result: {url_result.content}")
             
         except Exception as e:
-            logger.warning(f"⚠ URL processing failed: {e}")
+            logger.warning(f" URL processing failed: {e}")
             import traceback
             logger.debug(traceback.format_exc())
         # ==========================================
         
-        return f"✓ Processed {filename}: {total_pages} pages, {len(all_chunks)} chunks"
+        return f" Processed {filename}: {total_pages} pages, {len(all_chunks)} chunks"
     
     except Exception as e:
-        logger.error(f"❌ PDF processing failed: {e}")
+        logger.error(f" PDF processing failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return f"Error: {str(e)}"
