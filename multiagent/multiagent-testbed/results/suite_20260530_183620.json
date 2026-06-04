@@ -1,0 +1,26 @@
+{
+  "suite_id": "20260530_183620",
+  "run_at": "2026-05-30T18:37:13.523735",
+  "total_targets": 1,
+  "successful_scans": 1,
+  "total_findings": 0,
+  "results": [
+    {
+      "target_id": 7,
+      "target_name": "PrestaShop",
+      "url": "http://172.30.0.27:80",
+      "group": "ecommerce",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "auth-bypass"
+      ],
+      "session_id": "testbed-7-1780184180",
+      "scan_time_s": 52.9,
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260530_183620",
+      "timestamp": "2026-05-30T18:37:13.523706"
+    }
+  ]
+}

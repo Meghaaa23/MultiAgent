@@ -1,0 +1,392 @@
+{
+  "suite_id": "20260506_125904",
+  "run_at": "2026-05-06T12:59:06.606808",
+  "total_targets": 20,
+  "successful_scans": 18,
+  "total_findings": 0,
+  "results": [
+    {
+      "target_id": 1,
+      "target_name": "DVWA",
+      "url": "http://localhost:8001",
+      "group": "web-cms",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "csrf",
+        "fileupload",
+        "cmdi"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:04.990919"
+    },
+    {
+      "target_id": 2,
+      "target_name": "WordPress",
+      "url": "http://localhost:8002",
+      "group": "web-cms",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "auth-bypass",
+        "plugin-vulns"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.222848"
+    },
+    {
+      "target_id": 3,
+      "target_name": "Joomla",
+      "url": "http://localhost:8003",
+      "group": "web-cms",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "rce"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.307635"
+    },
+    {
+      "target_id": 4,
+      "target_name": "Drupal",
+      "url": "http://localhost:8004",
+      "group": "web-cms",
+      "known_vulns": [
+        "sqli",
+        "rce",
+        "open-redirect"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.539579"
+    },
+    {
+      "target_id": 5,
+      "status": "unreachable",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.539747"
+    },
+    {
+      "target_id": 6,
+      "target_name": "OpenCart",
+      "url": "http://localhost:8006",
+      "group": "ecommerce",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "idor"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.550107"
+    },
+    {
+      "target_id": 7,
+      "target_name": "PrestaShop",
+      "url": "http://localhost:8007",
+      "group": "ecommerce",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "auth-bypass"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.653089"
+    },
+    {
+      "target_id": 8,
+      "target_name": "REST API (json-server)",
+      "url": "http://localhost:8008",
+      "group": "api",
+      "known_vulns": [
+        "idor",
+        "mass-assignment",
+        "broken-auth"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.691955"
+    },
+    {
+      "target_id": 9,
+      "target_name": "Strapi",
+      "url": "http://localhost:8009/ghost",
+      "group": "api",
+      "known_vulns": [
+        "graphql-injection",
+        "broken-object-auth"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.725814"
+    },
+    {
+      "target_id": 10,
+      "status": "unreachable",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.726297"
+    },
+    {
+      "target_id": 11,
+      "target_name": "Keycloak",
+      "url": "http://localhost:8011",
+      "group": "auth",
+      "known_vulns": [
+        "oauth-misconfig",
+        "token-forgery",
+        "open-redirect"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.833580"
+    },
+    {
+      "target_id": 12,
+      "target_name": "Grafana",
+      "url": "http://localhost:8012",
+      "group": "dashboard",
+      "known_vulns": [
+        "ssrf",
+        "anon-access",
+        "plugin-rce"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.847282"
+    },
+    {
+      "target_id": 13,
+      "target_name": "Gitea",
+      "url": "http://localhost:8013",
+      "group": "devtools",
+      "known_vulns": [
+        "repo-traversal",
+        "webhook-ssrf",
+        "token-leak"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:05.860885"
+    },
+    {
+      "target_id": 14,
+      "target_name": "Nextcloud",
+      "url": "http://localhost:8014",
+      "group": "fileshare",
+      "known_vulns": [
+        "path-traversal",
+        "webdav-abuse",
+        "idor"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:06.119657"
+    },
+    {
+      "target_id": 15,
+      "target_name": "Redmine",
+      "url": "http://localhost:8015",
+      "group": "projectmgmt",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "idor",
+        "auth-bypass"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:06.266122"
+    },
+    {
+      "target_id": 16,
+      "target_name": "WebGoat",
+      "url": "http://localhost:8016/WebGoat",
+      "group": "intentionally-vulnerable",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "xxe",
+        "idor",
+        "ssrf",
+        "jwt",
+        "deserialization"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:06.462616"
+    },
+    {
+      "target_id": 17,
+      "target_name": "OWASP Juice Shop",
+      "url": "http://localhost:8017",
+      "group": "intentionally-vulnerable",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "broken-auth",
+        "sensitive-data",
+        "xxe",
+        "csrf",
+        "jwt",
+        "nosqli"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:06.472482"
+    },
+    {
+      "target_id": 18,
+      "target_name": "bWAPP",
+      "url": "http://localhost:8018/install.php",
+      "group": "intentionally-vulnerable",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "cmdi",
+        "lfi",
+        "rfi",
+        "xxe",
+        "ssrf",
+        "ssti",
+        "csrf"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:06.482909"
+    },
+    {
+      "target_id": 19,
+      "target_name": "NodeGoat",
+      "url": "http://localhost:8019",
+      "group": "intentionally-vulnerable",
+      "known_vulns": [
+        "nosqli",
+        "xss",
+        "prototype-pollution",
+        "ssti",
+        "idor",
+        "regex-dos"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:06.508530"
+    },
+    {
+      "target_id": 20,
+      "target_name": "Mutillidae II",
+      "url": "http://localhost:8020",
+      "group": "intentionally-vulnerable",
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "csrf",
+        "clickjacking",
+        "http-header-injection",
+        "lfi",
+        "rfi",
+        "cmdi",
+        "xxe"
+      ],
+      "scan_time_s": 0.0,
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "/usr/bin/python3: No module named your_agent_module\n",
+      "status": "done",
+      "findings": [],
+      "suite_id": "20260506_125904",
+      "timestamp": "2026-05-06T12:59:06.606738"
+    }
+  ]
+}

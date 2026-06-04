@@ -1,0 +1,73 @@
+# ============================================================================
+# .dockerignore - Multi-Agent RAG System
+# ============================================================================
+
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+*.egg
+dist
+build
+.eggs
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Virtual environments
+venv
+.venv
+env
+.env.local
+.env.*.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+README.md
+LICENSE
+docs/
+*.md
+
+# Uploads and runtime data (mounted as volumes)
+uploads/*
+knowledge_base/*
+!uploads/.gitkeep
+!knowledge_base/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node (if any frontend exists)
+node_modules
+.angular
+.next
+
+# Test files
+tests/
+test_*.py
+*_test.py

@@ -84,7 +84,7 @@ async def answer_question_from_db(question: str, filenames: List[str]) -> str:
         from pymongo import MongoClient
         
         mongodb_uri = os.getenv("MONGODB_ATLAS_URI")
-        mongo_client = MongoClient(mongodb_uri)
+        mongo_client = MongoClient(mongodb_uri, tls=True, tlsAllowInvalidCertificates=True)
         rag_collection = mongo_client["multiagentllm"]["RAG"]
         
         # Check total documents in RAG

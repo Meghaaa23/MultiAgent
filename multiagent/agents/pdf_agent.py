@@ -1,7 +1,7 @@
 import os
 import logging
 import asyncio
-import fitz  # PyMuPDF
+import fitz 
 from pathlib import Path
 from langchain_core.documents import Document
 from typing import List

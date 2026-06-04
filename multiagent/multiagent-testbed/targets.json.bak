@@ -1,0 +1,428 @@
+{
+  "testbed_version": "1.0",
+  "base_url": "http://localhost",
+  "network": "172.30.0.0/24",
+  "targets": [
+    {
+      "id": 1,
+      "name": "DVWA",
+      "url": "http://localhost:8001",
+      "internal_ip": "172.30.0.21",
+      "group": "web-cms",
+      "stack": [
+        "PHP",
+        "MySQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "password"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "csrf",
+        "fileupload",
+        "cmdi"
+      ],
+      "notes": "Reset DB via http://localhost:8001/setup.php"
+    },
+    {
+      "id": 2,
+      "name": "WordPress",
+      "url": "http://localhost:8002",
+      "internal_ip": "172.30.0.22",
+      "group": "web-cms",
+      "stack": [
+        "PHP",
+        "MySQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "auth-bypass",
+        "plugin-vulns"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Joomla",
+      "url": "http://localhost:8003",
+      "internal_ip": "172.30.0.23",
+      "group": "web-cms",
+      "stack": [
+        "PHP",
+        "MySQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "rce"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Drupal",
+      "url": "http://localhost:8004",
+      "internal_ip": "172.30.0.24",
+      "group": "web-cms",
+      "stack": [
+        "PHP",
+        "PostgreSQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "sqli",
+        "rce",
+        "open-redirect"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "phpBB",
+      "url": "http://localhost:8005",
+      "internal_ip": "172.30.0.25",
+      "group": "web-cms",
+      "stack": [
+        "PHP",
+        "MySQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "xss",
+        "csrf",
+        "sqli"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "OpenCart",
+      "url": "http://localhost:8006",
+      "internal_ip": "172.30.0.26",
+      "group": "ecommerce",
+      "stack": [
+        "PHP",
+        "MySQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "idor"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "PrestaShop",
+      "url": "http://localhost:8007",
+      "internal_ip": "172.30.0.27",
+      "group": "ecommerce",
+      "stack": [
+        "PHP",
+        "MySQL"
+      ],
+      "default_creds": {
+        "user": "admin@testbed.local",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "auth-bypass"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "REST API (json-server)",
+      "url": "http://localhost:8008",
+      "internal_ip": "172.30.0.28",
+      "group": "api",
+      "stack": [
+        "Node.js"
+      ],
+      "default_creds": {},
+      "known_vulns": [
+        "idor",
+        "mass-assignment",
+        "broken-auth"
+      ],
+      "notes": "Endpoints: /users /products /orders /secrets"
+    },
+    {
+      "id": 9,
+      "name": "Strapi",
+      "url": "http://localhost:8009/ghost",
+      "internal_ip": "172.30.0.29",
+      "group": "api",
+      "stack": [
+        "Node.js",
+        "PostgreSQL"
+      ],
+      "default_creds": {
+        "user": "admin@testbed.local",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "graphql-injection",
+        "broken-object-auth"
+      ]
+    },
+    {
+      "id": 10,
+      "name": "Directus",
+      "url": "http://localhost:8010",
+      "internal_ip": "172.30.0.30",
+      "group": "api",
+      "stack": [
+        "Node.js",
+        "PostgreSQL"
+      ],
+      "default_creds": {
+        "user": "admin@testbed.local",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "idor",
+        "broken-auth"
+      ]
+    },
+    {
+      "id": 11,
+      "name": "Keycloak",
+      "url": "http://localhost:8011",
+      "internal_ip": "172.30.0.31",
+      "group": "auth",
+      "stack": [
+        "Java",
+        "PostgreSQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "oauth-misconfig",
+        "token-forgery",
+        "open-redirect"
+      ]
+    },
+    {
+      "id": 12,
+      "name": "Grafana",
+      "url": "http://localhost:8012",
+      "internal_ip": "172.30.0.32",
+      "group": "dashboard",
+      "stack": [
+        "Go"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "ssrf",
+        "anon-access",
+        "plugin-rce"
+      ]
+    },
+    {
+      "id": 13,
+      "name": "Gitea",
+      "url": "http://localhost:8013",
+      "internal_ip": "172.30.0.33",
+      "group": "devtools",
+      "stack": [
+        "Go",
+        "PostgreSQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "repo-traversal",
+        "webhook-ssrf",
+        "token-leak"
+      ]
+    },
+    {
+      "id": 14,
+      "name": "Nextcloud",
+      "url": "http://localhost:8014",
+      "internal_ip": "172.30.0.34",
+      "group": "fileshare",
+      "stack": [
+        "PHP",
+        "PostgreSQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "path-traversal",
+        "webdav-abuse",
+        "idor"
+      ]
+    },
+    {
+      "id": 15,
+      "name": "Redmine",
+      "url": "http://localhost:8015",
+      "internal_ip": "172.30.0.35",
+      "group": "projectmgmt",
+      "stack": [
+        "Ruby",
+        "PostgreSQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "admin"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "idor",
+        "auth-bypass"
+      ]
+    },
+    {
+      "id": 16,
+      "name": "WebGoat",
+      "url": "http://localhost:8016/WebGoat",
+      "internal_ip": "172.30.0.36",
+      "group": "intentionally-vulnerable",
+      "stack": [
+        "Java"
+      ],
+      "default_creds": {
+        "user": "guest",
+        "pass": "guest"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "xxe",
+        "idor",
+        "ssrf",
+        "jwt",
+        "deserialization"
+      ]
+    },
+    {
+      "id": 17,
+      "name": "OWASP Juice Shop",
+      "url": "http://localhost:8017",
+      "internal_ip": "172.30.0.37",
+      "group": "intentionally-vulnerable",
+      "stack": [
+        "Node.js"
+      ],
+      "default_creds": {
+        "user": "admin@juice-sh.op",
+        "pass": "admin123"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "broken-auth",
+        "sensitive-data",
+        "xxe",
+        "csrf",
+        "jwt",
+        "nosqli"
+      ]
+    },
+    {
+      "id": 18,
+      "name": "bWAPP",
+      "url": "http://localhost:8018/install.php",
+      "internal_ip": "172.30.0.38",
+      "group": "intentionally-vulnerable",
+      "stack": [
+        "PHP",
+        "MySQL"
+      ],
+      "default_creds": {
+        "user": "bee",
+        "pass": "bug"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "cmdi",
+        "lfi",
+        "rfi",
+        "xxe",
+        "ssrf",
+        "ssti",
+        "csrf"
+      ]
+    },
+    {
+      "id": 19,
+      "name": "NodeGoat",
+      "url": "http://localhost:8019",
+      "internal_ip": "172.30.0.39",
+      "group": "intentionally-vulnerable",
+      "stack": [
+        "Node.js",
+        "MongoDB"
+      ],
+      "default_creds": {
+        "user": "user1",
+        "pass": "User1_123"
+      },
+      "known_vulns": [
+        "nosqli",
+        "xss",
+        "prototype-pollution",
+        "ssti",
+        "idor",
+        "regex-dos"
+      ]
+    },
+    {
+      "id": 20,
+      "name": "Mutillidae II",
+      "url": "http://localhost:8020",
+      "internal_ip": "172.30.0.40",
+      "group": "intentionally-vulnerable",
+      "stack": [
+        "PHP",
+        "MySQL"
+      ],
+      "default_creds": {
+        "user": "admin",
+        "pass": "adminpass"
+      },
+      "known_vulns": [
+        "sqli",
+        "xss",
+        "csrf",
+        "clickjacking",
+        "http-header-injection",
+        "lfi",
+        "rfi",
+        "cmdi",
+        "xxe"
+      ]
+    }
+  ]
+}

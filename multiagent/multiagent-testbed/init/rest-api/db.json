@@ -1,0 +1,20 @@
+{
+  "users": [
+    { "id": 1, "name": "Alice Admin",  "email": "alice@testbed.local",  "role": "admin",  "password": "admin123" },
+    { "id": 2, "name": "Bob User",     "email": "bob@testbed.local",    "role": "user",   "password": "user123"  },
+    { "id": 3, "name": "Carol Guest",  "email": "carol@testbed.local",  "role": "guest",  "password": "guest123" }
+  ],
+  "products": [
+    { "id": 1, "name": "Widget A", "price": 9.99,  "stock": 100, "owner_id": 1 },
+    { "id": 2, "name": "Widget B", "price": 19.99, "stock": 50,  "owner_id": 2 },
+    { "id": 3, "name": "Widget C", "price": 4.99,  "stock": 200, "owner_id": 1 }
+  ],
+  "orders": [
+    { "id": 1, "user_id": 2, "product_id": 1, "quantity": 2, "status": "pending" },
+    { "id": 2, "user_id": 3, "product_id": 3, "quantity": 1, "status": "shipped" }
+  ],
+  "secrets": [
+    { "id": 1, "key": "API_KEY",      "value": "sk-testbed-super-secret-key-12345" },
+    { "id": 2, "key": "DB_PASSWORD",  "value": "testbed_pass" }
+  ]
+}

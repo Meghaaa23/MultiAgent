@@ -117,7 +117,7 @@ async def process_pdf_urls(pdf_text: str, pdf_filename: str) -> TextMessage:
         from dotenv import load_dotenv
         
         load_dotenv()
-        mongo_client = MongoClient(os.getenv("MONGODB_ATLAS_URI"))
+        mongo_client = MongoClient(os.getenv("MONGODB_ATLAS_URI"), tls=True, tlsAllowInvalidCertificates=True)
         collection = mongo_client["multiagentllm"]["RAG"]
         
         # Check if we already have URL chunks for this PDF
