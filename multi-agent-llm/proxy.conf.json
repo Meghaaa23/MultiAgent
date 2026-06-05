@@ -1,0 +1,9 @@
+{
+  "/api": {
+    "target": "http://ems885-sidc-lab",
+    "secure": false,
+    "changeOrigin": true,
+    "timeout": 600000,
+    "proxyTimeout": 600000
+  }
+}

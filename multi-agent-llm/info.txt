@@ -1,0 +1,55 @@
+Multi-Agent System Backend Architecture on Azure
+Building an intelligent multi-agent backend involves orchestrating various Azure services. The goal is to create a scalable system where different agents specialize in processing specific data types (audio, PDF, image) and collaborate to provide a coherent response.
+
+1. Agent Orchestration Layer
+This is the central "brain" of your system. It receives user requests from the UI and delegates tasks to the appropriate specialized agents.
+
+Primary Tool: Microsoft Semantic Kernel or AutoGen. These frameworks provide the foundation for building multi-agent systems. They allow you to define agents, give them functions (tools), and manage the communication and task-passing between them.
+
+Deployment: You would deploy this orchestration layer as a web API using Azure App Service or Azure Container Apps. This provides a secure, scalable endpoint that your Angular UI can call.
+
+2. File Processing and Intelligence
+This is where the raw files are converted into structured, usable information for the agents. Each file type is handled by a specialized Azure AI service.
+
+For PDF & Documents:
+
+Tool: Azure AI Document Intelligence. This service uses advanced machine learning to extract text, key-value pairs, and table structures from your PDF files. An agent specializing in documents would use this as its primary tool.
+
+For Images:
+
+Tool: Azure AI Vision. This service offers capabilities like Optical Character Recognition (OCR) to extract text from images and image analysis to generate descriptions, tags, and captions. The image agent would call this service to understand image content.
+
+For Audio:
+
+Tool: Azure AI Speech. This service is used for speech-to-text transcription. Your audio agent would send the MP4 file to this service to get a full transcript of the audio content.
+
+3. Data Management and Knowledge Base
+After the files are processed, the extracted information needs to be stored and made available to your agents for reasoning.
+
+Raw File Storage: Azure Blob Storage. This is the best place to store the original files (PDFs, MP4s, PNGs) in a cost-effective and scalable manner.
+
+Knowledge Base & Vector Search: Azure AI Search. This is a crucial service for Retrieval-Augmented Generation (RAG). After processing a file, your agents would index the extracted text and its embeddings into an Azure AI Search index. This allows a chat agent to perform a fast, semantic search to find relevant information about the uploaded file when a user asks a question, providing grounded and accurate answers.
+
+4. The Brain (Large Language Models)
+The intelligence of each agent is powered by an LLM from the Azure OpenAI Service.
+
+Recommended Models:
+
+GPT-4o and GPT-4o mini: These are the top choices for multi-modal tasks, as they can natively process both text and images, allowing for more powerful agents.
+
+GPT-3.5 Turbo: An excellent, cost-effective option for agents that primarily handle text-based tasks.
+
+Summary of the Workflow
+A user uploads a file from the Angular UI.
+
+The UI sends the file and a prompt to your backend API hosted on Azure App Service.
+
+The orchestration layer (using Semantic Kernel) identifies the file type and routes the task to the correct specialized agent (e.g., the PDF Agent).
+
+The specialized agent uses its tool (e.g., Azure AI Document Intelligence) to process the file and save the extracted data to Azure AI Search.
+
+When the user asks a follow-up question, the chat agent queries the Azure AI Search index to find relevant information and uses an Azure OpenAI model to generate a grounded, intelligent response, which is then sent back to the UI.
+
+
+Keys: 4F68K1KXkbf46oaV5h7DagNCsgzcwnH0yesag199zvjNvRuLhX9aJQQJ99BIACYeBjFXJ3w3AAABACOGjcoP
+endpoint: https://multiagentllm.openai.azure.com/
