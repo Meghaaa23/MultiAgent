@@ -134,23 +134,23 @@ class TechFingerprintAgent:
             "html_hints": [],
         }
 
-        # ── 1. Fetch headers ─────────────────────────
+        # Fetch headers 
         if not response_headers:
             evidence["headers"] = await self._fetch_headers(target_url, verbose)
 
-        # ── 2. Extract HTML hints ─────────────────────────────────────
+        # Extract HTML hints 
         if page_html:
             evidence["html_hints"] = self._extract_html_hints(page_html)
             evidence["cookies"]    = self._extract_cookies_from_html(page_html)
 
-        # ── 3. Rule-based signature matching ─────────────────────────
+        # Rule-based signature matching 
         rule_stack = self._apply_signatures(evidence)
 
-        # ── 4. LLM synthesis ─────────────────────────────────────────
+        # LLM synthesis
         final_stack = await self._llm_synthesize(target_url, evidence, rule_stack, verbose)
 
         if verbose:
-            print(f"   ✓ Stack: {final_stack.get('stack_summary', 'Unknown')}")
+            print(f"Stack: {final_stack.get('stack_summary', 'Unknown')}")
 
         return final_stack
 

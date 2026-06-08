@@ -10,6 +10,7 @@ from .attack_verification_agent import AttackVerificationAgent, VulnStatus, Conf
 from .ai_fingerprint import AIFingerprintAgent
 from .avid_lookup_agent    import AVIDLookupAgent
 from .ai_vulnerability_test      import AIVulnerabilityTester
+from .Ai_Infra_agent             import AIInfraAgent
 
 __all__ = [
     "WebScannerAgent",
@@ -24,4 +25,5 @@ __all__ = [
     "AIFingerprintAgent",
     "AVIDLookupAgent",
     "AIVulnerabilityTester",
+    "AIInfraAgent",
 ]

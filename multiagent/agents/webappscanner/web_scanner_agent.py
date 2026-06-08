@@ -21,6 +21,7 @@ from .attack_verification_agent  import AttackVerificationAgent, VulnStatus
 from .ai_fingerprint import AIFingerprintAgent
 from .avid_lookup_agent import AVIDLookupAgent
 from .ai_vulnerability_test import AIVulnerabilityTester
+from .Ai_Infra_agent import AIInfraAgent
 
 logger = logging.getLogger(__name__)
 
@@ -269,8 +270,9 @@ class WebScannerAgent:
         self.ai_fingerprinter = AIFingerprintAgent(timeout=8)
         self.avid_lookup      = AVIDLookupAgent(timeout=15)
         self.ai_vuln_tester   = AIVulnerabilityTester(timeout=10)
+        self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client)
 
-        print("✓ WebScannerAgent initialized (v6 — AI Backdoor Detection)")
+        print("✓ WebScannerAgent initialized (v7 — AI Infra Attack Analysis)")
 
     async def scan_application(self, target_url: str,
                                max_time_minutes: int = 10,
@@ -464,6 +466,35 @@ class WebScannerAgent:
 
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
+
+        # ── Phase 0d: AI Infrastructure Build Attack Analysis ─────────
+        ai_infra_result = None
+        try:
+            if ai_fingerprint and ai_fingerprint.get("is_ai_powered"):
+                if verbose:
+                    print("  AI Infrastructure Build Attack Analysis...")
+
+                ai_infra_result = await self.ai_infra_agent.scan(
+                    target_url=target_url,
+                    ai_stack=ai_fingerprint,
+                )
+
+                if verbose:
+                    plane_counts = {
+                        "BUILD":         len(ai_infra_result.build_threats),
+                        "DEPLOYMENT":    len(ai_infra_result.deploy_threats),
+                        "RUNTIME":       len(ai_infra_result.runtime_threats),
+                        "ORCHESTRATION": len(ai_infra_result.orch_threats),
+                    }
+                    total = len(ai_infra_result.threats)
+                    print(f"  ✓ AI Infra threats: {total} total")
+                    for plane, count in plane_counts.items():
+                        if count:
+                            print(f"     {plane}: {count}")
+                    print()
+        except Exception as e:
+            logging.warning(f"AIInfraAgent failed: {e}")
+            ai_infra_result = None
 
         # ── Phase 1b: CVE Lookup (NVD/OSV) ───────────────────────────
    
@@ -697,6 +728,7 @@ class WebScannerAgent:
                 print(f"  AI Powered  : YES — AI backdoor analysis included")
                 print(f"  AVID CVEs   : {(avid_results or {}).get('total_found',0)}")
                 print(f"  Strategic   : {len((ai_vuln_results or {}).get('strategic_recommendations',[]))}")
+                print(f"  Infra threats: {len(ai_infra_result.threats) if ai_infra_result else 0}")
             print(f"{'='*70}\n")
 
         return {
@@ -725,7 +757,10 @@ class WebScannerAgent:
             "strategic_recommendations": (ai_vuln_results or {}).get(
                 "strategic_recommendations", []
             ),
-            
+            "ai_infrastructure": (
+                self.ai_infra_agent.format_for_stride_report(ai_infra_result)
+                if ai_infra_result else None
+            ),
             "action_results":            action_results,
         }
 

@@ -804,6 +804,56 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Section 9 — AI Infrastructure Build Attack Analysis
+# ---------------------------------------------------------------------------
+
+def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
+    lines = [
+        "\n---\n",
+        "9. AI INFRASTRUCTURE BUILD ATTACK ANALYSIS\n",
+        f"> *Attack planes scanned: "
+        f"{', '.join(ai_infra_data.get('planes_covered', []))}*\n",
+        f"> *AI Stack: {json.dumps(ai_infra_data.get('ai_stack', {}))}*\n\n",
+    ]
+
+    by_plane: Dict[str, list] = {}
+    for f in ai_infra_data.get("findings", []):
+        plane = f.get("layer", "UNKNOWN")
+        by_plane.setdefault(plane, []).append(f)
+
+    for plane, findings in by_plane.items():
+        lines.append(f" {plane}\n")
+        for f in findings:
+            severity  = f.get("severity", "")
+            name      = f.get("name", "")
+            stride    = f.get("category", "")
+            desc      = f.get("description", "")
+            evidence  = f.get("evidence", "")
+            fix       = f.get("mitigation", "")
+            atlas     = f.get("references", {}).get("atlas", "")
+            paper_ref = f.get("references", {}).get("paper", "")
+
+            lines.append(f"*[{severity}] {name}*\n")
+            lines.append(f"- STRIDE Category: {stride}\n")
+            lines.append(f"- Description: {desc}\n")
+            lines.append(f"- Evidence: `{evidence}`\n")
+            lines.append(f"- Mitigation: {fix}\n")
+            if atlas:
+                lines.append(
+                    f"- ATLAS Technique: "
+                    f"[{atlas}](https://atlas.mitre.org/techniques/{atlas})\n"
+                )
+            
+            lines.append("\n")
+
+    if ai_infra_data.get("summary"):
+        lines.append(" Executive Summary\n")
+        lines.append(ai_infra_data["summary"] + "\n")
+
+    return "".join(lines)
+
+
 # ===========================================================================
 # MAIN CLASS
 # ===========================================================================
@@ -842,7 +892,7 @@ class ThreatModelingAgent:
             llm_model=self.llm_model,
         )
 
-        print("✓ ThreatModelingAgent initialized (v7 — AI Backdoor Detection)")
+        print("✓ ThreatModelingAgent initialized (v8 — AI Infra Attack Analysis)")
 
     # =========================================================================
     # CACHE
@@ -1605,6 +1655,15 @@ Answer:"""
                 final = final + "\n\n" + section_8
                 logger.info("✓ Section 8 (AI Backdoor Analysis) added to report")
 
+        # Section 9: AI Infrastructure Build Attack Analysis
+        section_9 = ""
+        ai_infra_data = (scan_results or {}).get("ai_infrastructure")
+        if ai_infra_data and ai_infra_data.get("findings"):
+            section_9 = _build_section_9_ai_infra(ai_infra_data)
+            if section_9:
+                final = final + "\n\n" + section_9
+                logger.info("✓ Section 9 (AI Infra Attack Analysis) added to report")
+
         # Build structured sections list for interactive UI rendering
         report_sections = []
         _section_defs = [
@@ -1617,6 +1676,7 @@ Answer:"""
             ("6",  "Remediation Roadmap",    section_6),
             ("7",  "Compliance Mapping",     section_7),
             ("8",  "AI/ML Analysis",         section_8),
+            ("9",  "AI Infra Attacks",       section_9),
         ]
         for _sid, _title, _content in _section_defs:
             if _content and _content.strip():

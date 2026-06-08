@@ -12,6 +12,7 @@ networks:
         - subnet: 172.30.0.0/24
 
 volumes:
+  ollama_data:
   mysql-data:
   postgres-data:
   mongo-data:
@@ -923,3 +924,5 @@ services:
       testbed.app: "wrongsecrets"
       testbed.port: "8040"
       testbed.vulns: "hardcoded-secrets,sensitive-data-exposure,broken-auth,token-exposure"
+
+  # ── TARGET 41: Ollama (AI Infrastructure Target) ──────────────────
