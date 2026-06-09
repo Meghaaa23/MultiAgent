@@ -279,6 +279,13 @@ class AttackVerificationAgent:
                     seen_cwe[key] = f
         findings = deduped
 
+        # Downgrade confidence when the evidence has no valid HTTP response
+        # (response_status == 0 means the check never got a real reply).
+        for f in findings:
+            if f.evidence.response_status == 0 and f.confidence != Confidence.LOW:
+                f.confidence          = Confidence.LOW
+                f.evidence.confidence = Confidence.LOW
+
         confirmed = [f for f in findings if f.status == VulnStatus.CONFIRMED]
         potential = [f for f in findings if f.status == VulnStatus.POTENTIAL]
 
@@ -918,6 +925,10 @@ class AttackVerificationAgent:
             has_frame_ancestors = "frame-ancestors" in csp.lower()
 
             if not xfo and not has_frame_ancestors:
+                # headers is non-empty here, so we got a real HTTP response.
+                # response_status must be set explicitly — Evidence defaults to 0
+                # which would be misleading and incorrectly downgrade confidence.
+                _confidence = Confidence.HIGH
                 return Finding(
                     vuln_type   = "Clickjacking",
                     severity    = "Medium",
@@ -935,15 +946,16 @@ class AttackVerificationAgent:
                         "Add X-Frame-Options: DENY or "
                         "Content-Security-Policy: frame-ancestors 'none'."
                     ),
-                    confidence  = Confidence.HIGH,
+                    confidence  = _confidence,
                     evidence    = Evidence(
                         request          = f"GET {url}",
+                        response_status  = 200,
                         response_headers = {
                             "X-Frame-Options":        "(missing)",
                             "Content-Security-Policy": csp or "(missing)"
                         },
                         verified         = True,
-                        confidence       = Confidence.HIGH
+                        confidence       = _confidence
                     ),
                     cwe   = "CWE-1021",
                     owasp = "A04:2021"

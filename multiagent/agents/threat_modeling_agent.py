@@ -1,5 +1,3 @@
-# agents/threat_modeling_agent.py
-
 import os
 import re
 import json
@@ -29,10 +27,6 @@ from utils.threat_prompts import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Post-processors
-# ---------------------------------------------------------------------------
-
 _VALID_OWASP = {
     "A01", "A02", "A03", "A04", "A05",
     "A06", "A07", "A08", "A09", "A10",
@@ -41,15 +35,23 @@ _VALID_OWASP = {
 }
 
 
+def _tech_display(t) -> str:
+    if isinstance(t, dict):
+        name = t.get("name", "")
+        ver  = t.get("version", "")
+        return f"{name} {ver}".strip() if ver else name
+    return str(t).split("/")[0].strip()
+
+
 def _sanitize_report(report_text: str) -> str:
     if not report_text:
         return report_text
-    lines             = report_text.split("\n")
-    cleaned_lines     = []
-    seen_owasp_lines  = set()
-    in_compliance     = False
-    compliance_ended  = False
-    table_row_count   = 0
+    lines            = report_text.split("\n")
+    cleaned_lines    = []
+    seen_owasp_lines = set()
+    in_compliance    = False
+    compliance_ended = False
+    table_row_count  = 0
 
     for line in lines:
         if " 7." in line or " 7 " in line or "COMPLIANCE" in line.upper():
@@ -115,10 +117,19 @@ def _format_confirmed_stack(stack: Dict) -> str:
             if unverified else ""
         )
         return f"Unknown (no technology confirmed from HTTP evidence).{note}"
+
     evidence_map = stack.get("confirmed_by", {})
-    parts = [
-        f"{t} [{evidence_map.get(t, 'confirmed')}]" for t in confirmed
-    ]
+    parts = []
+    for t in confirmed:
+        if isinstance(t, dict):
+            name = t.get("name", "")
+            ver  = t.get("version", "")
+            conf = t.get("confidence", 0)
+            display = f"{name} {ver}".strip() if ver else name
+            parts.append(f"{display} [conf={conf:.2f}]")
+        else:
+            parts.append(f"{t} [{evidence_map.get(t, 'confirmed')}]")
+
     result = ", ".join(parts)
     if unverified:
         result += f"\nEXCLUDED (unconfirmed): {', '.join(unverified)}"
@@ -143,25 +154,19 @@ _CWE_TO_OWASP = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Python-generated report
-# ---------------------------------------------------------------------------
-
 def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results):
     n_confirmed = len(confirmed_vulns)
     n_potential = len(set(v.get("type", "") for v in potential_vulns))
     duration    = (scan_results or {}).get("scan_duration", 0)
 
-    # Weighted risk score: severity base × confirmation-method multiplier
-    # Only confirmed vulns drive the primary risk; potential vulns contribute a fraction
     _sev_base = {"Critical": 40, "High": 20, "Medium": 10, "Low": 5, "Info": 1}
     _method_mult = {
-        "js_execution":  1.5,   # alert() fired — highest confidence
-        "timing":        1.4,   # time-delay confirmed
-        "dom_reflection": 1.2,  # DOM injection confirmed via Playwright
-        "http_body":     1.0,   # payload in raw HTTP response
-        "pattern":       0.8,   # regex error pattern
-        "header":        0.5,   # passive header check
+        "js_execution":   1.5,
+        "timing":         1.4,
+        "dom_reflection": 1.2,
+        "http_body":      1.0,
+        "pattern":        0.8,
+        "header":         0.5,
     }
     exploit_score = 0.0
     for v in confirmed_vulns:
@@ -169,7 +174,6 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
         base   = _sev_base.get(v.get("severity", "Low"), 5)
         mult   = _method_mult.get(method, 1.0)
         exploit_score += base * mult
-    # Potential vulns add a smaller fractional weight (unconfirmed)
     for v in potential_vulns:
         base = _sev_base.get(v.get("severity", "Low"), 5)
         exploit_score += base * 0.3
@@ -182,7 +186,6 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     )
 
     authenticated = (scan_results or {}).get("authenticated_scan", False)
-
     actions = [
         v.get("remediation", "")[:100]
         for v in (confirmed_vulns + potential_vulns)[:3]
@@ -190,11 +193,15 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     ] or ["No immediate action required — continue monitoring."]
 
     actions_text = " ".join(f"({i+1}) {a}" for i, a in enumerate(actions[:3]))
-    auth_note = " [Authenticated scan]" if authenticated else " [Unauthenticated — post-login surfaces not tested]"
+    auth_note    = (
+        " [Authenticated scan]" if authenticated
+        else " [Unauthenticated — post-login surfaces not tested]"
+    )
     summary = (
         f"Active scan of `{target_url}` completed in {duration:.0f}s{auth_note}. "
         f"Identified {n_confirmed} confirmed and {n_potential} potential "
-        f"vulnerability type(s). Overall risk level: **{risk}** (score: {exploit_score:.0f})"
+        f"vulnerability type(s). Overall risk level: **{risk}** "
+        f"(score: {exploit_score:.0f})"
     )
     if n_confirmed == 0 and n_potential == 0:
         summary += (
@@ -208,57 +215,70 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
 
 
 def _build_section_2(stack, endpoints, cves):
-    """
-    Build Section 2 — Technology Stack & Attack Surface.
-    FIX: Added missing return statement and improved stack fallback logic.
-    """
-    lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE",
-             " Technology Stack"]
+    lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack"]
 
-    noise_words = {"content", "unknown", "none", "null", "n/a", "signals",
-                   "content signals", "true", "false"}
+    technologies = stack.get("technologies") or []
+    noise_words  = {"content", "unknown", "none", "null", "n/a",
+                    "signals", "content signals", "true", "false"}
 
-    # Filter confirmed technologies
-    confirmed = [
-        t for t in (stack.get("technologies") or [])
-        if t
-        and len(str(t).strip()) > 2
-        and "signal" not in str(t).lower()
-        and str(t).strip().lower() not in noise_words
-    ]
+    if technologies and isinstance(technologies[0], dict):
+        by_cat: Dict[str, list] = {}
+        for dt in technologies:
+            by_cat.setdefault(dt.get("category", "Other"), []).append(dt)
 
-    if confirmed:
-        lines.extend(f"- {t}" for t in confirmed)
-    else:
-        # Fallback 1: stack_summary field
+        cat_order = ["CMS", "Server", "Language", "Framework", "CDN",
+                     "Database", "Analytics", "Other"]
+        rendered_cats = []
+        for cat in cat_order:
+            if cat in by_cat:
+                rendered_cats.append(cat)
+        for cat in by_cat:
+            if cat not in rendered_cats:
+                rendered_cats.append(cat)
+
+        for cat in rendered_cats:
+            for dt in by_cat[cat]:
+                name = dt.get("name", "")
+                ver  = dt.get("version", "")
+                conf = dt.get("confidence", 0)
+                display = f"{name} {ver}".strip() if ver else name
+                lines.append(f"- {display}  [{cat}, {conf:.0%} confidence]")
+
+    elif technologies:
+        confirmed = [
+            t for t in technologies
+            if t
+            and len(str(t).strip()) > 2
+            and "signal" not in str(t).lower()
+            and str(t).strip().lower() not in noise_words
+        ]
+        if confirmed:
+            lines.extend(f"- {t}" for t in confirmed)
+        else:
+            technologies = []
+
+    if not technologies:
         summary = stack.get("stack_summary", "")
-        noise_summary = {
-            "unknown",
-            "unknown (no technology confirmed from http evidence)",
-            "",
-        }
+        noise_summary = {"unknown", "unknown (no technology confirmed from http evidence)", ""}
         if summary and summary.strip().lower() not in noise_summary:
             lines.append(f"- {summary}")
         else:
-            # Fallback 2: individual stack fields (server, language, framework etc.)
             added = False
             for field in ("server", "language", "framework", "frontend", "cms", "cdn"):
                 val = stack.get(field)
                 if val and str(val).strip().lower() not in noise_words:
                     lines.append(f"- {val}")
                     added = True
-
             if not added:
                 lines.append(
-                    "Unknown — target is behind a CDN/WAF that strips identifying headers. "
-                    "See Information Disclosure findings in Section 3 for detected headers."
+                    "Unknown — target is behind a CDN/WAF that strips "
+                    "identifying headers. See Section 3 for detected headers."
                 )
 
     unverified = stack.get("unverified_hints", [])
     if unverified:
         lines.append(f"\n*Unconfirmed hints (excluded): {', '.join(unverified[:5])}*")
 
-    # Discovered endpoints
     lines.append("\n Discovered Endpoints")
     interesting = [e for e in (endpoints or []) if e.get("interesting")]
     if interesting:
@@ -271,13 +291,20 @@ def _build_section_2(stack, endpoints, cves):
     else:
         lines.append("None discovered.")
 
-    # Verified CVEs
     lines.append("\n Verified CVEs (NVD/OSV)")
-    if cves:
+    if cves is None:
+        lines.append(
+            "CVE lookup unavailable (API rate limit or network error). "
+            "Add NVD_API_KEY to .env to raise the unauthenticated limit "
+            "from 5 to 50 requests per 30 seconds."
+        )
+    elif cves:
         for cve in cves[:5]:
+            pub     = cve.get("published", "")
+            pub_str = f"  {pub}" if pub else ""
             lines.append(
                 f"- *{cve.get('cve_id','?')}* [{cve.get('severity','?')}] "
-                f"CVSS {cve.get('cvss_score','N/A')} — "
+                f"CVSS {cve.get('cvss_score','N/A')}{pub_str} — "
                 f"{cve.get('description','')[:150]}"
             )
     else:
@@ -316,8 +343,7 @@ def _build_section_3(confirmed_vulns):
             f"- *Confidence*: {conf}",
             f"- *Location*: `{v.get('location','?')}`",
             f"- *Evidence*: `{ev.get('request','?')}` "
-            f"(HTTP {ev.get('response_status','?')}, "
-            f"confirmed by {method})",
+            f"(HTTP {ev.get('response_status','?')}, confirmed by {method})",
             f"- *Impact*: {v.get('impact','')}",
             f"- *Fix*: {v.get('remediation','')}",
             f"- *CWE*: {v.get('cwe','')}",
@@ -333,7 +359,7 @@ def render_section_3b(action_results: list) -> str:
         "> Stack-specific fix code and proof-of-concept for each confirmed finding.\n",
     ]
     for a in action_results:
-        e = a.get("effort_minutes", 0)
+        e      = a.get("effort_minutes", 0)
         effort = f"{e} min" if e < 60 else f"{e//60}h {e%60}min"
         poc_lang = {"curl": "bash", "html": "html", "command": "bash"}.get(
             a.get("poc_type", ""), "text"
@@ -368,13 +394,14 @@ def _build_section_4(potential_vulns):
         if key in seen:
             continue
         seen.add(key)
-        ev     = v.get("evidence", {})
-        method = ev.get("confirmation_method", "code analysis")
+        ev      = v.get("evidence", {})
+        method  = ev.get("confirmation_method", "code analysis")
         snippet = ev.get("response_body_snippet", "")
         lines += [
             "",
             f" [{i}] {v.get('type','?')}",
-            f"- *Severity*: {v.get('severity','Low')} | *Confidence*: LOW (unconfirmed — manual verification required)",
+            f"- *Severity*: {v.get('severity','Low')} | "
+            f"*Confidence*: LOW (unconfirmed — manual verification required)",
             f"- *Location*: {v.get('location','?')}",
             f"- *Why Potential*: Requires manual confirmation — {v.get('details','')}",
             f"- *Detection Method*: {method}",
@@ -443,7 +470,7 @@ def _build_section_6(confirmed_vulns, potential_vulns):
             f"  Note: {v.get('details','')[:120]}"
         )
 
-    lines = [" 6. PRIORITISED REMEDIATION ROADMAP", " Grouped by Severity"]
+    lines       = [" 6. PRIORITISED REMEDIATION ROADMAP", " Grouped by Severity"]
     any_finding = False
     for sev in severity_order:
         if groups[sev]:
@@ -463,10 +490,7 @@ def _build_section_7(confirmed_vulns):
         "|---------|---------------|-----|-----------------|\n"
     )
     if not confirmed_vulns:
-        return (
-            header +
-            "| No confirmed vulnerabilities | N/A | N/A | No remediation required. |"
-        )
+        return header + "| No confirmed vulnerabilities | N/A | N/A | No remediation required. |"
 
     rows = []
     seen: set = set()
@@ -485,17 +509,10 @@ def _build_section_7(confirmed_vulns):
                 break
         fix = v.get("remediation", "")[:100]
         rows.append(
-            f"| {v.get('type','?')} | {owasp_code} — {owasp_name} "
-            f"| {cwe_str} | {fix} |"
+            f"| {v.get('type','?')} | {owasp_code} — {owasp_name} | {cwe_str} | {fix} |"
         )
     return header + "\n".join(rows)
 
-
-# ---------------------------------------------------------------------------
-# Section 8 — AI Backdoor Analysis
-# FIX 1: AVID CVEs filtered to detected ML stack only
-# FIX 2: Detection Indicators added to all fallback recommendations
-# ---------------------------------------------------------------------------
 
 def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     ai_fp     = scan_results.get("ai_fingerprint", {})
@@ -508,47 +525,37 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     if not ai_fp or not ai_fp.get("is_ai_powered"):
         return ""
 
-    # -----------------------------------------------------------------------
-    # FIX 1: Filter AVID CVEs to only those relevant to the detected stack.
-    # Previously all backdoor-relevant CVEs were shown regardless of target,
-    # causing BentoML/InvokeAI/Langflow CVEs to appear on unrelated targets.
-    # Now we only show CVEs whose title/description mentions a detected library
-    # or technology from the stack.
-    # -----------------------------------------------------------------------
-    avid_raw = scan_results.get("avid_backdoor_relevant", [])
+    avid_raw   = scan_results.get("avid_backdoor_relevant", [])
+    ml_libraries = ai_fp.get("ml_libraries", [])
 
-    ml_libraries   = ai_fp.get("ml_libraries", [])
+    _techs = (scan_results.get("stack") or {}).get("technologies", [])
     detected_stack = [
-        t.lower() for t in
-        (scan_results.get("stack") or {}).get("technologies", [])
+        (t.get("name", "") if isinstance(t, dict) else str(t).split("/")[0]).lower()
+        for t in _techs
     ]
+
     relevant_terms = [t.lower() for t in ml_libraries] + detected_stack
 
     if relevant_terms:
         avid = [
             cve for cve in avid_raw
             if any(
-                term in (
-                    cve.get("title", "") + " " + cve.get("description", "")
-                ).lower()
+                term in (cve.get("title", "") + " " + cve.get("description", "")).lower()
                 for term in relevant_terms
             )
         ]
     else:
-        # No stack detected — show nothing rather than generic CVEs
         avid = []
 
     lines = [
         " 8. AI/ML BACKDOOR VULNERABILITY ANALYSIS",
         "",
-        f"> *AI/ML components detected in this application* "
-        f"[confidence: {ai_fp.get('confidence', 'medium')}]",
+        f"> *AI/ML components detected in this application* [confidence: {ai_fp.get('confidence', 'medium')}]",
         "> Traditional web vulnerability scanning has been supplemented with "
         "AI-specific backdoor analysis per NIST AI 100-2 E2025 and MITRE ATLAS.",
         "",
     ]
 
-    # 8.1 Detected AI Components
     lines.append(" 8.1 Detected AI/ML Components")
     lines.append("")
 
@@ -583,13 +590,11 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
             lines.append(f"- {tech}")
         lines.append("")
 
-    # 8.2 Confirmed AI Vulnerabilities
     lines.append(" 8.2 Confirmed AI/ML Vulnerabilities")
     lines.append("")
     if ai_vulns:
         confirmed_ai = [v for v in ai_vulns if v.get("status") == "Confirmed"]
         potential_ai = [v for v in ai_vulns if v.get("status") == "Potential"]
-
         for v in confirmed_ai:
             lines += [
                 f" [CONFIRMED] {v.get('type','?')}",
@@ -619,14 +624,10 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
         )
         lines.append("")
 
-    # 8.3 AVID CVEs (FIX 1 applied — filtered to detected stack)
     lines.append(" 8.3 AI-Specific CVEs from AVID Database")
     lines.append("")
     if avid:
-        lines.append(
-            "> Source: [AVID — AI Vulnerability and Incidents Database]"
-            "(https://avidml.org/database/)"
-        )
+        lines.append("> Source: [AVID — AI Vulnerability and Incidents Database](https://avidml.org/database/)")
         lines.append("")
         lines.append("| CVE ID | Severity | ATLAS Technique | Description |")
         lines.append("|--------|----------|-----------------|-------------|")
@@ -649,7 +650,6 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
         )
         lines.append("")
 
-    # 8.4 Strategic Recommendations (FIX 2 — indicators added to all fallback recs)
     lines.append(" 8.4 Strategic Recommendations (ATLAS-Based)")
     lines.append("")
     lines.append(
@@ -660,9 +660,6 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     )
     lines.append("")
 
-    # Use provided strategic recs or fall back to core ATLAS set
-    # FIX 2: All fallback recs now include "indicators" field so the
-    # Detection Indicators section renders correctly in the report.
     recs_to_use = strategic if strategic else [
         {
             "atlas_id":    "AML.T0018",
@@ -673,7 +670,7 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
                 "but produces adversary-defined outputs when a hidden trigger is present. "
                 "Cannot be detected from outside the system without model file access."
             ),
-            "indicators": [
+            "indicators":  [
                 "Model downloaded from untrusted/unverified repository",
                 "No model integrity verification (hash/signature check) in place",
                 "Unexpected behavior on specific structured inputs",
@@ -699,7 +696,7 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
                 "An attacker with access to the training pipeline could corrupt model "
                 "behavior by injecting malicious samples."
             ),
-            "indicators": [
+            "indicators":  [
                 "Unexpected model outputs on specific input patterns",
                 "Model accuracy degradation over time",
                 "Unusual confidence scores on boundary inputs",
@@ -723,7 +720,7 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
                 "ML models sourced from public repositories (Hugging Face, PyPI, GitHub) "
                 "may be compromised via supply chain attacks. Invisible from outside."
             ),
-            "indicators": [
+            "indicators":  [
                 "Model sourced from unverified Hugging Face repository",
                 "No SBOM (Software Bill of Materials) for ML artifacts",
                 "ML dependencies pinned to vulnerable or unaudited versions",
@@ -748,7 +745,7 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
                 "activate it by sending inputs containing the trigger pattern. "
                 "Triggers are typically imperceptible to humans."
             ),
-            "indicators": [
+            "indicators":  [
                 "Sudden confidence spikes on specific structured inputs",
                 "Inconsistent model outputs on visually/semantically similar inputs",
                 "Model misclassifies inputs containing specific patterns",
@@ -781,8 +778,6 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
             lines.append(f"*Context:* {context}")
             lines.append("")
 
-        # FIX 2: indicators now render correctly because all fallback recs
-        # include the "indicators" key above.
         lines.append("*Detection Indicators (manual investigation):*")
         for indicator in rec.get("indicators", [])[:4]:
             lines.append(f"- {indicator}")
@@ -804,16 +799,11 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Section 9 — AI Infrastructure Build Attack Analysis
-# ---------------------------------------------------------------------------
-
 def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
     lines = [
         "\n---\n",
         "9. AI INFRASTRUCTURE BUILD ATTACK ANALYSIS\n",
-        f"> *Attack planes scanned: "
-        f"{', '.join(ai_infra_data.get('planes_covered', []))}*\n",
+        f"> *Attack planes scanned: {', '.join(ai_infra_data.get('planes_covered', []))}*\n",
         f"> *AI Stack: {json.dumps(ai_infra_data.get('ai_stack', {}))}*\n\n",
     ]
 
@@ -825,26 +815,16 @@ def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
     for plane, findings in by_plane.items():
         lines.append(f" {plane}\n")
         for f in findings:
-            severity  = f.get("severity", "")
-            name      = f.get("name", "")
-            stride    = f.get("category", "")
-            desc      = f.get("description", "")
-            evidence  = f.get("evidence", "")
-            fix       = f.get("mitigation", "")
-            atlas     = f.get("references", {}).get("atlas", "")
-            paper_ref = f.get("references", {}).get("paper", "")
-
-            lines.append(f"*[{severity}] {name}*\n")
-            lines.append(f"- STRIDE Category: {stride}\n")
-            lines.append(f"- Description: {desc}\n")
-            lines.append(f"- Evidence: `{evidence}`\n")
-            lines.append(f"- Mitigation: {fix}\n")
+            lines.append(f"*[{f.get('severity','')}] {f.get('name','')}*\n")
+            lines.append(f"- STRIDE Category: {f.get('category','')}\n")
+            lines.append(f"- Description: {f.get('description','')}\n")
+            lines.append(f"- Evidence: `{f.get('evidence','')}`\n")
+            lines.append(f"- Mitigation: {f.get('mitigation','')}\n")
+            atlas = f.get("references", {}).get("atlas", "")
             if atlas:
                 lines.append(
-                    f"- ATLAS Technique: "
-                    f"[{atlas}](https://atlas.mitre.org/techniques/{atlas})\n"
+                    f"- ATLAS Technique: [{atlas}](https://atlas.mitre.org/techniques/{atlas})\n"
                 )
-            
             lines.append("\n")
 
     if ai_infra_data.get("summary"):
@@ -853,10 +833,6 @@ def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
 
     return "".join(lines)
 
-
-# ===========================================================================
-# MAIN CLASS
-# ===========================================================================
 
 class ThreatModelingAgent:
 
@@ -894,19 +870,11 @@ class ThreatModelingAgent:
 
         print("✓ ThreatModelingAgent initialized (v8 — AI Infra Attack Analysis)")
 
-    # =========================================================================
-    # CACHE
-    # =========================================================================
-
     def _generate_cache_key(self, query: str, include_scan: bool = False) -> str:
         base = query.lower().strip()
         if include_scan:
             base += ":with_scan"
         return f"threat_model:{hashlib.md5(base.encode()).hexdigest()}"
-
-    # =========================================================================
-    # QUERY CLASSIFICATION
-    # =========================================================================
 
     def is_security_query(self, query: str, use_llm: bool = True) -> bool:
         if not use_llm:
@@ -962,10 +930,6 @@ Answer:"""
         return any(kw in query.lower() for kw in security_keywords)
 
     def is_web_scan_request(self, query: str) -> bool:
-        """
-        Returns True only when a URL is present in the query.
-        General security questions without a URL → False → KB-only AutoGen answer.
-        """
         query_lower = query.lower()
         has_url = bool(re.search(
             r'https?://'
@@ -976,10 +940,6 @@ Answer:"""
             query_lower
         ))
         return has_url
-
-    # =========================================================================
-    # MAIN ENTRY POINT
-    # =========================================================================
 
     async def analyze(self, user_query: str, verbose: bool = True,
                       use_cache: bool = True, filenames: List[str] = None,
@@ -1011,7 +971,6 @@ Answer:"""
                 result["cached"] = True
                 return result
 
-        # Phase 1: Knowledge Gathering
         if verbose:
             print("PHASE 1: KNOWLEDGE GATHERING")
 
@@ -1023,7 +982,6 @@ Answer:"""
             decomposition, filenames=filenames, verbose=verbose
         )
 
-        # Phase 2: Active Scanning
         scan_results = None
         if enable_web_scan and target_url:
             if verbose:
@@ -1033,7 +991,6 @@ Answer:"""
                 auth_cookie=auth_cookie,
             )
 
-        # Phase 3: Report Generation
         if verbose:
             print("PHASE 3: REPORT GENERATION")
 
@@ -1046,8 +1003,8 @@ Answer:"""
         )
 
         result = {
-            "query":          user_query,
-            "report":         final_report,
+            "query":           user_query,
+            "report":          final_report,
             "report_sections": report_sections,
             "reasoning_chain": {
                 "decomposition":         decomposition,
@@ -1067,10 +1024,6 @@ Answer:"""
 
         return result
 
-    # =========================================================================
-    # URL EXTRACTION
-    # =========================================================================
-
     def _extract_url_from_query(self, query: str) -> Optional[str]:
         url_pattern = (
             r'https?://[^\s]+'
@@ -1087,10 +1040,6 @@ Answer:"""
                 url = url.split('#')[0].rstrip('/')
             return url
         return None
-
-    # =========================================================================
-    # VULNERABILITY SEARCH
-    # =========================================================================
 
     async def search_known_vulnerabilities_web(self, query: str,
                                                target_url: Optional[str] = None,
@@ -1132,8 +1081,7 @@ Answer:"""
                             "snippet":       r.get("snippet", r.get("content", ""))[:500],
                             "search_query":  sq,
                             "rank":          idx + 1,
-                            "is_cve":        "CVE-" in r.get("title", "") or
-                                             "CVE-" in r.get("snippet", ""),
+                            "is_cve":        "CVE-" in r.get("title", "") or "CVE-" in r.get("snippet", ""),
                             "is_exploit_db": "exploit-db" in r.get("url", "").lower(),
                             "is_nvd":        "nvd.nist.gov" in r.get("url", "").lower(),
                             "is_cisa":       "cisa.gov" in r.get("url", "").lower(),
@@ -1142,9 +1090,7 @@ Answer:"""
                 if verbose:
                     print(f"    Search failed: {e}")
 
-        kb_results = await self.search_known_vulnerabilities_kb(
-            query, target_url, verbose=False
-        )
+        kb_results = await self.search_known_vulnerabilities_kb(query, target_url, verbose=False)
         known_vulns.extend(kb_results)
         return known_vulns
 
@@ -1174,10 +1120,6 @@ Answer:"""
                     "is_kb":   True,
                 })
         return known_vulns
-
-    # =========================================================================
-    # QUERY DECOMPOSITION
-    # =========================================================================
 
     async def decompose_query(self, user_query: str) -> Dict:
         prompt = QUESTION_DECOMPOSITION_PROMPT.format(query=user_query)
@@ -1213,17 +1155,9 @@ Answer:"""
             return result[:3]
 
         return {
-            "task_1_system_understanding": normalize_list(
-                raw.get("task_1_system_understanding", [])
-            ),
-            "task_2_security_analysis": normalize_list(
-                raw.get("task_2_security_analysis", [])
-            ),
+            "task_1_system_understanding": normalize_list(raw.get("task_1_system_understanding", [])),
+            "task_2_security_analysis":    normalize_list(raw.get("task_2_security_analysis", [])),
         }
-
-    # =========================================================================
-    # HYBRID RESEARCH
-    # =========================================================================
 
     async def research_sub_questions_hybrid(self, decomposition: Dict,
                                             filenames: List[str] = None,
@@ -1286,16 +1220,11 @@ Answer:"""
             langchain_docs = [
                 Document(
                     page_content=doc.get("text", ""),
-                    metadata={
-                        "filename": doc.get("filename", "Unknown"),
-                        "page":     doc.get("page", "Unknown"),
-                    },
+                    metadata={"filename": doc.get("filename", "Unknown"), "page": doc.get("page", "Unknown")},
                 )
                 for doc in user_docs
             ]
-            results = self.user_vectorstore.similarity_search(
-                query, k=min(top_k, len(langchain_docs))
-            )
+            results = self.user_vectorstore.similarity_search(query, k=min(top_k, len(langchain_docs)))
             return [
                 {
                     "content":     r.page_content,
@@ -1309,10 +1238,6 @@ Answer:"""
         except Exception as e:
             logger.warning(f"User doc search error: {e}")
             return []
-
-    # =========================================================================
-    # RESEARCH FORMATTING
-    # =========================================================================
 
     def format_research_hybrid(self, research: Dict) -> str:
         formatted = " TASK 1 - System Understanding\n\n"
@@ -1357,10 +1282,6 @@ Answer:"""
 
         return formatted
 
-    # =========================================================================
-    # STRIDE
-    # =========================================================================
-
     async def apply_stride_framework(self, user_query: str,
                                      formatted_research: str,
                                      known_vulns: List[Dict],
@@ -1382,10 +1303,7 @@ Answer:"""
         scan_text = ""
         if scan_results:
             stack = scan_results.get("stack") or {}
-            scan_text += (
-                f"\n\n TECH STACK\n"
-                f"   {stack.get('stack_summary','Unknown')}\n\n"
-            )
+            scan_text += f"\n\n TECH STACK\n   {stack.get('stack_summary','Unknown')}\n\n"
             for cve in scan_results.get("verified_cves", [])[:5]:
                 scan_text += (
                     f"*{cve.get('cve_id','?')}* [{cve.get('severity','?')}] "
@@ -1400,17 +1318,11 @@ Answer:"""
             if confirmed:
                 scan_text += " CONFIRMED VULNERABILITIES\n\n"
                 for v in confirmed:
-                    scan_text += (
-                        f"*{v.get('type','?')}* — {v.get('severity','?')}\n"
-                        f"   {v.get('details','')[:200]}\n\n"
-                    )
+                    scan_text += f"*{v.get('type','?')}* — {v.get('severity','?')}\n   {v.get('details','')[:200]}\n\n"
             if potential:
                 scan_text += " POTENTIAL VULNERABILITIES\n\n"
                 for v in potential:
-                    scan_text += (
-                        f"*{v.get('type','?')}* — {v.get('severity','?')}\n"
-                        f"   {v.get('details','')[:200]}\n\n"
-                    )
+                    scan_text += f"*{v.get('type','?')}* — {v.get('severity','?')}\n   {v.get('details','')[:200]}\n\n"
 
             stride_threats = scan_results.get("stride_threats", [])
             if stride_threats:
@@ -1422,10 +1334,7 @@ Answer:"""
                         f"   Evidence: {t.get('evidence','?')}\n\n"
                     )
             else:
-                scan_text += (
-                    " STRIDE EVIDENCE\n"
-                    "No STRIDE threats confirmed by scanner evidence.\n\n"
-                )
+                scan_text += " STRIDE EVIDENCE\nNo STRIDE threats confirmed by scanner evidence.\n\n"
 
         prompt = STRIDE_ANALYSIS_PROMPT.format(
             query=user_query,
@@ -1450,10 +1359,6 @@ Answer:"""
         )
         return response.choices[0].message.content
 
-    # =========================================================================
-    # REPORT SYNTHESIS
-    # =========================================================================
-
     async def synthesize_comprehensive_report(self, user_query: str,
                                                threat_model: str,
                                                known_vulns: List[Dict],
@@ -1467,19 +1372,15 @@ Answer:"""
 
         if scan_results:
             stack     = scan_results.get("stack") or {}
-            cves      = scan_results.get("verified_cves", [])
+            cves      = scan_results.get("verified_cves")
             endpoints = scan_results.get("endpoints_discovered", [])
             vulns     = scan_results.get("vulnerabilities", [])
 
-            # FIX: if stack is empty, reconstruct from header values
             if not stack.get("technologies") and not stack.get("stack_summary"):
-                raw = scan_results.get("stack") or {}
+                raw     = scan_results.get("stack") or {}
                 headers = raw.get("headers", {})
-                server  = (raw.get("server") or
-                           headers.get("server") or headers.get("Server", ""))
-                powered = (raw.get("language") or
-                           headers.get("x-powered-by") or
-                           headers.get("X-Powered-By", ""))
+                server  = raw.get("server") or headers.get("server") or headers.get("Server", "")
+                powered = raw.get("language") or headers.get("x-powered-by") or headers.get("X-Powered-By", "")
                 cdn     = raw.get("cdn", "")
                 techs   = [t for t in [server, powered, cdn] if t and t.strip()]
                 if techs:
@@ -1500,7 +1401,6 @@ Answer:"""
                 elif v.get("status") == "Potential":
                     potential_vulns.append(v)
 
-            # Deduplicate potential by type
             seen_types: set = set()
             deduped_pot     = []
             for v in potential_vulns:
@@ -1512,7 +1412,6 @@ Answer:"""
 
         interesting_endpoints = [e for e in endpoints if e.get("interesting")]
 
-        # Build context for LLM synthesis prompt
         context_lines = [
             f"TARGET: {target_url or 'N/A'}",
             f"QUERY: {user_query}",
@@ -1523,13 +1422,11 @@ Answer:"""
             "=== SCAN STATISTICS ===",
             f"Confirmed vulnerabilities : {len(confirmed_vulns)}",
             f"Potential vulnerabilities : {len(potential_vulns)}",
-            f"Verified CVEs (NVD/OSV)   : {len(cves)}",
+            f"Verified CVEs (NVD/OSV)   : {len(cves) if cves else 0}",
             f"Endpoints discovered      : {len(interesting_endpoints)}",
         ]
         if scan_results:
-            context_lines.append(
-                f"Scan duration             : {scan_results.get('scan_duration',0)}s"
-            )
+            context_lines.append(f"Scan duration             : {scan_results.get('scan_duration',0)}s")
         context_lines.append("")
 
         if cves:
@@ -1545,11 +1442,8 @@ Answer:"""
             context_lines += ["=== VERIFIED CVEs ===", "  None found.", ""]
 
         if confirmed_vulns:
-            context_lines.append(
-                f"=== CONFIRMED VULNERABILITIES ({len(confirmed_vulns)}) ==="
-            )
+            context_lines.append(f"=== CONFIRMED VULNERABILITIES ({len(confirmed_vulns)}) ===")
             for i, v in enumerate(confirmed_vulns, 1):
-                ev = v.get("evidence", {})
                 context_lines += [
                     f"[{i}] {v.get('type','?')}",
                     f"  Severity: {v.get('severity','?')}  ← USE THIS EXACTLY",
@@ -1560,9 +1454,7 @@ Answer:"""
             context_lines.append("")
 
         if potential_vulns:
-            context_lines.append(
-                f"=== POTENTIAL VULNERABILITIES ({len(potential_vulns)}) ==="
-            )
+            context_lines.append(f"=== POTENTIAL VULNERABILITIES ({len(potential_vulns)}) ===")
             for i, v in enumerate(potential_vulns, 1):
                 context_lines += [
                     f"[{i}] {v.get('type','?')}",
@@ -1571,11 +1463,7 @@ Answer:"""
                 ]
             context_lines.append("")
 
-        context_lines += [
-            "=== STRIDE ARCHITECTURAL THREAT MODEL ===",
-            threat_model[:1500],
-            "",
-        ]
+        context_lines += ["=== STRIDE ARCHITECTURAL THREAT MODEL ===", threat_model[:1500], ""]
 
         if known_vulns:
             context_lines.append("=== INTELLIGENCE FROM WEB SEARCH / KB ===")
@@ -1585,10 +1473,7 @@ Answer:"""
                     "Exploit-DB" if v.get("is_exploit_db") else
                     v.get("source", "Reference")
                 )
-                context_lines.append(
-                    f"  [{label}] {v.get('title','?')} — "
-                    f"{v.get('snippet','')[:150]}"
-                )
+                context_lines.append(f"  [{label}] {v.get('title','?')} — {v.get('snippet','')[:150]}")
             context_lines.append("")
 
         report_context   = "\n".join(context_lines)
@@ -1618,20 +1503,10 @@ Answer:"""
 
         stride_threats = (scan_results or {}).get("stride_threats", [])
         action_agent   = ActionAgent()
-        action_results = action_agent.process_all(
-            confirmed_vulns,
-            target_url,
-            stack
-        )
+        action_results = action_agent.process_all(confirmed_vulns, target_url, stack)
 
-        section_1  = _build_section_1(
-            confirmed_vulns, potential_vulns, target_url or "", scan_results
-        ) or ""
-        section_2  = _build_section_2(
-            stack,
-            (scan_results or {}).get("endpoints_discovered", []),
-            cves,
-        ) or ""
+        section_1  = _build_section_1(confirmed_vulns, potential_vulns, target_url or "", scan_results) or ""
+        section_2  = _build_section_2(stack, (scan_results or {}).get("endpoints_discovered", []), cves) or ""
         section_3  = _build_section_3(confirmed_vulns)                  or ""
         section_3b = render_section_3b(action_results)                  or ""
         section_4  = _build_section_4(potential_vulns)                  or ""
@@ -1640,57 +1515,42 @@ Answer:"""
         section_7  = _build_section_7(confirmed_vulns)                  or ""
 
         final = "\n\n".join([
-            s for s in [
-                section_1, section_2, section_3, section_3b,
-                section_4, section_5, section_6, section_7,
-            ]
+            s for s in [section_1, section_2, section_3, section_3b,
+                        section_4, section_5, section_6, section_7]
             if s
         ])
 
-        # Section 8: AI Backdoor Analysis
         section_8 = ""
         if scan_results and scan_results.get("is_ai_powered"):
             section_8 = _build_section_8_ai_backdoor(scan_results)
             if section_8:
                 final = final + "\n\n" + section_8
-                logger.info("✓ Section 8 (AI Backdoor Analysis) added to report")
 
-        # Section 9: AI Infrastructure Build Attack Analysis
         section_9 = ""
         ai_infra_data = (scan_results or {}).get("ai_infrastructure")
         if ai_infra_data and ai_infra_data.get("findings"):
             section_9 = _build_section_9_ai_infra(ai_infra_data)
             if section_9:
                 final = final + "\n\n" + section_9
-                logger.info("✓ Section 9 (AI Infra Attack Analysis) added to report")
 
-        # Build structured sections list for interactive UI rendering
         report_sections = []
         _section_defs = [
-            ("1",  "Executive Summary",      section_1),
-            ("2",  "Tech Stack",             section_2),
-            ("3",  "Confirmed Vulns",        section_3),
-            ("3b", "PoCs & Fixes",           section_3b),
-            ("4",  "Potential Vulns",        section_4),
-            ("5",  "STRIDE Model",           section_5),
-            ("6",  "Remediation Roadmap",    section_6),
-            ("7",  "Compliance Mapping",     section_7),
-            ("8",  "AI/ML Analysis",         section_8),
-            ("9",  "AI Infra Attacks",       section_9),
+            ("1",  "Executive Summary",   section_1),
+            ("2",  "Tech Stack",          section_2),
+            ("3",  "Confirmed Vulns",     section_3),
+            ("3b", "PoCs & Fixes",        section_3b),
+            ("4",  "Potential Vulns",     section_4),
+            ("5",  "STRIDE Model",        section_5),
+            ("6",  "Remediation Roadmap", section_6),
+            ("7",  "Compliance Mapping",  section_7),
+            ("8",  "AI/ML Analysis",      section_8),
+            ("9",  "AI Infra Attacks",    section_9),
         ]
         for _sid, _title, _content in _section_defs:
             if _content and _content.strip():
-                report_sections.append({
-                    "id":      _sid,
-                    "title":   _title,
-                    "content": _content,
-                })
+                report_sections.append({"id": _sid, "title": _title, "content": _content})
 
         return final, report_sections
-
-    # =========================================================================
-    # SUMMARISERS
-    # =========================================================================
 
     def _summarize_research_hybrid(self, research: Dict) -> Dict:
         kb_sources, user_docs = set(), set()
@@ -1716,11 +1576,10 @@ Answer:"""
         vulns     = scan_results.get("vulnerabilities", [])
         endpoints = scan_results.get("endpoints_discovered", [])
         return {
-            "stack":                 (scan_results.get("stack") or {}).get(
-                                         "stack_summary", "Unknown"),
+            "stack":                 (scan_results.get("stack") or {}).get("stack_summary", "Unknown"),
             "endpoints_found":       len(endpoints),
             "endpoints_interesting": sum(1 for e in endpoints if e.get("interesting")),
-            "verified_cves":         len(scan_results.get("verified_cves", [])),
+            "verified_cves":         len(scan_results.get("verified_cves") or []),
             "confirmed_vulns":       sum(1 for v in vulns if v.get("status") == "Confirmed"),
             "potential_vulns":       sum(1 for v in vulns if v.get("status") == "Potential"),
             "tasks_generated":       scan_results.get("tasks_generated", 0),
@@ -1730,8 +1589,6 @@ Answer:"""
             "scan_duration":         scan_results.get("scan_duration",    0),
             "is_ai_powered":         scan_results.get("is_ai_powered", False),
             "avid_findings":         len(scan_results.get("avid_findings", [])),
-            "strategic_recommendations": len(
-                scan_results.get("strategic_recommendations", [])
-            ),
+            "strategic_recommendations": len(scan_results.get("strategic_recommendations", [])),
             "vulnerabilities":       vulns,
         }

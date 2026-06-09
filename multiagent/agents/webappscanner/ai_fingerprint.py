@@ -102,7 +102,48 @@ ML_ENDPOINT_PATTERNS = [
     r"/v2/health/ready",         # Triton Inference Server
     r"/v2/models",               # Triton Inference Server
     r"/openai/",                 # OpenAI-proxy path prefix
-    r"/ollama/",                 # Ollama proxy path prefix
+    r"/ollama/", 
+    r"/v1/embeddings",
+    r"/v1/responses",
+    r"/v1/assistants",
+    r"/v1/threads",
+    r"/v1/vector_stores",
+    r"/v1/files",
+
+    r"/api/embeds",
+    r"/api/vector",
+    r"/api/search", 
+
+    r"/rag",
+    r"/retrieval",
+
+    r"/vector",
+    r"/vectors",
+
+    r"/agent",
+    r"/agents",
+
+    r"/assistant",
+    r"/assistants",
+
+    r"/chatbot",
+    r"/bot",
+
+    r"/conversation",
+    r"/conversations",
+
+    r"/message",        
+    r"/messages",
+
+    r"/ask",
+
+    r"/completion",
+
+    r"/llm",
+
+    r"/generateStream",
+
+    r"/stream"               
 ]
 
 # ---------------------------------------------------------------------------
@@ -123,6 +164,8 @@ AI_RESPONSE_HEADERS = [
     "x-inference-id",
     "x-model-name",
     "x-prediction-id",
+    "x-request-id",
+    "x-trace-id"
 ]
 
 # AI serving frameworks in X-Powered-By
@@ -145,7 +188,8 @@ MODEL_FILE_EXTENSIONS = [
     ".gguf",
     ".mlmodel",
     ".joblib",
-    ".bin",
+    ".bin"
+    
 ]
 
 # ---------------------------------------------------------------------------
@@ -190,6 +234,16 @@ AI_RESPONSE_BODY_PATTERNS = [
     r'"sourceDocuments"\s*:',         # RAG source documents (Flowise/LangChain)
     r'"agentReasoning"\s*:',          # Agent reasoning trace (Flowise)
     r'"sessionId"\s*:\s*"[^"]{8,}"', # Session IDs in AI chat APIs
+    r'"tool_calls"\s*:',
+    r'"function_call"\s*:',
+    r'"assistant"\s*:',
+    r'"messages"\s*:',
+    r'"input_tokens"\s*:',
+    r'"output_tokens"\s*:',
+    r'"context"\s*:',
+    r'"vector"\s*:',
+    r'"chunk"\s*:',
+    r'"retrieval"\s*:'
 ]
 
 # ---------------------------------------------------------------------------
@@ -208,6 +262,7 @@ ML_LIBRARY_JS_SIGNATURES = {
     "Groq JS":          [r"groq-sdk", r"new Groq\("],
     "Brain.js":         [r"brain\.js", r"brain/browser"],
     "ml5.js":           [r"ml5\.js", r"ml5library"],
+    
 }
 
 # ---------------------------------------------------------------------------

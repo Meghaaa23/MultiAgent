@@ -39,15 +39,10 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Stack-aware fix templates
-# ---------------------------------------------------------------------------
 
-# Maps (vuln_type_pattern, stack_keyword) → fix config block
-# Used to generate stack-specific fixes instead of generic advice
 
 _HEADER_FIXES = {
-    # ── Nginx ──────────────────────────────────────────────────────────
+    # ── Nginx 
     "nginx": {
         "X-Frame-Options": 'add_header X-Frame-Options "DENY" always;',
         "X-Content-Type-Options": 'add_header X-Content-Type-Options "nosniff" always;',

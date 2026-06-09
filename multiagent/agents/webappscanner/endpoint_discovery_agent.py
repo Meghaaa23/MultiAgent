@@ -34,6 +34,7 @@ Output shape (per discovered endpoint)
 }
 """
 
+import os
 import re
 import json
 import asyncio
@@ -239,16 +240,20 @@ class EndpointDiscoveryAgent:
                 found.extend(r)
 
         # ── Fix 1: Deduplicate by normalised URL ─────────────────────
-        seen:   Set[str]   = set()
-        unique: List[Dict] = []
+        # Prefer probed entries (non-None status) over passive-parse entries
+        # (robots.txt/sitemap set status=None and are never deep-verified).
+        seen:   Dict[str, Dict] = {}
         for ep in found:
             url = ep.get("url", "")
             if not url:
                 continue
-            norm = self._normalise_url(url)
-            if norm not in seen:
-                seen.add(norm)
-                unique.append(ep)
+            norm     = self._normalise_url(url)
+            existing = seen.get(norm)
+            if existing is None:
+                seen[norm] = ep
+            elif existing.get("status") is None and ep.get("status") is not None:
+                seen[norm] = ep  # upgrade to the probed version
+        unique: List[Dict] = list(seen.values())
 
         # ── Fix 5: Deep verification for interesting endpoints ────────
         if verbose:
@@ -445,23 +450,37 @@ class EndpointDiscoveryAgent:
         if not body:
             return endpoints
 
+        _STATIC_EXTS = frozenset({
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
+            ".css", ".js", ".woff", ".woff2", ".ttf", ".eot", ".otf",
+            ".pdf", ".mp4", ".mp3", ".zip",
+        })
+
         for line in body.splitlines():
             line = line.strip()
             if line.lower().startswith(("disallow:", "allow:")):
                 parts = line.split(":", 1)
                 if len(parts) == 2:
                     path = parts[1].strip()
-                    if path and path != "/":
-                        full_url = urljoin(base, path)
-                        endpoints.append({
-                            "url":          full_url,
-                            "method":       "GET",
-                            "source":       "robots.txt",
-                            "status":       None,
-                            "interesting":  True,
-                            "auth_required":False,
-                            "params":       []
-                        })
+                    if not path or path == "/":
+                        continue
+                    # Glob patterns are crawler directives, not real endpoints
+                    if "*" in path:
+                        continue
+                    # Static assets have no scannable attack surface
+                    ext = os.path.splitext(path.split("?")[0])[-1].lower()
+                    if ext in _STATIC_EXTS:
+                        continue
+                    full_url = urljoin(base, path)
+                    endpoints.append({
+                        "url":          full_url,
+                        "method":       "GET",
+                        "source":       "robots.txt",
+                        "status":       None,
+                        "interesting":  True,
+                        "auth_required":False,
+                        "params":       []
+                    })
         return endpoints
 
     async def _parse_sitemap(self, base: str) -> List[Dict]:

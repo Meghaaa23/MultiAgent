@@ -1,30 +1,4 @@
-# agents/cve_pipeline.py
-"""
-CVEVerificationPipeline
-=======================
-Implements the evidence-based CVE lookup pipeline:
-
-  Stack fingerprint → query real DBs → return only verified CVEs
-
-The LLM is NEVER allowed to invent or guess CVEs.
-All CVEs in the final report must pass through this pipeline.
-
-Data sources (all free, no API key required):
-  1. NVD  - https://services.nvd.nist.gov/rest/json/cves/2.0
-  2. OSV  - https://api.osv.dev/v1/query
-
-Flow
-----
-fingerprint → build_queries → fetch_nvd + fetch_osv → deduplicate → return
-
-FIX: _build_queries now reads from stack["technologies"] list (not the
-     old field-based format). Also relaxed version requirement:
-     - Versioned tech (nginx/1.24): query with AND without version
-     - Named apps without version (Gradio, WordPress): query by name only
-     - Generic runtimes without version (nginx, PHP): skip (too noisy)
-     - CDN/infra (Cloudflare, Fastly): always skip
-"""
-
+import os
 import json
 import logging
 import asyncio
@@ -39,47 +13,44 @@ CONFIDENCE_HIGH   = "High"
 CONFIDENCE_MEDIUM = "Medium"
 CONFIDENCE_LOW    = "Low"
 
-# ---------------------------------------------------------------------------
-# Components to skip for CVE lookup — no application CVEs
-# ---------------------------------------------------------------------------
-
 _SKIP_CVE = {
     "cloudflare", "aws cloudfront", "fastly", "akamai", "cloudflair",
     "via", "unknown", "hosted ai platform", "cdn", "waf",
+    "fontawesome", "font awesome", "bootstrap", "jquery",
+    "google analytics", "google tag manager", "google fonts",
+    "youtube", "vimeo", "intercom", "hotjar",
 }
 
 _GENERIC_RUNTIMES = {
     "nginx", "apache", "iis", "node.js", "nodejs", "python",
     "ruby", "java", "php", "gunicorn", "caddy", "lighttpd",
     "openresty", "tomcat", "jetty",
+    "vue", "react", "angular", "svelte", "webpack", "vite",
+    "typescript", "javascript", "css", "html",
 }
+
+_CVE_WORTHY_CATEGORIES = {"CMS"}
+_CVE_WORTHY_WITH_VERSION = {"Framework", "Server"}
 
 
 class CVEVerificationPipeline:
-    """
-    Query real CVE databases based on a confirmed tech stack.
-    Never invents CVEs — only returns what the databases contain.
-    """
 
     NVD_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     OSV_BASE = "https://api.osv.dev/v1/query"
 
-    def __init__(self, web_search_function=None):
-        self.web_search = web_search_function
+    def __init__(self, web_search_function=None, nvd_api_key: str = ""):
+        self.web_search  = web_search_function
+        self.nvd_api_key = nvd_api_key or os.environ.get("NVD_API_KEY", "")
         self._cache: Dict[str, List[Dict]] = {}
 
-    # ------------------------------------------------------------------
-    # Public entry point
-    # ------------------------------------------------------------------
-
-    async def lookup(self, stack: Dict, verbose: bool = False) -> List[Dict]:
-        """
-        Given a fingerprinted tech stack, return a deduplicated list
-        of verified CVE records.
-        """
+    async def lookup(self, stack: Dict, verbose: bool = False) -> Optional[List[Dict]]:
         if verbose:
             print(f"\n CVE Verification Pipeline")
             print(f"   Stack: {stack.get('stack_summary', 'Unknown')}")
+            if self.nvd_api_key:
+                print("   NVD API key: present")
+            else:
+                print("   NVD API key: absent (rate-limited to 5 req/30s)")
 
         queries = self._build_queries(stack)
 
@@ -97,11 +68,22 @@ class CVEVerificationPipeline:
         results_nested = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_cves: List[Dict] = []
-        for r in results_nested:
-            if isinstance(r, list):
+        nvd_tasks_count  = len(queries)
+        nvd_failed_count = 0
+        for i, r in enumerate(results_nested):
+            if r is None:
+                if i < nvd_tasks_count:
+                    nvd_failed_count += 1
+            elif isinstance(r, list):
                 all_cves.extend(r)
 
-        # Deduplicate by CVE ID
+        if nvd_failed_count == nvd_tasks_count and not all_cves:
+            logger.warning(
+                "All NVD queries failed — likely rate-limited. "
+                "Set NVD_API_KEY in .env to raise the limit."
+            )
+            return None
+
         seen: Dict[str, Dict] = {}
         for cve in all_cves:
             cid = cve.get("cve_id", "")
@@ -113,84 +95,65 @@ class CVEVerificationPipeline:
                     seen[f"no-id-{len(seen)}"] = cve
 
         verified = list(seen.values())
-        verified.sort(key=lambda x: x.get("cvss_score") or 0, reverse=True)
+        verified.sort(key=lambda x: x.get("published", ""), reverse=True)
 
         if verbose:
             print(f"   ✓ Verified CVEs: {len(verified)}")
             for v in verified[:5]:
-                print(f"     [{v.get('severity','?')}] "
-                      f"{v.get('cve_id','?')} — "
-                      f"{v.get('title','')[:60]}")
+                print(f"     [{v.get('severity','?')}] {v.get('cve_id','?')} — {v.get('title','')[:60]}")
 
         return verified
 
-    # ------------------------------------------------------------------
-    # Query builder — FIXED
-    # ------------------------------------------------------------------
-
     def _build_queries(self, stack: Dict) -> List[str]:
-        """
-        Build CVE search queries from the stack fingerprint.
-
-        Reads from stack["technologies"] (list format) which is the
-        actual format produced by _validate_stack and app_identity.
-
-        Query strategy:
-          - Versioned tech (nginx/1.24.0, WordPress/6.4):
-              → query "nginx 1.24.0" AND "nginx" (specific + broad)
-          - Named app without version (Gradio, SvelteKit, Next.js):
-              → query "Gradio" (broad — these are real products with CVEs)
-          - Generic runtime without version (nginx, PHP, python):
-              → SKIP — too broad, produces irrelevant CVEs
-          - CDN/infra (Cloudflare, AWS CloudFront):
-              → SKIP — not applications, no useful CVEs
-
-        Also reads from legacy fields (server, language, framework, cms)
-        for backward compatibility.
-        """
         queries: List[str] = []
 
-        # ── Source 1: technologies list  ────
         technologies = stack.get("technologies", [])
         if isinstance(technologies, list):
             for tech in technologies:
-                if not tech or not isinstance(tech, str):
-                    continue
+                if isinstance(tech, dict):
+                    name     = tech.get("name", "").strip()
+                    version  = tech.get("version", "")
+                    category = tech.get("category", "")
+                    tl       = name.lower()
 
-                tech = tech.strip()
-                tl   = tech.lower().split("/")[0].strip()
+                    if not name or tl in _SKIP_CVE:
+                        continue
 
-                # Skip CDN/infra — no useful CVEs
-                if tl in _SKIP_CVE:
-                    continue
+                    if category in _CVE_WORTHY_CATEGORIES:
+                        if version:
+                            queries.append(f"{name} {version}")
+                        queries.append(name)
+                    elif category in _CVE_WORTHY_WITH_VERSION and version:
+                        queries.append(f"{name} {version}")
+                        queries.append(name)
 
-                # Skip noise strings
-                if len(tech) < 2 or tech.lower() in ("unknown", "none", "null"):
-                    continue
+                elif isinstance(tech, str):
+                    tech = tech.strip()
+                    tl   = tech.lower().split("/")[0].strip()
 
-                has_version = "/" in tech or any(
-                    c.isdigit() for c in tech.split("/")[-1]
-                )
+                    if tl in _SKIP_CVE:
+                        continue
+                    if len(tech) < 2 or tech.lower() in ("unknown", "none", "null"):
+                        continue
 
-                if has_version:
-                    # Versioned — query both specific and broad
-                    if "/" in tech:
-                        name, ver = tech.split("/", 1)
+                    has_version = "/" in tech or any(c.isdigit() for c in tech.split("/")[-1])
+
+                    if has_version:
+                        if "/" in tech:
+                            name, ver = tech.split("/", 1)
+                        else:
+                            parts = tech.split()
+                            name  = parts[0]
+                            ver   = parts[1] if len(parts) > 1 else ""
+                        name = name.strip()
+                        ver  = ver.strip()
+                        if ver:
+                            queries.append(f"{name} {ver}")
+                        queries.append(name)
                     else:
-                        parts = tech.split()
-                        name  = parts[0]
-                        ver   = parts[1] if len(parts) > 1 else ""
-                    name = name.strip()
-                    ver  = ver.strip()
-                    if ver:
-                        queries.append(f"{name} {ver}")
-                    queries.append(name)
-                else:
-                    
-                    if tl not in _GENERIC_RUNTIMES:
-                        queries.append(tech)
+                        if tl not in _GENERIC_RUNTIMES:
+                            queries.append(tech)
 
-        # ── Source 2: legacy field format ────
         legacy_components = [
             stack.get("server"),
             stack.get("language"),
@@ -217,22 +180,15 @@ class CVEVerificationPipeline:
             elif tl not in _GENERIC_RUNTIMES:
                 queries.append(component)
 
-        # ── Source 3: stack_summary as fallback ───────────────────────
         summary = stack.get("stack_summary", "")
         if summary and summary not in ("Unknown", "") and not technologies:
             tl = summary.lower().split("/")[0].strip()
             if tl not in _SKIP_CVE and tl not in _GENERIC_RUNTIMES:
                 queries.append(summary)
 
-        # Deduplicate preserving order
         return list(dict.fromkeys(q for q in queries if q and len(q) > 1))
 
-    # ------------------------------------------------------------------
-    # NVD API
-    # ------------------------------------------------------------------
-
-    async def _fetch_nvd(self, keyword: str, verbose: bool = False) -> List[Dict]:
-        """Query NVD CVE API 2.0 for a keyword."""
+    async def _fetch_nvd(self, keyword: str, verbose: bool = False) -> Optional[List[Dict]]:
         cache_key = f"nvd:{keyword}"
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -240,28 +196,42 @@ class CVEVerificationPipeline:
         results = []
         try:
             params = urllib.parse.urlencode({
-                "keywordSearch": keyword,
+                "keywordSearch":  keyword,
                 "resultsPerPage": 10,
-                "startIndex": 0
+                "startIndex":     0,
             })
             url = f"{self.NVD_BASE}?{params}"
 
+            nvd_headers = {}
+            if self.nvd_api_key:
+                nvd_headers["apiKey"] = self.nvd_api_key
+
             loop = asyncio.get_event_loop()
-            raw  = await loop.run_in_executor(None, self._http_get, url)
+            raw  = await loop.run_in_executor(
+                None, lambda: self._http_get(url, extra_headers=nvd_headers)
+            )
 
             if not raw:
-                return []
+                return None
 
             data            = json.loads(raw)
             vulnerabilities = data.get("vulnerabilities", [])
 
+            import datetime
+            _min_year = datetime.datetime.now(datetime.timezone.utc).year - 10
+
             for item in vulnerabilities:
-                cve_data = item.get("cve", {})
-                cve_id   = cve_data.get("id", "")
-                descs    = cve_data.get("descriptions", [])
-                desc     = next(
-                    (d["value"] for d in descs if d.get("lang") == "en"), ""
-                )
+                cve_data  = item.get("cve", {})
+                cve_id    = cve_data.get("id", "")
+                published = cve_data.get("published", "")
+                try:
+                    if published and int(published[:4]) < _min_year:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+                descs = cve_data.get("descriptions", [])
+                desc  = next((d["value"] for d in descs if d.get("lang") == "en"), "")
 
                 metrics    = cve_data.get("metrics", {})
                 cvss_score = None
@@ -272,9 +242,7 @@ class CVEVerificationPipeline:
                     if metric_list:
                         cvss_data  = metric_list[0].get("cvssData", {})
                         cvss_score = cvss_data.get("baseScore")
-                        severity   = cvss_data.get(
-                            "baseSeverity", "Unknown"
-                        ).capitalize()
+                        severity   = cvss_data.get("baseSeverity", "Unknown").capitalize()
                         break
 
                 configs      = cve_data.get("configurations", [])
@@ -287,6 +255,7 @@ class CVEVerificationPipeline:
                     "severity":    severity,
                     "cvss_score":  cvss_score,
                     "affected":    affected_str,
+                    "published":   published[:10] if published else "",
                     "source":      "NVD",
                     "url":         f"https://nvd.nist.gov/vuln/detail/{cve_id}",
                     "confidence":  CONFIDENCE_HIGH if cvss_score else CONFIDENCE_MEDIUM,
@@ -298,11 +267,11 @@ class CVEVerificationPipeline:
 
         except Exception as e:
             logger.warning(f"NVD fetch failed for '{keyword}': {e}")
+            return None
 
         return results
 
     def _extract_affected(self, configs: List) -> str:
-        """Extract affected version strings from NVD config nodes."""
         versions = []
         for config in configs:
             for node in config.get("nodes", []):
@@ -323,13 +292,8 @@ class CVEVerificationPipeline:
                             versions.append(product)
         return "; ".join(versions[:3]) if versions else "See NVD for details"
 
-    # ------------------------------------------------------------------
-    # OSV API
-    # ------------------------------------------------------------------
-
     async def _fetch_osv(self, keyword: str, stack: Dict,
                          verbose: bool = False) -> List[Dict]:
-        """Query OSV (Open Source Vulnerabilities) for a package."""
         cache_key = f"osv:{keyword}"
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -346,9 +310,12 @@ class CVEVerificationPipeline:
             "go":     "Go",
         }
 
-        # Infer ecosystem from stack language or technology names
         language  = stack.get("language", "").lower()
-        techs_str = " ".join(stack.get("technologies", [])).lower()
+        techs     = stack.get("technologies", [])
+        techs_str = " ".join(
+            t.get("name", "") if isinstance(t, dict) else str(t)
+            for t in techs
+        ).lower()
         combined  = language + " " + techs_str
 
         ecosystem = None
@@ -357,7 +324,6 @@ class CVEVerificationPipeline:
                 ecosystem = eco
                 break
 
-        # Also infer from keyword itself
         kl = keyword.lower()
         if not ecosystem:
             if any(x in kl for x in ["gradio", "torch", "tensorflow", "fastapi",
@@ -373,39 +339,43 @@ class CVEVerificationPipeline:
             return []
 
         try:
-            # Normalize package name for OSV
             pkg_name = keyword.split()[0].lower()
-          
             name_map = {
-                "gradio":     "gradio",
-                "next.js":    "next",
-                "sveltekit":  "@sveltejs/kit",
-                "langchain":  "langchain",
-                "flowise":    "flowise",
-                "wordpress":  "wordpress",
-                "drupal":     "drupal",
+                "gradio":    "gradio",
+                "next.js":   "next",
+                "sveltekit": "@sveltejs/kit",
+                "langchain": "langchain",
+                "flowise":   "flowise",
+                "wordpress": "wordpress",
+                "drupal":    "drupal",
             }
             pkg_name = name_map.get(pkg_name, pkg_name)
 
             payload = json.dumps({
-                "package": {
-                    "name":      pkg_name,
-                    "ecosystem": ecosystem,
-                }
+                "package": {"name": pkg_name, "ecosystem": ecosystem}
             }).encode()
 
             loop = asyncio.get_event_loop()
-            raw  = await loop.run_in_executor(
-                None, self._http_post, self.OSV_BASE, payload
-            )
+            raw  = await loop.run_in_executor(None, self._http_post, self.OSV_BASE, payload)
 
             if not raw:
                 return []
 
             data = json.loads(raw)
 
+            import datetime as _dt
+            _osv_min_year = _dt.datetime.now(_dt.timezone.utc).year - 10
+
             for item in data.get("vulns", []):
-                vuln_id    = item.get("id", "")
+                vuln_id = item.get("id", "")
+                _pub    = item.get("published", "")
+                try:
+                    _year = int(_pub[:4]) if _pub else int(vuln_id[4:8])
+                    if _year < _osv_min_year:
+                        continue
+                except (ValueError, TypeError, IndexError):
+                    pass
+
                 summary    = item.get("summary", "")
                 details    = item.get("details", "")[:400]
                 severity   = "Unknown"
@@ -427,13 +397,8 @@ class CVEVerificationPipeline:
                 for aff in item.get("affected", [])[:2]:
                     for r in aff.get("ranges", []):
                         evts       = r.get("events", [])
-                        introduced = next(
-                            (e["introduced"] for e in evts if "introduced" in e),
-                            None
-                        )
-                        fixed = next(
-                            (e["fixed"] for e in evts if "fixed" in e), None
-                        )
+                        introduced = next((e["introduced"] for e in evts if "introduced" in e), None)
+                        fixed      = next((e["fixed"] for e in evts if "fixed" in e), None)
                         if introduced and fixed:
                             affected_parts.append(f">= {introduced}, < {fixed}")
                         elif introduced:
@@ -446,6 +411,7 @@ class CVEVerificationPipeline:
                     "severity":    severity,
                     "cvss_score":  cvss_score,
                     "affected":    "; ".join(affected_parts) or "See OSV for details",
+                    "published":   _pub[:10] if _pub else "",
                     "source":      "OSV",
                     "url":         f"https://osv.dev/vulnerability/{vuln_id}",
                     "confidence":  CONFIDENCE_HIGH if cvss_score else CONFIDENCE_MEDIUM,
@@ -460,32 +426,31 @@ class CVEVerificationPipeline:
 
         return results
 
-    # ------------------------------------------------------------------
-    # HTTP helpers
-    # ------------------------------------------------------------------
-
-    def _http_get(self, url: str, timeout: int = 10) -> Optional[str]:
+    def _http_get(self, url: str, timeout: int = 10,
+                  extra_headers: Optional[Dict] = None) -> Optional[str]:
         try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "YuraRAG-SecurityScanner/1.0",
-                    "Accept":     "application/json",
-                }
-            )
+            headers = {
+                "User-Agent": "YuraRAG-SecurityScanner/1.0",
+                "Accept":     "application/json",
+            }
+            if extra_headers:
+                headers.update(extra_headers)
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read().decode("utf-8")
         except urllib.error.HTTPError as e:
-            if e.code == 403:
-                logger.warning(f"NVD rate limited (403) for {url}")
+            if e.code in (429, 403):
+                logger.warning(
+                    f"NVD rate limited (HTTP {e.code}) — "
+                    f"add NVD_API_KEY to .env to raise the limit"
+                )
             else:
                 logger.warning(f"HTTP {e.code} fetching {url}")
         except Exception as e:
             logger.warning(f"GET failed for {url}: {e}")
         return None
 
-    def _http_post(self, url: str, data: bytes,
-                   timeout: int = 10) -> Optional[str]:
+    def _http_post(self, url: str, data: bytes, timeout: int = 10) -> Optional[str]:
         try:
             req = urllib.request.Request(
                 url, data=data,
