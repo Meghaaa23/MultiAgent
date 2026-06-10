@@ -36,155 +36,29 @@ except Exception as _e:
     _spa_scanner_instance = None
 
 
-_HEADER_VERIFIABLE_TECH = {
-    "apache":      ["server"], "nginx":      ["server"], "iis":       ["server"],
-    "lighttpd":    ["server"], "caddy":      ["server"], "gunicorn":  ["server"],
-    "php":         ["x-powered-by", "set-cookie"],
-    "java":        ["x-powered-by"],
-    "spring boot": ["x-application-context", "x-powered-by"],
-    ".net":        ["x-aspnet-version", "x-powered-by"],
-    "ruby":        ["x-powered-by", "x-runtime"],
-    "rails":       ["x-powered-by", "x-runtime", "x-request-id"],
-    "node.js":     ["x-powered-by"], "express": ["x-powered-by"],
-    "python":      ["x-powered-by"],
-    "cloudflare":  ["cf-ray", "cf-cache-status"],
-    "cloudfront":  ["x-amz-cf-id", "via"],
-}
 
-_BODY_VERIFIABLE_TECH = {
-    "wordpress": [r"wp-content", r"wp-json", r"wordpress"],
-    "drupal":    [r"drupal", r"sites/default/files"],
-    "joomla":    [r"joomla", r"/components/com_"],
-    "django":    [r"csrfmiddlewaretoken", r"django"],
-    "rails":     [r"authenticity_token", r"rails"],
-    "php":       [r"PHPSESSID", r"\.php"],
-    "angular":   [r"ng-version", r"app-root", r"router-outlet", r"_nghost", r"\[formcontrolname\]"],
-    "react":     [r"React\.createElement", r"__reactFiber", r"data-reactroot", r"_reactRootContainer"],
-    "vue":       [r"__vue_app__", r"data-v-app", r"createApp\("],
-    "next.js":   [r"__NEXT_DATA__", r"_next/static"],
-    "nuxt":      [r"__NUXT__", r"_nuxt/"],
-}
-
-
-def _tech_name(t) -> str:
-    if isinstance(t, dict):
-        name = t.get("name", "")
-        ver  = t.get("version", "")
-        return f"{name} {ver}".strip() if ver else name
-    return str(t).split("/")[0].strip()
-
-
-def _validate_stack(stack: Dict, response_headers: Dict, body: str) -> Dict:
+def _validate_stack(stack, response_headers, body):
     if not stack:
-        return {"stack_summary": "Unknown", "technologies": [], "unverified_hints": [], "vuln_hints": []}
-
-    if stack.get("stack_summary", "Unknown") == "Unknown":
-        return stack
+        return {"stack_summary": "Unknown", "technologies": [],
+                "unverified_hints": [], "vuln_hints": []}
 
     raw_tech = stack.get("technologies", [])
     if not isinstance(raw_tech, list) or not raw_tech:
         return stack
 
     if isinstance(raw_tech[0], dict):
-        by_cat: Dict[str, list] = {}
-        for dt in raw_tech:
-            by_cat.setdefault(dt.get("category", "Other"), []).append(dt)
-
-        summary_parts = []
-        for group in [
-            by_cat.get("CMS",      []),
-            by_cat.get("Server",   []),
-            by_cat.get("Language", []),
-            by_cat.get("Framework",[]),
-            by_cat.get("CDN",      []),
-        ]:
-            if group:
-                dt  = group[0]
-                ver = dt.get("version", "")
-                summary_parts.append(f"{dt['name']} {ver}".strip() if ver else dt["name"])
-        if not summary_parts and raw_tech:
-            summary_parts = [_tech_name(raw_tech[0])]
-
-        stack["stack_summary"] = " · ".join(summary_parts[:4])
         stack.setdefault("unverified_hints", [])
         stack.setdefault("confirmed_by", {})
+        if not stack.get("stack_summary") or stack.get("stack_summary") == "Unknown":
+            parts = []
+            for dt in raw_tech[:4]:
+                ver = dt.get("version", "")
+                parts.append(f"{dt['name']} {ver}".strip() if ver else dt["name"])
+            stack["stack_summary"] = " · ".join(parts) if parts else "Unknown"
         return stack
 
-    tech_strings = [
-        t.get("name", str(t)) if isinstance(t, dict) else str(t)
-        for t in raw_tech
-    ]
-
-    headers_lower = {k.lower(): v.lower() for k, v in response_headers.items()}
-    body_lower    = (body or "").lower()
-    confirmed, unverified, evidence_map = [], [], {}
-
-    for tech in tech_strings:
-        tl = tech.lower()
-        confirmed_by_header = any(
-            hk in headers_lower and tl in headers_lower[hk]
-            for hk in _HEADER_VERIFIABLE_TECH.get(tl, [])
-        )
-        if confirmed_by_header:
-            confirmed.append(tech)
-            evidence_map[tech] = "header"
-            continue
-        if any(re.search(p, body_lower, re.IGNORECASE) for p in _BODY_VERIFIABLE_TECH.get(tl, [])):
-            confirmed.append(tech)
-            evidence_map[tech] = "body_pattern"
-            continue
-        if tl in headers_lower.get("server", "") or tl in headers_lower.get("x-powered-by", ""):
-            confirmed.append(tech)
-            evidence_map[tech] = "header:server/x-powered-by"
-            continue
-        unverified.append(tech)
-
-    if confirmed:
-        seen_lower = set()
-        confirmed_deduped = []
-        for t in confirmed:
-            if t.lower() not in seen_lower:
-                seen_lower.add(t.lower())
-                confirmed_deduped.append(t)
-        stack["technologies"]     = confirmed_deduped
-        stack["unverified_hints"] = unverified
-        stack["confirmed_by"]     = evidence_map
-    else:
-        noise_words = {"content", "signals", "unknown", "none", "null", "true", "false"}
-        filtered_unverified = [
-            t for t in unverified
-            if t and len(t.strip()) > 3
-            and t.strip().lower() not in noise_words
-            and not t.strip().lower().startswith("content signal")
-        ]
-        server  = response_headers.get("server", "") or response_headers.get("Server", "")
-        powered = response_headers.get("x-powered-by", "") or response_headers.get("X-Powered-By", "")
-        cdn_hints = []
-        if server and "cloudflare" in server.lower():
-            cdn_hints.append("Cloudflare")
-        if server and server.strip():
-            cdn_hints.append(server.strip())
-        if powered and powered.strip():
-            cdn_hints.append(powered.strip())
-
-        final_techs = cdn_hints or filtered_unverified
-        seen_lower  = set()
-        final_techs_deduped = []
-        for t in final_techs:
-            if t.lower() not in seen_lower:
-                seen_lower.add(t.lower())
-                final_techs_deduped.append(t)
-        final_techs = final_techs_deduped
-
-        stack["technologies"]     = final_techs
-        stack["unverified_hints"] = []
-        stack["confirmed_by"]     = {}
-        if final_techs:
-            stack["stack_summary"] = " · ".join(final_techs[:3])
-        else:
-            stack["stack_summary"] = "Unknown (no technology confirmed from HTTP evidence)"
-
     return stack
+
 
 
 def _build_evidence_gated_stride(target_url, response_headers,
@@ -464,52 +338,52 @@ class WebScannerAgent:
         if verbose:
             print("Phase 1b: CVE Lookup (NVD/OSV)...")
         try:
-            if is_ai_powered:
-                ai_cve_queries = []
-                if app_identity and app_identity.name:
-                    if app_identity.version:
-                        ai_cve_queries.append(f"{app_identity.name} {app_identity.version}")
-                    ai_cve_queries.append(app_identity.name)
+            app_name    = stack.get("app_identity_name", "")
+            app_version = stack.get("app_identity_version", "")
+
+            if not app_name and app_identity and app_identity.name:
+                app_name    = app_identity.name
+                app_version = app_identity.version or ""
+
+            if is_ai_powered and app_name:
+                cve_queries = []
+                if app_version:
+                    cve_queries.append(f"{app_name} {app_version}")
+                cve_queries.append(app_name)
                 ml_libs = (ai_fingerprint or {}).get("ml_libraries", [])
                 for lib in ml_libs[:2]:
-                    if lib not in ai_cve_queries:
-                        ai_cve_queries.append(lib)
-                ml_eps = (ai_fingerprint or {}).get("ml_endpoints", [])
-                for ep in ml_eps[:3]:
-                    path = ep.replace(target_url, "")
-                    if "/openai/" in path or "/api/models" in path:
-                        if "Open WebUI" not in ai_cve_queries:
-                            ai_cve_queries.append("Open WebUI")
-                    if "/api/tags" in path or "/api/generate" in path:
-                        if "Ollama" not in ai_cve_queries:
-                            ai_cve_queries.append("Ollama")
-                    if "/api/v1/prediction" in path or "/api/v1/chatflows" in path:
-                        if "Flowise" not in ai_cve_queries:
-                            ai_cve_queries.append("Flowise")
-                if ai_cve_queries:
-                    cve_stack = {**stack, "technologies": ai_cve_queries, "stack_summary": ai_cve_queries[0]}
-                    verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
+                    if lib and lib not in cve_queries:
+                        cve_queries.append(lib)
+                cve_stack = {
+                    "technologies":  cve_queries,
+                    "stack_summary": app_name,
+                    "app_name":      app_name,
+                    "app_version":   app_version,
+                }
+                verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
+
+            elif not is_ai_powered and app_name:
+                cve_queries = []
+                if app_version:
+                    cve_queries.append(f"{app_name} {app_version}")
+                cve_queries.append(app_name)
+                cve_stack = {
+                    "technologies":  cve_queries,
+                    "stack_summary": app_name,
+                    "app_name":      app_name,
+                    "app_version":   app_version,
+                }
+                verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
+
             else:
-                app_name    = stack.get("app_identity_name", "")
-                app_version = stack.get("app_identity_version", "")
-                if app_name:
-                    cve_queries = []
-                    if app_version:
-                        cve_queries.append(f"{app_name} {app_version}")
-                    cve_queries.append(app_name)
-                    cve_stack = {**stack, "technologies": cve_queries, "stack_summary": app_name}
-                    verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
-                elif app_identity and app_identity.cve_queries:
-                    cve_stack = {**stack, "technologies": app_identity.cve_queries, "stack_summary": app_identity.name or ""}
-                    verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
-                elif stack.get("technologies"):
-                    verified_cves = await self.cve_pipeline.lookup(stack, verbose=verbose)
+                verified_cves = []
+
         except Exception as e:
             logger.warning(f"CVE lookup error: {e}")
 
         if verbose:
             cve_count = len(verified_cves) if verified_cves is not None else "lookup failed"
-            print(f"  ✓ Verified CVEs: {cve_count}\n")
+            print(f"  ✓ Relevant CVEs: {cve_count}\n")
 
         if verbose:
             print("Phase 2b: Browser Crawl...")
@@ -663,6 +537,8 @@ class WebScannerAgent:
         return {
             "target_url":             target_url,
             "stack":                  stack,
+            "app_name":               stack.get("app_identity_name", ""),
+            "app_version":            stack.get("app_identity_version", ""),
             "verified_cves":          verified_cves,
             "nvd_section_visible":    not is_ai_powered,
             "endpoints_discovered":   discovered_endpoints,

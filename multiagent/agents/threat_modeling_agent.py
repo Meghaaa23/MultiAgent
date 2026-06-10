@@ -291,14 +291,34 @@ def _build_section_2(stack, endpoints, cves):
     else:
         lines.append("None discovered.")
 
-    lines.append("\n Verified CVEs (NVD/OSV)")
+    lines.append("\n Relevant CVEs (NVD/OSV)")
+
+    app_name    = stack.get("app_identity_name", "")
+    app_version = stack.get("app_identity_version", "")
+
     if cves is None:
         lines.append(
             "CVE lookup unavailable (API rate limit or network error). "
             "Add NVD_API_KEY to .env to raise the unauthenticated limit "
             "from 5 to 50 requests per 30 seconds."
         )
+    elif not app_name:
+        lines.append(
+            "Application identity could not be determined — CVE lookup skipped. "
+            "Technology stack components (frameworks, CDN, analytics) are not queried."
+        )
     elif cves:
+        if app_version:
+            lines.append(f"Application: {app_name}")
+            lines.append(f"Version: {app_version}")
+            lines.append(f"Confidence: High")
+            lines.append(f"Reason: Version detected — CVEs shown for this version.")
+        else:
+            lines.append(f"Application: {app_name}")
+            lines.append(f"Version: Unknown")
+            lines.append(f"Confidence: Low")
+            lines.append(f"Reason: Version could not be determined. All known CVEs shown — manual triage required.")
+        lines.append("")
         for cve in cves[:5]:
             pub     = cve.get("published", "")
             pub_str = f"  {pub}" if pub else ""
@@ -308,7 +328,9 @@ def _build_section_2(stack, endpoints, cves):
                 f"{cve.get('description','')[:150]}"
             )
     else:
-        lines.append("None found for this stack in NVD/OSV.")
+        lines.append(f"Application: {app_name}")
+        lines.append(f"Version: {app_version or 'Unknown'}")
+        lines.append("None found in NVD/OSV for this application.")
 
     return "\n".join(lines)
 
@@ -1375,6 +1397,10 @@ Answer:"""
             cves      = scan_results.get("verified_cves")
             endpoints = scan_results.get("endpoints_discovered", [])
             vulns     = scan_results.get("vulnerabilities", [])
+
+            if scan_results.get("app_name"):
+                stack["app_identity_name"]    = scan_results["app_name"]
+                stack["app_identity_version"] = scan_results.get("app_version", "")
 
             if not stack.get("technologies") and not stack.get("stack_summary"):
                 raw     = scan_results.get("stack") or {}
