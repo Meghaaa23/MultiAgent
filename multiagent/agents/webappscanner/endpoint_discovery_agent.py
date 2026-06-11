@@ -28,22 +28,33 @@ Output shape (per discovered endpoint)
   "method":     "GET",
   "source":     "robots.txt" | "sitemap" | "js_bundle" | "probe" | "swagger",
   "status":     200,
+  "final_url":  "https://example.com/api/users",   # actual URL after redirects
   "interesting": True,        # 200/301/302/403 — exists
   "auth_required": True,      # returned 401/403
   "params":     ["id", "q"],  # query params seen in JS
 }
+
+Changes vs previous version
+-----------------------------
+  - _sync_head() now returns (status, headers, final_url) — tracks redirects
+  - _probe_path() drops endpoints that redirect off-path (catch-all / soft-404)
+  - calibrate() samples random non-existent paths before probing to detect
+    soft-404 sites (e.g. WordPress/Cloudflare that return 200 for everything)
+  - discover() calls calibrate() before running strategies
+  - All endpoint dicts now include "final_url" field for report evidence
 """
 
 import os
 import re
 import json
+import hashlib
 import asyncio
 import logging
 import urllib.request
 import urllib.parse
 import urllib.error
 from typing import Dict, List, Optional, Set
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlsplit, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -165,20 +176,9 @@ JS_ENDPOINT_PATTERNS = [
     r'BASE_URL\s*=\s*["\']([^"\']+)["\']',
 ]
 
-# Status codes that mean "endpoint exists / interesting"
-# Split into two tiers:
-#   PROBE_INTERESTING   → worth reporting regardless of path type
-#   SENSITIVE_INTERESTING → only interesting when the PATH itself is sensitive
-#
-# The key insight: a 403 on /robots.txt is NOT interesting (every site blocks it).
-# A 403 on /.env IS interesting (something is there, just blocked).
-# A 200 on /admin IS interesting but needs content verification.
-# A 200 on /robots.txt is NOT a vulnerability — it's expected.
+PROBE_INTERESTING     = {200, 201, 204, 301, 302, 307, 308, 401, 405}
+SENSITIVE_INTERESTING = {200, 201, 401, 403, 405}
 
-PROBE_INTERESTING    = {200, 201, 204, 301, 302, 307, 308, 401, 405}
-SENSITIVE_INTERESTING = {200, 201, 401, 403, 405}  # 403 only for sensitive paths
-
-# Paths where a 403 response IS meaningful (something exists but is blocked)
 SENSITIVE_PATH_PREFIXES = {
     "/.env", "/.git", "/wp-config", "/config.php", "/phpinfo",
     "/backup", "/dump", "/db.sql", "/.htaccess", "/web.config",
@@ -186,7 +186,6 @@ SENSITIVE_PATH_PREFIXES = {
     "/phpmyadmin", "/xmlrpc.php",
 }
 
-# Paths where a 200 is expected and NOT a finding (public by design)
 EXPECTED_200_PATHS = {
     "/robots.txt", "/sitemap.xml", "/sitemap_index.xml",
     "/.well-known/security.txt", "/favicon.ico",
@@ -201,8 +200,64 @@ class EndpointDiscoveryAgent:
     """
 
     def __init__(self, timeout: int = 5, max_probe_paths: int = 30):
-        self.timeout        = timeout
-        self.max_probe_paths = max_probe_paths  # cap active probing
+        self.timeout          = timeout
+        self.max_probe_paths  = max_probe_paths
+        # Set by calibrate() before probing starts
+        self._soft_mode:          bool       = False
+        self._soft404_lengths:    List[int]  = []
+
+    # ------------------------------------------------------------------
+    # Soft-404 calibration
+    # ------------------------------------------------------------------
+
+    async def calibrate(self, base: str) -> None:
+        """
+        Sample 3 guaranteed-nonexistent paths before probing real ones.
+
+        Detects two failure modes:
+          1. Catch-all 200  — site returns 200 for any path (WordPress + CDN)
+          2. Off-path redirect — site 302s unknown paths to homepage/article
+             (handled individually in _probe_path via final_url comparison,
+              but calibrate() sets self._soft_mode so we can log it clearly)
+
+        Stores response body lengths as a belt-and-suspenders baseline for
+        same-path soft-404s that survive the redirect check.
+        """
+        rand_paths = [
+            f"/{hashlib.sha1(f'{base}{i}'.encode()).hexdigest()[:16]}-zz{i}"
+            for i in range(3)
+        ]
+        hits = 0
+        self._soft404_lengths = []
+
+        for p in rand_paths:
+            url = f"{base}{p}"
+            try:
+                loop = asyncio.get_event_loop()
+                status, _, final_url = await loop.run_in_executor(
+                    None, lambda _u=url: self._sync_head(_u)
+                )
+                if 200 <= status < 300:
+                    # Check if this is a redirect-off-path (most common case)
+                    asked  = (urlsplit(url).path or "/").rstrip("/") or "/"
+                    landed = (urlsplit(final_url).path or "/").rstrip("/") or "/"
+                    if landed == asked or landed == asked + "/" or asked == landed + "/":
+                        # Same path, genuine soft-404 body
+                        hits += 1
+                        body = await self._fetch_text(url) or ""
+                        self._soft404_lengths.append(len(body))
+                    else:
+                        # Off-path redirect — will be caught per-probe, count as soft
+                        hits += 1
+            except Exception:
+                pass
+
+        self._soft_mode = hits >= 2
+        if self._soft_mode:
+            logger.info(
+                "EndpointDiscovery: soft-404/catch-all site detected "
+                "(baseline body lengths: %s)", self._soft404_lengths
+            )
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -214,18 +269,18 @@ class EndpointDiscoveryAgent:
         """
         Run all three discovery strategies and return deduplicated,
         verified endpoints.
-
-        Fix 1: Deduplicate by normalised URL (strip trailing slash,
-               lowercase scheme+host, keep path case).
-        Fix 5: After discovery, verify interesting endpoints beyond
-               just HTTP status — check for login forms, admin panels,
-               API JSON responses, directory listings.
         """
         if verbose:
             print(f"\n  Endpoint Discovery Agent")
             print(f"   Target: {target_url}")
 
         base = self._base_url(target_url)
+
+        # Calibrate soft-404 detection before any probing
+        await self.calibrate(base)
+        if verbose and self._soft_mode:
+            print(f"    ⚠ Soft-404/catch-all site detected — redirect filter active")
+
         found: List[Dict] = []
 
         results = await asyncio.gather(
@@ -239,9 +294,8 @@ class EndpointDiscoveryAgent:
             if isinstance(r, list):
                 found.extend(r)
 
-        # ── Fix 1: Deduplicate by normalised URL ─────────────────────
+        # Deduplicate by normalised URL
         # Prefer probed entries (non-None status) over passive-parse entries
-        # (robots.txt/sitemap set status=None and are never deep-verified).
         seen:   Dict[str, Dict] = {}
         for ep in found:
             url = ep.get("url", "")
@@ -252,15 +306,15 @@ class EndpointDiscoveryAgent:
             if existing is None:
                 seen[norm] = ep
             elif existing.get("status") is None and ep.get("status") is not None:
-                seen[norm] = ep  # upgrade to the probed version
+                seen[norm] = ep
         unique: List[Dict] = list(seen.values())
 
-        # ── Fix 5: Deep verification for interesting endpoints ────────
+        # Deep verification for interesting endpoints
         if verbose:
             print(f"    Verifying {len(unique)} endpoints...")
 
         verified: List[Dict] = []
-        verify_tasks = [self._verify_endpoint(ep) for ep in unique]
+        verify_tasks   = [self._verify_endpoint(ep) for ep in unique]
         verify_results = await asyncio.gather(*verify_tasks, return_exceptions=True)
 
         for ep, result in zip(unique, verify_results):
@@ -279,20 +333,20 @@ class EndpointDiscoveryAgent:
 
         return verified
 
+    # ------------------------------------------------------------------
+    # Deep endpoint verification
+    # ------------------------------------------------------------------
+
     async def _verify_endpoint(self, ep: Dict) -> Dict:
         """
-        Fix 5: Deep endpoint verification.
+        Deep endpoint verification — goes beyond HTTP status to check content.
 
-        Goes beyond HTTP status to check what the endpoint actually contains:
-          - Login/auth forms → tag as auth_endpoint
+          - Login/auth forms       → tag as auth_endpoint
           - Admin panel indicators → tag as admin_panel
-          - JSON API response → tag as api_endpoint
-          - Directory listing → tag as directory_listing
+          - JSON API response      → tag as api_endpoint
+          - Directory listing      → tag as directory_listing
           - Sensitive file content → tag as sensitive_file
-          - 403 on sensitive path → tag as access_controlled (not exposed)
-
-        This prevents /wp-config.php returning 403 from being reported as
-        "exposed" — it's access-controlled, which is the correct behaviour.
+          - 403 on sensitive path  → access_controlled (NOT an exposure)
         """
         url    = ep.get("url", "")
         status = ep.get("status")
@@ -301,22 +355,21 @@ class EndpointDiscoveryAgent:
         if status is None:
             return ep
 
-        # 403 on a sensitive path = access controlled = NOT a finding
-        sensitive_paths = (
-            "wp-config", ".env", "config.php", "database.yml",
-            ".git/config", "backup", "dump.sql"
-        )
+        # 403 always means access-controlled — never "exposed".
+        # The distinction between sensitive and generic 403s belongs in
+        # _probe_path() (via SENSITIVE_PATH_PREFIXES), not here.
+        # By the time an endpoint reaches _verify_endpoint() it already
+        # passed the PROBE_INTERESTING / SENSITIVE_INTERESTING filter,
+        # so any 403 that survived is recon, not a finding.
         if status == 403:
-            path_lower = url.lower()
-            if any(s in path_lower for s in sensitive_paths):
-                ep["interesting"]    = False
-                ep["access_controlled"] = True
-                ep["verification"]   = "403 — access controlled, not exposed"
-                return ep
+            ep["interesting"]       = False
+            ep["access_controlled"] = True
+            ep["verification"]      = "403 — access controlled, not exposed"
+            return ep
 
         # For 200 responses, fetch body and classify
         if status == 200:
-            body = await self._fetch_text(url) or ""
+            body       = await self._fetch_text(url) or ""
             body_lower = body.lower()
 
             # Sensitive file actually exposed (200 + content match)
@@ -330,10 +383,10 @@ class EndpointDiscoveryAgent:
             ]
             for pattern, tag in sensitive_content_patterns:
                 if pattern.lower() in body_lower:
-                    ep["interesting"]       = True
-                    ep["verification"]      = f"Sensitive content detected: {tag}"
-                    ep["content_type_tag"]  = tag
-                    ep["severity"]          = "Critical"
+                    ep["interesting"]      = True
+                    ep["verification"]     = f"Sensitive content detected: {tag}"
+                    ep["content_type_tag"] = tag
+                    ep["severity"]         = "Critical"
                     return ep
 
             # Login / auth form
@@ -341,9 +394,9 @@ class EndpointDiscoveryAgent:
                 'type="password"', "type='password'",
                 "login", "sign in", "signin", "authenticate"
             )):
-                ep["interesting"]  = True
+                ep["interesting"]   = True
                 ep["auth_endpoint"] = True
-                ep["verification"] = "Login form detected"
+                ep["verification"]  = "Login form detected"
                 return ep
 
             # Admin panel
@@ -351,9 +404,9 @@ class EndpointDiscoveryAgent:
                 "admin", "dashboard", "control panel",
                 "management console", "administrator"
             )):
-                ep["interesting"]   = True
-                ep["admin_panel"]   = True
-                ep["verification"]  = "Admin panel indicators detected"
+                ep["interesting"]  = True
+                ep["admin_panel"]  = True
+                ep["verification"] = "Admin panel indicators detected"
                 return ep
 
             # JSON API response
@@ -371,10 +424,10 @@ class EndpointDiscoveryAgent:
 
             # Directory listing
             if "index of /" in body_lower or "<title>directory listing" in body_lower:
-                ep["interesting"]        = True
-                ep["directory_listing"]  = True
-                ep["verification"]       = "Directory listing enabled"
-                ep["severity"]           = "Medium"
+                ep["interesting"]       = True
+                ep["directory_listing"] = True
+                ep["verification"]      = "Directory listing enabled"
+                ep["severity"]          = "Medium"
                 return ep
 
             # Generic 200 — mark as interesting but unclassified
@@ -395,23 +448,13 @@ class EndpointDiscoveryAgent:
         return ep
 
     def _normalise_url(self, url: str) -> str:
-        """
-        Normalise URL for deduplication.
-        Strips trailing slash, lowercases scheme and host, preserves path case.
-        e.g. https://Example.com/Admin/ → https://example.com/Admin
-        """
         try:
-            from urllib.parse import urlparse, urlunparse
             p = urlparse(url)
-            norm = urlunparse((
-                p.scheme.lower(),
-                p.netloc.lower(),
+            return urlunparse((
+                p.scheme.lower(), p.netloc.lower(),
                 p.path.rstrip("/") or "/",
-                p.params,
-                p.query,
-                ""  # drop fragment
+                p.params, p.query, ""
             ))
-            return norm
         except Exception:
             return url.rstrip("/")
 
@@ -421,12 +464,10 @@ class EndpointDiscoveryAgent:
 
     async def _strategy_passive_files(self, base: str,
                                        verbose: bool = False) -> List[Dict]:
-        """Parse robots.txt, sitemap.xml, swagger, manifest."""
         if verbose:
             print("    Strategy 1: Passive file parsing...")
 
         endpoints: List[Dict] = []
-
         tasks = [
             self._parse_robots(base),
             self._parse_sitemap(base),
@@ -440,12 +481,11 @@ class EndpointDiscoveryAgent:
 
         if verbose:
             print(f"     ✓ Passive: {len(endpoints)} endpoints")
-
         return endpoints
 
     async def _parse_robots(self, base: str) -> List[Dict]:
         endpoints = []
-        url = f"{base}/robots.txt"
+        url  = f"{base}/robots.txt"
         body = await self._fetch_text(url)
         if not body:
             return endpoints
@@ -464,10 +504,8 @@ class EndpointDiscoveryAgent:
                     path = parts[1].strip()
                     if not path or path == "/":
                         continue
-                    # Glob patterns are crawler directives, not real endpoints
                     if "*" in path:
                         continue
-                    # Static assets have no scannable attack surface
                     ext = os.path.splitext(path.split("?")[0])[-1].lower()
                     if ext in _STATIC_EXTS:
                         continue
@@ -477,6 +515,7 @@ class EndpointDiscoveryAgent:
                         "method":       "GET",
                         "source":       "robots.txt",
                         "status":       None,
+                        "final_url":    full_url,
                         "interesting":  True,
                         "auth_required":False,
                         "params":       []
@@ -489,7 +528,6 @@ class EndpointDiscoveryAgent:
             body = await self._fetch_text(f"{base}{path}")
             if not body:
                 continue
-            # Extract <loc> URLs
             for loc in re.findall(r'<loc>([^<]+)</loc>', body):
                 loc = loc.strip()
                 if loc:
@@ -498,6 +536,7 @@ class EndpointDiscoveryAgent:
                         "method":       "GET",
                         "source":       "sitemap",
                         "status":       None,
+                        "final_url":    loc,
                         "interesting":  True,
                         "auth_required":False,
                         "params":       []
@@ -505,27 +544,24 @@ class EndpointDiscoveryAgent:
         return endpoints
 
     async def _parse_swagger(self, base: str) -> List[Dict]:
-        """Parse OpenAPI/Swagger JSON for all defined routes."""
         endpoints = []
         swagger_paths = [
             "/swagger.json", "/openapi.json",
             "/api/swagger.json", "/api/openapi.json",
             "/api/docs/openapi.json", "/v1/openapi.json",
         ]
-
         for path in swagger_paths:
             body = await self._fetch_text(f"{base}{path}")
             if not body:
                 continue
             try:
-                spec = json.loads(body)
-                paths = spec.get("paths", {})
+                spec   = json.loads(body)
+                paths  = spec.get("paths", {})
                 for route, methods in paths.items():
                     for method in methods.keys():
                         if method.lower() in ("get","post","put","delete","patch"):
                             full_url = urljoin(base, route)
-                            # Extract query params from spec
-                            params = []
+                            params   = []
                             for m_data in methods.values():
                                 if isinstance(m_data, dict):
                                     for p in m_data.get("parameters", []):
@@ -536,19 +572,18 @@ class EndpointDiscoveryAgent:
                                 "method":       method.upper(),
                                 "source":       "swagger",
                                 "status":       None,
+                                "final_url":    full_url,
                                 "interesting":  True,
                                 "auth_required":False,
                                 "params":       [p for p in params if p]
                             })
                 if endpoints:
-                    break  # Found and parsed one swagger doc — stop
+                    break
             except Exception:
                 continue
-
         return endpoints
 
     async def _parse_manifest(self, base: str) -> List[Dict]:
-        """Parse Angular/React manifest or asset-manifest for JS bundle URLs."""
         endpoints = []
         for path in ("/asset-manifest.json", "/manifest.json",
                      "/ngsw.json", "/assets/manifest.json"):
@@ -557,18 +592,19 @@ class EndpointDiscoveryAgent:
                 continue
             try:
                 data = json.loads(body)
-                # Angular ngsw / React asset-manifest structure
                 for key, val in (data.get("urls", {}) or {}).items():
                     if isinstance(val, str) and val.endswith(".js"):
+                        full_url = urljoin(base, val)
                         endpoints.append({
-                            "url":          urljoin(base, val),
+                            "url":          full_url,
                             "method":       "GET",
                             "source":       "manifest",
                             "status":       None,
+                            "final_url":    full_url,
                             "interesting":  False,
                             "auth_required":False,
                             "params":       [],
-                            "_is_js_bundle": True  # flag for strategy 2
+                            "_is_js_bundle": True
                         })
             except Exception:
                 continue
@@ -581,53 +617,32 @@ class EndpointDiscoveryAgent:
     async def _strategy_js_extraction(self, base: str,
                                        page_html: str,
                                        verbose: bool = False) -> List[Dict]:
-        """
-        Extract API endpoint strings from JS source files.
-
-        Fix 3: Extended JS discovery to handle modern frameworks:
-          - Nuxt:  /_nuxt/ chunks referenced as .js or via __nuxt_manifest__
-          - Next:  /_next/static/ chunks
-          - Vite:  /assets/*.js chunks
-          - React: /static/js/*.chunk.js
-          Also scans inline <script> blocks (env vars, route configs often there).
-        """
         if verbose:
             print("    Strategy 2: JavaScript endpoint extraction...")
 
         endpoints: List[Dict] = []
-        js_urls: Set[str] = set()
+        js_urls: Set[str]     = set()
 
-        # From HTML: <script src="...">
         js_urls |= self._extract_js_urls(base, page_html)
 
-        # From HTML: inline <script> blocks
         inline_scripts = re.findall(
             r'<script(?:[^>]*)>(.*?)</script>',
             page_html, re.DOTALL | re.IGNORECASE
         )
 
-        # Framework-specific chunk manifests
-        # Nuxt 3: __NUXT_MANIFEST__ or _payload.json links
-        # Next.js: _next/static/chunks/pages/
         framework_paths = [
-            # Common SPA entry points
             "/main.js", "/bundle.js", "/app.js",
             "/static/js/main.js", "/assets/index.js",
-            # Nuxt 2/3
             "/_nuxt/app.js", "/_nuxt/manifest.js",
             "/_nuxt/client.js", "/_nuxt/index.js",
-            # Next.js
             "/_next/static/chunks/main.js",
             "/_next/static/chunks/pages/index.js",
-            # Vite
             "/assets/index.js",
-            # Angular
             "/main.js", "/runtime.js", "/polyfills.js",
         ]
         for fp in framework_paths:
             js_urls.add(urljoin(base, fp))
 
-        # Nuxt/Next chunk references in HTML  (e.g. /_nuxt/abc123.js)
         chunk_patterns = [
             r'/_nuxt/[^"\'>\s]+\.js',
             r'/_next/static/[^"\'>\s]+\.js',
@@ -638,51 +653,37 @@ class EndpointDiscoveryAgent:
             for match in re.finditer(pat, page_html):
                 js_urls.add(urljoin(base, match.group(0)))
 
-        # Fetch up to 8 JS files (more than before — chunks matter)
         fetch_tasks = [self._fetch_text(url) for url in list(js_urls)[:8]]
         js_bodies   = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
-        # Combine with inline scripts
-        all_sources = list(js_bodies) + inline_scripts
-
+        all_sources  = list(js_bodies) + inline_scripts
         seen_paths: Set[str] = set()
 
         for source in all_sources:
             if not isinstance(source, str) or not source:
                 continue
-
             for pattern in JS_ENDPOINT_PATTERNS:
                 for match in re.finditer(pattern, source):
                     path = match.group(1).strip()
                     if not path or path in seen_paths:
                         continue
-
-                    # Must start with / or http
                     if not (path.startswith("/") or path.startswith("http")):
                         continue
-
-                    # Normalise absolute URLs to just the path
                     if path.startswith("http"):
                         try:
                             parsed_path = urllib.parse.urlparse(path)
-                            if parsed_path.netloc and \
-                               parsed_path.netloc not in base:
-                                continue  # external domain, skip
+                            if parsed_path.netloc and parsed_path.netloc not in base:
+                                continue
                             path = parsed_path.path
                         except Exception:
                             continue
-
-                    # Filter static assets
                     if re.search(
                         r'\.(png|jpg|gif|css|woff|woff2|svg|ico|map|ttf|eot)$',
                         path, re.I
                     ):
                         continue
-
-                    # Filter very short or obviously non-API paths
                     if len(path) < 3 or path in ("/", "//"):
                         continue
-
                     seen_paths.add(path)
                     full_url = urljoin(base, path)
                     endpoints.append({
@@ -690,6 +691,7 @@ class EndpointDiscoveryAgent:
                         "method":       "GET",
                         "source":       "js_bundle",
                         "status":       None,
+                        "final_url":    full_url,
                         "interesting":  True,
                         "auth_required":False,
                         "params":       []
@@ -698,23 +700,15 @@ class EndpointDiscoveryAgent:
         if verbose:
             print(f"     ✓ JS extraction: {len(endpoints)} endpoints "
                   f"(from {len(js_urls)} JS files + {len(inline_scripts)} inline blocks)")
-
         return endpoints
 
     def _extract_js_urls(self, base: str, html: str) -> Set[str]:
-        """Find <script src="..."> URLs from page HTML — any .js or chunk file."""
         urls: Set[str] = set()
-        # Standard src attribute
-        for src in re.findall(
-            r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I
-        ):
+        for src in re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I):
             if src.endswith(".js") or "/chunk" in src or "/_nuxt/" in src \
                or "/_next/" in src:
                 urls.add(urljoin(base, src))
-        # Preload links (modern frameworks preload chunks)
-        for href in re.findall(
-            r'<link[^>]+href=["\']([^"\']+\.js)["\']', html, re.I
-        ):
+        for href in re.findall(r'<link[^>]+href=["\']([^"\']+\.js)["\']', html, re.I):
             urls.add(urljoin(base, href))
         return urls
 
@@ -724,63 +718,79 @@ class EndpointDiscoveryAgent:
 
     async def _strategy_common_paths(self, base: str,
                                       verbose: bool = False) -> List[Dict]:
-        """Probe common API and admin paths with GET requests."""
         if verbose:
             print("    Strategy 3: Common path probing...")
 
         paths_to_probe = COMMON_PATHS[:self.max_probe_paths]
-
-        # Run probes in batches of 10 to avoid hammering the server
-        batch_size = 10
+        batch_size     = 10
         endpoints: List[Dict] = []
 
         for i in range(0, len(paths_to_probe), batch_size):
-            batch = paths_to_probe[i:i + batch_size]
-            tasks = [self._probe_path(base, path) for path in batch]
+            batch   = paths_to_probe[i:i + batch_size]
+            tasks   = [self._probe_path(base, path) for path in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, dict):
                     endpoints.append(r)
 
         interesting = [e for e in endpoints if e.get("interesting")]
-
         if verbose:
             print(f"     ✓ Probed {len(paths_to_probe)} paths → "
                   f"{len(interesting)} interesting")
-
         return endpoints
 
     async def _probe_path(self, base: str, path: str) -> Optional[Dict]:
         """
         Probe a single path and return endpoint dict if interesting.
 
-        Fix 1: Tiered status evaluation.
-          - 403 only interesting on SENSITIVE_PATH_PREFIXES (/.env, /.git etc)
-          - 200 on EXPECTED_200_PATHS (robots.txt, sitemap) → not a finding
+        Redirect-off-path filter (NEW):
+          If the server redirected us to a completely different path the
+          original path doesn't really exist — it's a catch-all / soft-404.
+          Example: leantime.io/api/me → leantime.io/meistern-sie-...
+          Trailing-slash redirects (/api → /api/) are allowed — those are real.
+
+        Tiered status evaluation (existing):
+          - 403 only interesting on SENSITIVE_PATH_PREFIXES
+          - 200 on EXPECTED_200_PATHS not a finding
           - Generic text/html 200s filtered unless path looks like a real endpoint
-          - content_type recorded for downstream classification
         """
         url = f"{base}{path}"
         try:
             loop = asyncio.get_event_loop()
-            status, headers = await loop.run_in_executor(
+            status, headers, final_url = await loop.run_in_executor(
                 None, lambda: self._sync_head(url)
             )
 
             if status == 0:
                 return None
 
+            # ── Redirect off-path filter ─────────────────────────────
+            if final_url and final_url != url:
+                asked  = (urlsplit(url).path or "/").rstrip("/") or "/"
+                landed = (urlsplit(final_url).path or "/").rstrip("/") or "/"
+                # Allow trailing-slash canonicalisation (/api → /api/)
+                is_slash_redirect = (
+                    landed == asked + "/" or asked == landed + "/"
+                )
+                if not is_slash_redirect and landed != asked:
+                    logger.debug(
+                        "probe: drop %s — redirected off-path to %s", url, final_url
+                    )
+                    return None
+            # ─────────────────────────────────────────────────────────
+
             path_lower    = path.lower()
             content_type  = headers.get("Content-Type", "").lower()
             auth_required = status in (401, 403)
 
-            # Public-by-design: 200 is expected, mark non-interesting
+            # Public-by-design: 200 expected, not a finding
             if path_lower in EXPECTED_200_PATHS and status == 200:
                 return {
                     "url": url, "method": "GET", "source": "probe",
-                    "status": status, "interesting": False,
-                    "auth_required": False, "params": [],
-                    "content_type": content_type, "note": "public-by-design"
+                    "status": status, "final_url": final_url or url,
+                    "interesting": False, "auth_required": False,
+                    "params": [], "content_type": content_type,
+                    "note": "public-by-design"
                 }
 
             # Sensitive paths: 403 IS meaningful
@@ -791,26 +801,26 @@ class EndpointDiscoveryAgent:
             if is_sensitive:
                 is_interesting = status in SENSITIVE_INTERESTING
             else:
-                # Generic: 403 is NOT interesting (could be any WAF block)
                 is_interesting = status in PROBE_INTERESTING
 
             if not is_interesting:
                 return None
 
-            # For generic 200s: filter catch-all HTML pages
+            # For generic 200s: filter remaining catch-all HTML pages
             if status == 200 and "text/html" in content_type and not is_sensitive:
                 looks_like_endpoint = any(kw in path_lower for kw in (
                     "admin", "api", "login", "dashboard", "console",
                     "panel", "manage", "swagger", "debug", "shell", "graphql"
                 ))
                 if not looks_like_endpoint:
-                    return None  # Likely WAF/CDN catch-all, not a real path
+                    return None
 
             return {
                 "url":          url,
                 "method":       "GET",
                 "source":       "probe",
                 "status":       status,
+                "final_url":    final_url or url,
                 "interesting":  True,
                 "auth_required":auth_required,
                 "params":       [],
@@ -825,7 +835,6 @@ class EndpointDiscoveryAgent:
     # ------------------------------------------------------------------
 
     async def _fetch_text(self, url: str) -> Optional[str]:
-        """Fetch text content of a URL asynchronously."""
         loop = asyncio.get_event_loop()
         try:
             return await loop.run_in_executor(
@@ -851,7 +860,13 @@ class EndpointDiscoveryAgent:
             return None
 
     def _sync_head(self, url: str):
-        """Return (status, headers) for a URL using HEAD then GET fallback."""
+        """
+        Return (status, headers, final_url) using HEAD then GET fallback.
+
+        final_url is the URL after all redirects — used by _probe_path to
+        detect catch-all / soft-404 sites that redirect unknown paths to an
+        existing page (e.g. a blog article) while returning HTTP 200.
+        """
         for method in ("HEAD", "GET"):
             try:
                 req = urllib.request.Request(
@@ -860,20 +875,18 @@ class EndpointDiscoveryAgent:
                     method=method
                 )
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return resp.status, dict(resp.headers)
+                    return resp.status, dict(resp.headers), resp.url
             except urllib.error.HTTPError as e:
-                return e.code, dict(e.headers) if e.headers else {}
+                return e.code, dict(e.headers) if e.headers else {}, url
             except Exception:
                 if method == "GET":
-                    return 0, {}
-        return 0, {}
+                    return 0, {}, url
+        return 0, {}, url
 
     # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
 
     def _base_url(self, url: str) -> str:
-        """Return scheme://host:port with no path."""
         parsed = urlparse(url)
-        base   = f"{parsed.scheme}://{parsed.netloc}"
-        return base.rstrip("/")
+        return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")

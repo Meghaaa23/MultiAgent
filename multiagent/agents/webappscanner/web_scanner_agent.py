@@ -71,31 +71,37 @@ def _build_evidence_gated_stride(target_url, response_headers,
 
     if not xfo and "frame-ancestors" not in csp.lower():
         threats.append({
-            "category": "Spoofing", "threat": "Clickjacking",
-            "evidence": "X-Frame-Options and CSP frame-ancestors absent",
-            "likelihood": "Medium", "impact": "Medium",
+            "category":   "Spoofing",
+            "threat":     "Clickjacking",
+            "evidence":   "X-Frame-Options and CSP frame-ancestors absent",
+            "likelihood": "Medium",
+            "impact":     "Medium",
             "mitigation": "Add X-Frame-Options: DENY or CSP frame-ancestors 'none'",
-            "confirmed": True,
+            "confirmed":  True,
         })
 
     redirect_kws    = {"redirect", "url", "next", "return", "goto", "dest", "to"}
     redirect_params = [p for p in discovered_params if any(k in p.lower() for k in redirect_kws)]
     if redirect_params:
         threats.append({
-            "category": "Tampering", "threat": "Open Redirect",
-            "evidence": f"Redirect params in crawl: {redirect_params}",
-            "likelihood": "Medium", "impact": "Medium",
+            "category":   "Tampering",
+            "threat":     "Open Redirect",
+            "evidence":   f"Redirect params in crawl: {redirect_params}",
+            "likelihood": "Medium",
+            "impact":     "Medium",
             "mitigation": "Validate redirects against allowlist",
-            "confirmed": False,
+            "confirmed":  False,
         })
 
     if cors_misconfigured:
         threats.append({
-            "category": "Information Disclosure", "threat": "CORS Misconfiguration",
-            "evidence": "ACAO reflects attacker-controlled origin (confirmed)",
-            "likelihood": "High", "impact": "High",
+            "category":   "Information Disclosure",
+            "threat":     "CORS Misconfiguration",
+            "evidence":   "ACAO reflects attacker-controlled origin (confirmed)",
+            "likelihood": "High",
+            "impact":     "High",
             "mitigation": "Restrict ACAO to trusted origins; remove wildcard",
-            "confirmed": True,
+            "confirmed":  True,
         })
 
     def _inputs(form):
@@ -106,11 +112,13 @@ def _build_evidence_gated_stride(target_url, response_headers,
         for f in discovered_forms
     ):
         threats.append({
-            "category": "Elevation of Privilege", "threat": "SQL Injection via Login Form",
-            "evidence": "Login form with password field discovered — not actively tested (black-box)",
-            "likelihood": "Low", "impact": "Critical",
+            "category":   "Elevation of Privilege",
+            "threat":     "SQL Injection via Login Form",
+            "evidence":   "Login form with password field discovered — not actively tested (black-box)",
+            "likelihood": "Low",
+            "impact":     "Critical",
             "mitigation": "Use parameterised queries; never interpolate user input into SQL statements",
-            "confirmed": False,
+            "confirmed":  False,
         })
 
     if any(
@@ -119,11 +127,13 @@ def _build_evidence_gated_stride(target_url, response_headers,
         for f in discovered_forms
     ):
         threats.append({
-            "category": "Tampering", "threat": "Cross-Site Scripting (XSS)",
-            "evidence": "Text/textarea input field(s) discovered in crawl",
-            "likelihood": "Medium", "impact": "High",
+            "category":   "Tampering",
+            "threat":     "Cross-Site Scripting (XSS)",
+            "evidence":   "Text/textarea input field(s) discovered in crawl",
+            "likelihood": "Medium",
+            "impact":     "High",
             "mitigation": "Apply output encoding; implement strict CSP",
-            "confirmed": False,
+            "confirmed":  False,
         })
 
     return threats
@@ -147,7 +157,7 @@ class WebScannerAgent:
         self.ai_vuln_tester   = AIVulnerabilityTester(timeout=10)
         self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client)
 
-        print("✓ WebScannerAgent initialized (v7 — AI Infra Attack Analysis)")
+        print("✓ WebScannerAgent initialized (v8 — soft-404 probe filter)")
 
     async def scan_application(self, target_url: str,
                                max_time_minutes: int = 10,
@@ -201,9 +211,16 @@ class WebScannerAgent:
         app_identity = None
         if _HAS_APP_IDENTITY:
             try:
+                wap_cms = next(
+                    (dt.get("name","") for dt in stack.get("technologies",[])
+                     if isinstance(dt, dict) and dt.get("category") == "CMS"),
+                    None
+                )
                 app_identity = await detect_app_identity(
                     base_url=target_url, html=html or "",
-                    response_headers=initial_headers, verbose=verbose,
+                    response_headers=initial_headers,
+                    wappalyzer_cms=wap_cms,
+                    verbose=verbose,
                 )
                 if app_identity and app_identity.name:
                     existing = stack.get("technologies", [])
@@ -243,6 +260,10 @@ class WebScannerAgent:
 
         verified_cves = None
 
+        # ------------------------------------------------------------------
+        # Phase 2a: Endpoint Discovery
+        # (calibration is now done inside endpoint_disco.discover() itself)
+        # ------------------------------------------------------------------
         if verbose:
             print("Phase 2a: Endpoint Discovery...")
         discovered_endpoints: List[Dict] = []
@@ -252,14 +273,24 @@ class WebScannerAgent:
             )
             for ep in discovered_endpoints:
                 if ep.get("url") and ep.get("interesting") and ep.get("method") == "GET":
-                    all_urls.append(ep["url"])
+                    # Only add to crawl URLs if the endpoint genuinely resolved
+                    # (not access-controlled, not a soft-404 artefact)
+                    if ep.get("category") != "discovered_protected":
+                        all_urls.append(ep["url"])
         except Exception as e:
             logger.warning(f"Endpoint discovery failed: {e}")
 
         if verbose:
             interesting = sum(1 for e in discovered_endpoints if e.get("interesting"))
-            print(f"  ✓ {len(discovered_endpoints)} endpoints ({interesting} interesting)\n")
+            protected   = sum(1 for e in discovered_endpoints if e.get("access_controlled"))
+            soft_mode   = getattr(self.endpoint_disco, "_soft_mode", False)
+            print(f"  ✓ {len(discovered_endpoints)} endpoints "
+                  f"({interesting} interesting, {protected} access-controlled)"
+                  + (" [soft-404 filter active]" if soft_mode else "") + "\n")
 
+        # ------------------------------------------------------------------
+        # Phase 0c: AI/ML Component Detection
+        # ------------------------------------------------------------------
         if verbose:
             print("Phase 0c: AI/ML Component Detection...")
 
@@ -335,6 +366,9 @@ class WebScannerAgent:
         except Exception as e:
             logging.warning(f"AIInfraAgent failed: {e}")
 
+        # ------------------------------------------------------------------
+        # Phase 1b: CVE Lookup
+        # ------------------------------------------------------------------
         if verbose:
             print("Phase 1b: CVE Lookup (NVD/OSV)...")
         try:
@@ -383,15 +417,19 @@ class WebScannerAgent:
 
         if verbose:
             cve_count = len(verified_cves) if verified_cves is not None else "lookup failed"
-            print(f"  ✓ Relevant CVEs: {cve_count}\n")
+            print(f"  ✓ Verified CVEs: {cve_count}\n")
 
+        # ------------------------------------------------------------------
+        # Phase 2b: Browser Crawl
+        # ------------------------------------------------------------------
         if verbose:
             print("Phase 2b: Browser Crawl...")
 
         filtered = [e for e in elements if e.get("type") in ("form", "link")]
         tasks    = await self.browser.generate_tasks(
             elements=filtered, page_description="",
-            openai_client=self.openai_client, llm_model=self.llm_model, target_url=target_url,
+            openai_client=self.openai_client, llm_model=self.llm_model,
+            target_url=target_url,
         )
 
         tasks_executed = 0
@@ -416,6 +454,9 @@ class WebScannerAgent:
         if verbose:
             print(f"  ✓ {tasks_executed}/{len(tasks)} tasks | {len(all_forms)} forms | {len(all_urls)} URLs\n")
 
+        # ------------------------------------------------------------------
+        # Phase 2c: SPA Scanning
+        # ------------------------------------------------------------------
         if verbose:
             print("Phase 2c: SPA Scanning...")
         try:
@@ -432,6 +473,9 @@ class WebScannerAgent:
         except Exception as e:
             logger.warning(f"SPA scanning failed: {e}")
 
+        # ------------------------------------------------------------------
+        # Phase 3: Vulnerability Testing
+        # ------------------------------------------------------------------
         if verbose:
             print("Phase 3: Vulnerability Testing...")
         raw_findings: List[Dict] = []
@@ -439,7 +483,10 @@ class WebScannerAgent:
             raw_findings = await self.vuln_tester.test_all(
                 forms=all_forms, urls=all_urls, page_html=html,
                 target_url=target_url,
-                discovered_paths=[ep.get("url", "") for ep in discovered_endpoints if ep.get("interesting")],
+                discovered_paths=[
+                    ep.get("url", "") for ep in discovered_endpoints
+                    if ep.get("interesting")
+                ],
                 verbose=verbose,
             )
         except Exception as e:
@@ -450,6 +497,9 @@ class WebScannerAgent:
             p = sum(1 for f in raw_findings if f.get("status") == "Potential")
             print(f"  ✓ {c} confirmed, {p} potential\n")
 
+        # ------------------------------------------------------------------
+        # Phase 4: Attack Verification
+        # ------------------------------------------------------------------
         if verbose:
             print("Phase 4: Attack Verification...")
         verified_findings: List[Dict] = []
@@ -468,7 +518,8 @@ class WebScannerAgent:
                     d.setdefault("poc",      d.get("location", ""))
                     d.setdefault("category", "vulnerability")
                     if "Missing Security Header" in d.get("type", "") or \
-                       ("Information Disclosure" in d.get("type", "") and "header" in d.get("type", "").lower()):
+                       ("Information Disclosure" in d.get("type", "") and
+                        "header" in d.get("type", "").lower()):
                         d["category"] = "security_header"
                         if d.get("severity") in ("Critical", "High"):
                             d["severity"] = "Medium"
@@ -481,14 +532,24 @@ class WebScannerAgent:
         stride_threats = []
         if all_forms or all_params or cors_misconfigured or initial_headers:
             stride_threats = _build_evidence_gated_stride(
-                target_url, initial_headers, all_params, all_forms, cors_misconfigured, stack,
+                target_url, initial_headers, all_params,
+                all_forms, cors_misconfigured, stack,
             )
 
         seen:         set        = set()
         all_findings: List[Dict] = []
 
+        has_clickjacking = any(
+            "Clickjacking" in f.get("type", "") and f.get("status") == "Confirmed"
+            for f in verified_findings
+        )
+
         for f in raw_findings + verified_findings:
-            key = (f.get("type", "").lower(), f.get("location", ""))
+            ftype    = f.get("type", "")
+            location = f.get("location", "").rstrip("/")
+            if has_clickjacking and "X-Frame-Options" in ftype and "Missing Security Header" in ftype:
+                continue
+            key = (ftype.lower(), location)
             if key not in seen:
                 seen.add(key)
                 all_findings.append(f)
@@ -507,13 +568,18 @@ class WebScannerAgent:
                     seen.add(key)
                     all_findings.append(f)
 
+        # ------------------------------------------------------------------
+        # Phase 4c: Action Agent
+        # ------------------------------------------------------------------
         if verbose:
             print("Phase 4c: Action Agent (PoC + fix generation)...")
         action_results: List[Dict] = []
         try:
             from .action_agent import ActionAgent
             action_results = ActionAgent().process_all(
-                findings=all_findings, target_url=target_url, stack=stack, verbose=verbose,
+                findings=all_findings, target_url=target_url,
+                stack=stack, verbose=verbose,
+                response_headers=initial_headers,
             )
         except Exception as e:
             logger.warning(f"Action agent failed: {e}")
@@ -534,6 +600,25 @@ class WebScannerAgent:
                 print(f"  Infra threats: {len(ai_infra_result.threats) if ai_infra_result else 0}")
             print(f"{'='*70}\n")
 
+        # ------------------------------------------------------------------
+        # Build endpoint surface for the report
+        # "access_controlled" endpoints appear as recon (discovered but blocked)
+        # rather than confirmed findings; all others filtered by interesting flag
+        # ------------------------------------------------------------------
+        report_endpoints = []
+        for ep in discovered_endpoints:
+            if ep.get("access_controlled"):
+                # Rename so the report renders "Discovered (access-controlled)"
+                report_ep = dict(ep)
+                report_ep["category"]   = "discovered_protected"
+                report_ep["note"]       = (
+                    f"HTTP {ep.get('status')} — path exists but is access-controlled. "
+                    "Recon only, not an exposure."
+                )
+                report_endpoints.append(report_ep)
+            elif ep.get("interesting"):
+                report_endpoints.append(ep)
+
         return {
             "target_url":             target_url,
             "stack":                  stack,
@@ -541,7 +626,7 @@ class WebScannerAgent:
             "app_version":            stack.get("app_identity_version", ""),
             "verified_cves":          verified_cves,
             "nvd_section_visible":    not is_ai_powered,
-            "endpoints_discovered":   discovered_endpoints,
+            "endpoints_discovered":   report_endpoints,
             "vulnerabilities":        all_findings,
             "stride_threats":         stride_threats,
             "confirmed_count":        sum(1 for f in all_findings if f.get("status") == "Confirmed"),
@@ -571,7 +656,9 @@ class WebScannerAgent:
 
     def _sync_headers(self, url: str) -> Dict:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (SecurityScanner)"})
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (SecurityScanner)"}
+            )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return {k.lower(): v for k, v in resp.headers.items()}
         except urllib.request.HTTPError as e:
@@ -579,6 +666,10 @@ class WebScannerAgent:
         except Exception:
             return {}
 
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
 
 async def _scan_spa_routes(base_url: str, verbose: bool = False):
     if _spa_scanner_instance is None:

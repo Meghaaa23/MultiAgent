@@ -197,6 +197,7 @@ def _from_robots_txt(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
 async def detect_app_identity(base_url: str,
                                html: str,
                                response_headers: Dict,
+                               wappalyzer_cms: Optional[str] = None,
                                verbose: bool = False) -> AppIdentity:
     import asyncio
 
@@ -291,8 +292,32 @@ async def detect_app_identity(base_url: str,
 
     if best:
         best_name, best_version, best_evidence, best_score = best
+        if wappalyzer_cms and best_name:
+            if best_name.lower() != wappalyzer_cms.lower():
+                version_only = next(
+                    (s for s in signals if "API" in s[2] and s[1]),
+                    None
+                )
+                if version_only:
+                    best_name    = wappalyzer_cms
+                    best_version = version_only[1]
+                else:
+                    best_name = wappalyzer_cms
+                    best_version = None
     else:
         best_name, best_version, best_evidence, best_score = None, None, "", 0
+
+    version_api_signal = next(
+        (s for s in signals if "API" in s[2] and s[1]),
+        None
+    )
+    if version_api_signal and best_name:
+        api_name    = version_api_signal[0]
+        api_version = version_api_signal[1]
+        if api_name and api_version:
+            if api_name.lower() == best_name.lower() or not best_version:
+                best_name    = api_name
+                best_version = api_version
 
     confidence = (
         "high"   if best_score >= 80 else

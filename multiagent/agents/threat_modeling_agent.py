@@ -10,7 +10,6 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 from .webappscanner.action_agent import ActionAgent
-
 from .redis_manager import cache_result, get_cached_result
 from .vector_search import VectorSearch
 from .webappscanner.web_scanner_agent import WebScannerAgent
@@ -25,14 +24,6 @@ from utils.threat_prompts import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-_VALID_OWASP = {
-    "A01", "A02", "A03", "A04", "A05",
-    "A06", "A07", "A08", "A09", "A10",
-    "A01:2021", "A02:2021", "A03:2021", "A04:2021", "A05:2021",
-    "A06:2021", "A07:2021", "A08:2021", "A09:2021", "A10:2021",
-}
 
 
 def _tech_display(t) -> str:
@@ -88,26 +79,6 @@ def _sanitize_report(report_text: str) -> str:
     return "\n".join(final_lines)
 
 
-def _truncate_at_section(report_text: str, max_section: int = 7) -> str:
-    section_pattern = re.compile(r'^## \d+\.', re.MULTILINE)
-    matches         = list(section_pattern.finditer(report_text))
-    if not matches:
-        return report_text
-    sec7_start = None
-    for m in matches:
-        sn = re.match(r'^## (\d+)', m.group())
-        if sn and int(sn.group(1)) == max_section:
-            sec7_start = m.start()
-            break
-    if sec7_start is None:
-        return report_text
-    for m in matches:
-        sn = re.match(r'^## (\d+)', m.group())
-        if sn and int(sn.group(1)) > max_section:
-            return report_text[:m.start()].rstrip()
-    return report_text
-
-
 def _format_confirmed_stack(stack: Dict) -> str:
     confirmed  = stack.get("technologies", [])
     unverified = stack.get("unverified_hints", [])
@@ -122,9 +93,9 @@ def _format_confirmed_stack(stack: Dict) -> str:
     parts = []
     for t in confirmed:
         if isinstance(t, dict):
-            name = t.get("name", "")
-            ver  = t.get("version", "")
-            conf = t.get("confidence", 0)
+            name    = t.get("name", "")
+            ver     = t.get("version", "")
+            conf    = t.get("confidence", 0)
             display = f"{name} {ver}".strip() if ver else name
             parts.append(f"{display} [conf={conf:.2f}]")
         else:
@@ -134,24 +105,6 @@ def _format_confirmed_stack(stack: Dict) -> str:
     if unverified:
         result += f"\nEXCLUDED (unconfirmed): {', '.join(unverified)}"
     return result
-
-
-_CWE_TO_OWASP = {
-    "CWE-79":   ("A03:2021", "Injection"),
-    "CWE-89":   ("A03:2021", "Injection"),
-    "CWE-538":  ("A05:2021", "Security Misconfiguration"),
-    "CWE-200":  ("A05:2021", "Security Misconfiguration"),
-    "CWE-693":  ("A05:2021", "Security Misconfiguration"),
-    "CWE-352":  ("A01:2021", "Broken Access Control"),
-    "CWE-601":  ("A01:2021", "Broken Access Control"),
-    "CWE-22":   ("A01:2021", "Broken Access Control"),
-    "CWE-942":  ("A05:2021", "Security Misconfiguration"),
-    "CWE-1021": ("A04:2021", "Insecure Design"),
-    "CWE-284":  ("A01:2021", "Broken Access Control"),
-    "CWE-77":   ("A03:2021", "Injection"),
-    "CWE-434":  ("A04:2021", "Insecure Design"),
-    "CWE-770":  ("A05:2021", "Security Misconfiguration"),
-}
 
 
 def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results):
@@ -166,7 +119,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
         "dom_reflection": 1.2,
         "http_body":      1.0,
         "pattern":        0.8,
-        "header":         0.5,
+        "header":         0.2,
     }
     exploit_score = 0.0
     for v in confirmed_vulns:
@@ -200,7 +153,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     summary = (
         f"Active scan of `{target_url}` completed in {duration:.0f}s{auth_note}. "
         f"Identified {n_confirmed} confirmed and {n_potential} potential "
-        f"vulnerability type(s). Overall risk level: **{risk}** "
+        f"vulnerability type(s). Overall risk level: {risk} "
         f"(score: {exploit_score:.0f})"
     )
     if n_confirmed == 0 and n_potential == 0:
@@ -226,8 +179,8 @@ def _build_section_2(stack, endpoints, cves):
         for dt in technologies:
             by_cat.setdefault(dt.get("category", "Other"), []).append(dt)
 
-        cat_order = ["CMS", "Server", "Language", "Framework", "CDN",
-                     "Database", "Analytics", "Other"]
+        cat_order     = ["CMS", "Server", "Language", "Framework", "CDN",
+                         "Database", "Analytics", "Other"]
         rendered_cats = []
         for cat in cat_order:
             if cat in by_cat:
@@ -238,9 +191,9 @@ def _build_section_2(stack, endpoints, cves):
 
         for cat in rendered_cats:
             for dt in by_cat[cat]:
-                name = dt.get("name", "")
-                ver  = dt.get("version", "")
-                conf = dt.get("confidence", 0)
+                name    = dt.get("name", "")
+                ver     = dt.get("version", "")
+                conf    = dt.get("confidence", 0)
                 display = f"{name} {ver}".strip() if ver else name
                 lines.append(f"- {display}  [{cat}, {conf:.0%} confidence]")
 
@@ -258,7 +211,7 @@ def _build_section_2(stack, endpoints, cves):
             technologies = []
 
     if not technologies:
-        summary = stack.get("stack_summary", "")
+        summary      = stack.get("stack_summary", "")
         noise_summary = {"unknown", "unknown (no technology confirmed from http evidence)", ""}
         if summary and summary.strip().lower() not in noise_summary:
             lines.append(f"- {summary}")
@@ -277,60 +230,38 @@ def _build_section_2(stack, endpoints, cves):
 
     unverified = stack.get("unverified_hints", [])
     if unverified:
-        lines.append(f"\n*Unconfirmed hints (excluded): {', '.join(unverified[:5])}*")
+        lines.append(f"\nUnconfirmed hints (excluded): {', '.join(unverified[:5])}")
 
-    lines.append("\n Discovered Endpoints")
+    lines.append("\n Attack Surface")
     interesting = [e for e in (endpoints or []) if e.get("interesting")]
     if interesting:
-        for ep in interesting[:15]:
-            auth = " [AUTH REQUIRED]" if ep.get("auth_required") else ""
-            lines.append(
-                f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
-                f"{ep.get('url','')} [{ep.get('source','')}]{auth}"
-            )
+        functional, admin, discovery = [], [], []
+        for ep in interesting:
+            url_lower = ep.get("url", "").lower()
+            if any(x in url_lower for x in ["sitemap", "robots.txt"]):
+                discovery.append(ep)
+            elif any(x in url_lower for x in ["admin", "dashboard", "manage", "wp-admin"]):
+                admin.append(ep)
+            else:
+                functional.append(ep)
+
+        for group_label, group in [
+            (" Functional Endpoints", functional),
+            (" Administrative Endpoints", admin),
+            (" Discovery Resources", discovery),
+        ]:
+            if group:
+                lines.append(group_label)
+                for ep in group[:15]:
+                    auth = " [AUTH REQUIRED]" if ep.get("auth_required") else ""
+                    lines.append(
+                        f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
+                        f"{ep.get('url','')} [{ep.get('source','')}]{auth}"
+                    )
     else:
         lines.append("None discovered.")
 
-    lines.append("\n Relevant CVEs (NVD/OSV)")
 
-    app_name    = stack.get("app_identity_name", "")
-    app_version = stack.get("app_identity_version", "")
-
-    if cves is None:
-        lines.append(
-            "CVE lookup unavailable (API rate limit or network error). "
-            "Add NVD_API_KEY to .env to raise the unauthenticated limit "
-            "from 5 to 50 requests per 30 seconds."
-        )
-    elif not app_name:
-        lines.append(
-            "Application identity could not be determined — CVE lookup skipped. "
-            "Technology stack components (frameworks, CDN, analytics) are not queried."
-        )
-    elif cves:
-        if app_version:
-            lines.append(f"Application: {app_name}")
-            lines.append(f"Version: {app_version}")
-            lines.append(f"Confidence: High")
-            lines.append(f"Reason: Version detected — CVEs shown for this version.")
-        else:
-            lines.append(f"Application: {app_name}")
-            lines.append(f"Version: Unknown")
-            lines.append(f"Confidence: Low")
-            lines.append(f"Reason: Version could not be determined. All known CVEs shown — manual triage required.")
-        lines.append("")
-        for cve in cves[:5]:
-            pub     = cve.get("published", "")
-            pub_str = f"  {pub}" if pub else ""
-            lines.append(
-                f"- *{cve.get('cve_id','?')}* [{cve.get('severity','?')}] "
-                f"CVSS {cve.get('cvss_score','N/A')}{pub_str} — "
-                f"{cve.get('description','')[:150]}"
-            )
-    else:
-        lines.append(f"Application: {app_name}")
-        lines.append(f"Version: {app_version or 'Unknown'}")
-        lines.append("None found in NVD/OSV for this application.")
 
     return "\n".join(lines)
 
@@ -341,12 +272,12 @@ _CONFIDENCE_LABEL = {
     "dom_reflection": "HIGH  (DOM reflection confirmed)",
     "http_body":      "MEDIUM (HTTP body reflection)",
     "pattern":        "MEDIUM (error pattern match)",
-    "header":         "LOW   (passive header check)",
+    "header":         "HIGH  (direct header inspection)",
 }
 
 
 def _build_section_3(confirmed_vulns):
-    lines = [" 3. CONFIRMED VULNERABILITIES"]
+    lines = [" 3. CONFIRMED SECURITY MISCONFIGURATIONS & WEAKNESSES"]
     if not confirmed_vulns:
         lines.append("No confirmed vulnerabilities identified from active scanning.")
         return "\n".join(lines)
@@ -361,14 +292,14 @@ def _build_section_3(confirmed_vulns):
         conf   = _CONFIDENCE_LABEL.get(method, "MEDIUM (code confirmed)")
         lines += [
             "",
-            f"*Severity*: {v.get('severity','?')} | {v.get('type','?')}",
-            f"- *Confidence*: {conf}",
-            f"- *Location*: `{v.get('location','?')}`",
-            f"- *Evidence*: `{ev.get('request','?')}` "
+            f"Severity: {v.get('severity','?')} | {v.get('type','?')}",
+            f"- Confidence: {conf}",
+            f"- Location: `{v.get('location','?')}`",
+            f"- Evidence: `{ev.get('request','?')}` "
             f"(HTTP {ev.get('response_status','?')}, confirmed by {method})",
-            f"- *Impact*: {v.get('impact','')}",
-            f"- *Fix*: {v.get('remediation','')}",
-            f"- *CWE*: {v.get('cwe','')}",
+            f"- Impact: {v.get('impact','')}",
+            f"- Fix: {v.get('remediation','')}",
+            f"- CWE: {v.get('cwe','')}",
         ]
     return "\n".join(lines)
 
@@ -376,24 +307,21 @@ def _build_section_3(confirmed_vulns):
 def render_section_3b(action_results: list) -> str:
     if not action_results:
         return ""
-    lines = [
-        "\n 3b. ACTION AGENT — ATTACK PoCs & FIX SNIPPETS",
-        "> Stack-specific fix code and proof-of-concept for each confirmed finding.\n",
-    ]
+    lines = ["\n 3b. ACTION AGENT — ATTACK PoCs & FIX SNIPPETS"]
     for a in action_results:
-        e      = a.get("effort_minutes", 0)
-        effort = f"{e} min" if e < 60 else f"{e//60}h {e%60}min"
+        e        = a.get("effort_minutes", 0)
+        effort   = f"{e} min" if e < 60 else f"{e//60}h {e%60}min"
         poc_lang = {"curl": "bash", "html": "html", "command": "bash"}.get(
             a.get("poc_type", ""), "text"
         )
         lines += [
             f" [{a['severity']}] {a['finding_type']}",
-            f"*Location:* `{a['location']}` | *Estimated fix effort:* {effort}\n",
-            f"*Attack PoC ({a.get('poc_type', '')}):*",
+            f"Location: `{a['location']}` | Estimated fix effort: {effort}\n",
+            f"Attack PoC ({a.get('poc_type', '')}):",
             f"```{poc_lang}",
             a["attack_poc"],
             "```\n",
-            f"*Fix ({a['fix_context']}):*",
+            f"Fix ({a['fix_context']}):",
             f"```{a['fix_language']}",
             a["fix_snippet"],
             "```\n",
@@ -422,16 +350,16 @@ def _build_section_4(potential_vulns):
         lines += [
             "",
             f" [{i}] {v.get('type','?')}",
-            f"- *Severity*: {v.get('severity','Low')} | "
-            f"*Confidence*: LOW (unconfirmed — manual verification required)",
-            f"- *Location*: {v.get('location','?')}",
-            f"- *Why Potential*: Requires manual confirmation — {v.get('details','')}",
-            f"- *Detection Method*: {method}",
+            f"- Severity: {v.get('severity','Low')} | "
+            f"Confidence: LOW (unconfirmed — manual verification required)",
+            f"- Location: {v.get('location','?')}",
+            f"- Why Potential: Requires manual confirmation — {v.get('details','')}",
+            f"- Detection Method: {method}",
         ]
         if snippet:
-            lines.append(f"- *Evidence Snippet*: `{snippet[:120]}`")
+            lines.append(f"- Evidence Snippet: `{snippet[:120]}`")
         if v.get("cwe"):
-            lines.append(f"- *CWE*: {v.get('cwe')}")
+            lines.append(f"- CWE: {v.get('cwe')}")
     return "\n".join(l for l in lines if l is not None)
 
 
@@ -453,11 +381,11 @@ def _build_section_5(stride_threats):
         status = "Evidence-confirmed" if t.get("confirmed") else "Evidence-based (potential)"
         lines += [
             f" {t.get('category','?')}: {t.get('threat','?')}",
-            f"- *Status*: {status}",
-            f"- *Evidence*: {t.get('evidence','?')}",
-            f"- *Likelihood*: {t.get('likelihood','?')}",
-            f"- *Impact*: {t.get('impact','?')}",
-            f"- *Mitigation*: {t.get('mitigation','?')}",
+            f"- Status: {status}",
+            f"- Evidence: {t.get('evidence','?')}",
+            f"- Likelihood: {t.get('likelihood','?')}",
+            f"- Impact: {t.get('impact','?')}",
+            f"- Mitigation: {t.get('mitigation','?')}",
             "",
         ]
     return "\n".join(lines)
@@ -475,7 +403,7 @@ def _build_section_6(confirmed_vulns, potential_vulns):
         seen.add(key)
         sev = v.get("severity", "Low")
         groups.get(sev, groups["Low"]).append(
-            f"- *{v.get('type','?')}* **\n"
+            f"- {v.get('type','?')}\n"
             f"  Location: {v.get('location','?')}\n"
             f"  Fix: {v.get('remediation','')[:120]}"
         )
@@ -487,7 +415,7 @@ def _build_section_6(confirmed_vulns, potential_vulns):
         seen.add(key)
         sev = v.get("severity", "Low")
         groups.get(sev, groups["Low"]).append(
-            f"- *{v.get('type','?')}* *(Potential — manual verification needed)*\n"
+            f"- {v.get('type','?')} (Potential — manual verification needed)\n"
             f"  Location: {v.get('location','?')}\n"
             f"  Note: {v.get('details','')[:120]}"
         )
@@ -504,38 +432,6 @@ def _build_section_6(confirmed_vulns, potential_vulns):
     return "\n".join(lines)
 
 
-def _build_section_7(confirmed_vulns):
-    header = (
-        " 7. COMPLIANCE MAPPING\n"
-        " OWASP Top 10 and CWE Mapping for Confirmed Findings Only\n\n"
-        "| Finding | OWASP Category | CWE | Recommended Fix |\n"
-        "|---------|---------------|-----|-----------------|\n"
-    )
-    if not confirmed_vulns:
-        return header + "| No confirmed vulnerabilities | N/A | N/A | No remediation required. |"
-
-    rows = []
-    seen: set = set()
-    for v in confirmed_vulns:
-        key = (v.get("type", ""), v.get("location", ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        cwe_raw  = v.get("cwe", "")
-        cwe_list = [c.strip() for c in re.split(r"[,;/]", cwe_raw) if c.strip()][:2]
-        cwe_str  = ", ".join(cwe_list) or "N/A"
-        owasp_code, owasp_name = "A05:2021", "Security Misconfiguration"
-        for cwe in cwe_list:
-            if cwe in _CWE_TO_OWASP:
-                owasp_code, owasp_name = _CWE_TO_OWASP[cwe]
-                break
-        fix = v.get("remediation", "")[:100]
-        rows.append(
-            f"| {v.get('type','?')} | {owasp_code} — {owasp_name} | {cwe_str} | {fix} |"
-        )
-    return header + "\n".join(rows)
-
-
 def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     ai_fp     = scan_results.get("ai_fingerprint", {})
     strategic = scan_results.get("strategic_recommendations", [])
@@ -547,32 +443,31 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     if not ai_fp or not ai_fp.get("is_ai_powered"):
         return ""
 
-    avid_raw   = scan_results.get("avid_backdoor_relevant", [])
+    avid_raw     = scan_results.get("avid_backdoor_relevant", [])
     ml_libraries = ai_fp.get("ml_libraries", [])
 
-    _techs = (scan_results.get("stack") or {}).get("technologies", [])
+    _techs         = (scan_results.get("stack") or {}).get("technologies", [])
     detected_stack = [
         (t.get("name", "") if isinstance(t, dict) else str(t).split("/")[0]).lower()
         for t in _techs
     ]
-
     relevant_terms = [t.lower() for t in ml_libraries] + detected_stack
 
-    if relevant_terms:
-        avid = [
+    avid = (
+        [
             cve for cve in avid_raw
             if any(
                 term in (cve.get("title", "") + " " + cve.get("description", "")).lower()
                 for term in relevant_terms
             )
         ]
-    else:
-        avid = []
+        if relevant_terms else []
+    )
 
     lines = [
         " 8. AI/ML BACKDOOR VULNERABILITY ANALYSIS",
         "",
-        f"> *AI/ML components detected in this application* [confidence: {ai_fp.get('confidence', 'medium')}]",
+        f"> AI/ML components detected in this application [confidence: {ai_fp.get('confidence', 'medium')}]",
         "> Traditional web vulnerability scanning has been supplemented with "
         "AI-specific backdoor analysis per NIST AI 100-2 E2025 and MITRE ATLAS.",
         "",
@@ -582,22 +477,22 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     lines.append("")
 
     if ai_fp.get("ml_endpoints"):
-        lines.append("*ML Inference Endpoints:*")
+        lines.append("ML Inference Endpoints:")
         for ep in ai_fp["ml_endpoints"][:5]:
             lines.append(f"- `{ep}`")
         lines.append("")
 
     if ai_fp.get("ml_libraries"):
         libs = ", ".join(ai_fp["ml_libraries"][:6])
-        lines.append(f"*Detected ML Libraries:* {libs}")
+        lines.append(f"Detected ML Libraries: {libs}")
         lines.append("")
 
     if ai_fp.get("chat_components"):
-        lines.append("*LLM Chat UI Components Detected:* Yes")
+        lines.append("LLM Chat UI Components Detected: Yes")
         lines.append("")
 
     if ai_fp.get("model_upload_endpoints"):
-        lines.append("* Model File Upload Endpoints (HIGH RISK):*")
+        lines.append("Model File Upload Endpoints (HIGH RISK):")
         for ep in ai_fp["model_upload_endpoints"][:3]:
             lines.append(f"- `{ep}` — accepts model files (.pkl, .pt, .h5)")
         lines.append(
@@ -607,7 +502,7 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
         lines.append("")
 
     if ai_fp.get("atlas_techniques"):
-        lines.append("*Applicable ATLAS Techniques (from detected signals):*")
+        lines.append("Applicable ATLAS Techniques (from detected signals):")
         for tech in ai_fp["atlas_techniques"]:
             lines.append(f"- {tech}")
         lines.append("")
@@ -620,36 +515,33 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
         for v in confirmed_ai:
             lines += [
                 f" [CONFIRMED] {v.get('type','?')}",
-                f"- *Severity:* {v.get('severity','?')}",
-                f"- *Location:* `{v.get('location','?')}`",
-                f"- *ATLAS Technique:* {v.get('atlas', 'N/A')}",
-                f"- *CWE:* {v.get('cwe', 'N/A')}",
-                f"- *Impact:* {v.get('impact', v.get('details', ''))}",
-                f"- *PoC:* `{v.get('poc','N/A')}`",
-                f"- *Remediation:* {v.get('remediation','')}",
+                f"- Severity: {v.get('severity','?')}",
+                f"- Location: `{v.get('location','?')}`",
+                f"- ATLAS Technique: {v.get('atlas', 'N/A')}",
+                f"- CWE: {v.get('cwe', 'N/A')}",
+                f"- Impact: {v.get('impact', v.get('details', ''))}",
+                f"- PoC: `{v.get('poc','N/A')}`",
+                f"- Remediation: {v.get('remediation','')}",
                 "",
             ]
         for v in potential_ai:
             lines += [
                 f" [POTENTIAL] {v.get('type','?')}",
-                f"- *Severity:* {v.get('severity','?')}",
-                f"- *Location:* `{v.get('location','?')}`",
-                f"- *ATLAS Technique:* {v.get('atlas', 'N/A')}",
-                f"- *Details:* {v.get('details','')}",
-                f"- *Remediation:* {v.get('remediation','')}",
+                f"- Severity: {v.get('severity','?')}",
+                f"- Location: `{v.get('location','?')}`",
+                f"- ATLAS Technique: {v.get('atlas', 'N/A')}",
+                f"- Details: {v.get('details','')}",
+                f"- Remediation: {v.get('remediation','')}",
                 "",
             ]
     else:
-        lines.append(
-            "No AI-specific vulnerabilities confirmed via active testing. "
-            "See Section 8.4 for strategic recommendations on undetectable threats."
-        )
+        lines.append("No AI-specific vulnerabilities confirmed via active testing.")
         lines.append("")
 
     lines.append(" 8.3 AI-Specific CVEs from AVID Database")
     lines.append("")
     if avid:
-        lines.append("> Source: [AVID — AI Vulnerability and Incidents Database](https://avidml.org/database/)")
+        lines.append("> Source: AVID — AI Vulnerability and Incidents Database (https://avidml.org/database/)")
         lines.append("")
         lines.append("| CVE ID | Severity | ATLAS Technique | Description |")
         lines.append("|--------|----------|-----------------|-------------|")
@@ -661,8 +553,8 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
             lines.append(f"| {cve_id} | {sev} | {atlas} | {desc} |")
         lines.append("")
         lines.append(
-            f"*{len(avid)} AI backdoor-relevant CVEs found. "
-            f"Full details at [avidml.org/database](https://avidml.org/database/)*"
+            f"{len(avid)} AI backdoor-relevant CVEs found. "
+            f"Full details at https://avidml.org/database/"
         )
         lines.append("")
     else:
@@ -674,145 +566,41 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
 
     lines.append(" 8.4 Strategic Recommendations (ATLAS-Based)")
     lines.append("")
-    lines.append(
-        "> The following threats **cannot be detected via black-box scanning** because "
-        "they occur at training time or in the supply chain — before deployment. "
-        "Reported as strategic recommendations based on NIST AI 100-2 E2025, "
-        "MITRE ATLAS, and OWASP LLM04:2025."
-    )
-    lines.append("")
 
-    recs_to_use = strategic if strategic else [
-        {
-            "atlas_id":    "AML.T0018",
-            "title":       "Backdoor ML Model",
-            "severity":    "Critical",
-            "description": (
-                "A backdoored model operates normally under typical conditions "
-                "but produces adversary-defined outputs when a hidden trigger is present. "
-                "Cannot be detected from outside the system without model file access."
-            ),
-            "indicators":  [
-                "Model downloaded from untrusted/unverified repository",
-                "No model integrity verification (hash/signature check) in place",
-                "Unexpected behavior on specific structured inputs",
-                "No model versioning or artifact signing in deployment pipeline",
-            ],
-            "mitigations": [
-                "Verify model integrity via cryptographic hash before deployment",
-                "Run modelscan/picklescan on all model files before loading",
-                "Download models only from verified, audited sources",
-                "Implement Neural Cleanse or STRIP for backdoor detection",
-                "Monitor for concept drift — may indicate backdoor activation",
-            ],
-            "atlas_url": "https://atlas.mitre.org/techniques/AML.T0018",
-            "nist_ref":  "NIST AI 100-2 E2025 § 3.1",
-            "owasp_ref": "OWASP LLM04:2025 — Scenario #5",
-        },
-        {
-            "atlas_id":    "AML.T0020",
-            "title":       "Poison Training Data",
-            "severity":    "High",
-            "description": (
-                "Training data poisoning cannot be detected via black-box scanning. "
-                "An attacker with access to the training pipeline could corrupt model "
-                "behavior by injecting malicious samples."
-            ),
-            "indicators":  [
-                "Unexpected model outputs on specific input patterns",
-                "Model accuracy degradation over time",
-                "Unusual confidence scores on boundary inputs",
-                "Anomalous distribution shift in model predictions",
-            ],
-            "mitigations": [
-                "Validate all training data sources and provenance",
-                "Use OWASP CycloneDX or ML-BOM to track training data",
-                "Implement anomaly detection on training data distribution",
-                "Apply differential privacy during training",
-            ],
-            "atlas_url": "https://atlas.mitre.org/techniques/AML.T0020",
-            "nist_ref":  "NIST AI 100-2 E2025 § 3.2",
-            "owasp_ref": "OWASP LLM04:2025 — Data Poisoning",
-        },
-        {
-            "atlas_id":    "AML.T0010",
-            "title":       "ML Supply Chain Compromise",
-            "severity":    "High",
-            "description": (
-                "ML models sourced from public repositories (Hugging Face, PyPI, GitHub) "
-                "may be compromised via supply chain attacks. Invisible from outside."
-            ),
-            "indicators":  [
-                "Model sourced from unverified Hugging Face repository",
-                "No SBOM (Software Bill of Materials) for ML artifacts",
-                "ML dependencies pinned to vulnerable or unaudited versions",
-                "No automated vulnerability scanning in CI/CD pipeline",
-            ],
-            "mitigations": [
-                "Maintain an AI/ML SBOM for all model artifacts",
-                "Verify model provenance and publisher reputation",
-                "Pin ML dependencies to verified, audited versions",
-                "Reference ATLAS case studies: AML.CS0027, AML.CS0030",
-            ],
-            "atlas_url": "https://atlas.mitre.org/techniques/AML.T0010",
-            "nist_ref":  "NIST AI 100-2 E2025 § 4.1",
-            "owasp_ref": "OWASP LLM03:2025 — Supply Chain",
-        },
-        {
-            "atlas_id":    "AML.T0043.004",
-            "title":       "Insert Backdoor Trigger",
-            "severity":    "High",
-            "description": (
-                "If this application's model contains a backdoor, an attacker can "
-                "activate it by sending inputs containing the trigger pattern. "
-                "Triggers are typically imperceptible to humans."
-            ),
-            "indicators":  [
-                "Sudden confidence spikes on specific structured inputs",
-                "Inconsistent model outputs on visually/semantically similar inputs",
-                "Model misclassifies inputs containing specific patterns",
-                "Unusual latency on specific input types",
-            ],
-            "mitigations": [
-                "Implement STRIP for runtime backdoor detection",
-                "Use activation clustering to identify poisoned samples",
-                "Apply fine-pruning to remove potential backdoor neurons",
-                "Test model with known trigger patterns from research literature",
-                "Monitor input distribution for anomalous patterns at inference",
-            ],
-            "atlas_url": "https://atlas.mitre.org/techniques/AML.T0043.004",
-            "nist_ref":  "NIST AI 100-2 E2025 § 3.1.2",
-            "owasp_ref": "OWASP LLM04:2025 — Sleeper Agent Backdoor",
-        },
-    ]
+    if not strategic:
+        lines.append(
+            "No strategic recommendations generated — "
+            "no AI-specific attack surfaces identified during active scanning."
+        )
+        return "\n".join(lines)
 
-    for rec in recs_to_use:
+    for rec in strategic:
         lines += [
             f" {rec.get('atlas_id','?')}: {rec.get('title','?')}",
-            f"*Severity:* {rec.get('severity','High')} | "
-            "*Category:* Strategic Recommendation (Not directly testable)",
+            f"Severity: {rec.get('severity','High')} | "
+            f"Category: Strategic Recommendation (Not directly testable)",
             "",
             rec.get("description", ""),
             "",
         ]
         context = rec.get("context")
         if context:
-            lines.append(f"*Context:* {context}")
+            lines.append(f"Context: {context}")
             lines.append("")
 
-        lines.append("*Detection Indicators (manual investigation):*")
+        lines.append("Detection Indicators (manual investigation):")
         for indicator in rec.get("indicators", [])[:4]:
             lines.append(f"- {indicator}")
         lines.append("")
 
-        lines.append("*Recommended Mitigations:*")
+        lines.append("Recommended Mitigations:")
         for mitigation in rec.get("mitigations", [])[:5]:
             lines.append(f"- {mitigation}")
         lines += [
             "",
-            f"*ATLAS Reference:* [{rec.get('atlas_id','')}]({rec.get('atlas_url','')})",
-            f"*NIST Reference:* {rec.get('nist_ref','')}",
-            f"*OWASP Reference:* {rec.get('owasp_ref','')}",
+            f"ATLAS Reference: {rec.get('atlas_id','')} ({rec.get('atlas_url','')})",
+            f"NIST Reference: {rec.get('nist_ref','')}",
+            f"OWASP Reference: {rec.get('owasp_ref','')}",
             "",
             "---",
             "",
@@ -825,8 +613,8 @@ def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
     lines = [
         "\n---\n",
         "9. AI INFRASTRUCTURE BUILD ATTACK ANALYSIS\n",
-        f"> *Attack planes scanned: {', '.join(ai_infra_data.get('planes_covered', []))}*\n",
-        f"> *AI Stack: {json.dumps(ai_infra_data.get('ai_stack', {}))}*\n\n",
+        f"> Attack planes scanned: {', '.join(ai_infra_data.get('planes_covered', []))}\n",
+        f"> AI Stack: {json.dumps(ai_infra_data.get('ai_stack', {}))}\n\n",
     ]
 
     by_plane: Dict[str, list] = {}
@@ -837,7 +625,7 @@ def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
     for plane, findings in by_plane.items():
         lines.append(f" {plane}\n")
         for f in findings:
-            lines.append(f"*[{f.get('severity','')}] {f.get('name','')}*\n")
+            lines.append(f"[{f.get('severity','')}] {f.get('name','')}\n")
             lines.append(f"- STRIDE Category: {f.get('category','')}\n")
             lines.append(f"- Description: {f.get('description','')}\n")
             lines.append(f"- Evidence: `{f.get('evidence','')}`\n")
@@ -845,7 +633,7 @@ def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
             atlas = f.get("references", {}).get("atlas", "")
             if atlas:
                 lines.append(
-                    f"- ATLAS Technique: [{atlas}](https://atlas.mitre.org/techniques/{atlas})\n"
+                    f"- ATLAS Technique: {atlas} (https://atlas.mitre.org/techniques/{atlas})\n"
                 )
             lines.append("\n")
 
@@ -875,8 +663,7 @@ class ThreatModelingAgent:
             )
             self.llm_model = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
 
-        self.web_search = web_search_function
-
+        self.web_search       = web_search_function
         self.kb_vector_search = VectorSearch(
             mongodb_client=self.mongo_client,
             collection_name="security_knowledge_base",
@@ -884,13 +671,12 @@ class ThreatModelingAgent:
         self.user_vectorstore = vectorstore
         self.db               = self.mongo_client["multiagentllm"]
         self.rag_collection   = self.db["RAG"]
-
-        self.web_scanner = WebScannerAgent(
+        self.web_scanner      = WebScannerAgent(
             openai_client=self.openai_client,
             llm_model=self.llm_model,
         )
 
-        print("✓ ThreatModelingAgent initialized (v8 — AI Infra Attack Analysis)")
+        print("✓ ThreatModelingAgent initialized")
 
     def _generate_cache_key(self, query: str, include_scan: bool = False) -> str:
         base = query.lower().strip()
@@ -952,16 +738,11 @@ Answer:"""
         return any(kw in query.lower() for kw in security_keywords)
 
     def is_web_scan_request(self, query: str) -> bool:
-        query_lower = query.lower()
-        has_url = bool(re.search(
-            r'https?://'
-            r'|www\.'
-            r'|localhost'
-            r'|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+        return bool(re.search(
+            r'https?://|www\.|localhost|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
             r'|\.(com|org|net|io|dev|app|local)\b',
-            query_lower
+            query.lower()
         ))
-        return has_url
 
     async def analyze(self, user_query: str, verbose: bool = True,
                       use_cache: bool = True, filenames: List[str] = None,
@@ -980,7 +761,6 @@ Answer:"""
 
         if not enable_web_scan:
             enable_web_scan = self.is_web_scan_request(user_query)
-
         if enable_web_scan and not target_url:
             target_url = self._extract_url_from_query(user_query)
 
@@ -1187,8 +967,8 @@ Answer:"""
         research_results = {"task_1": [], "task_2": []}
 
         def normalize_sq(sq):
-            if isinstance(sq, dict):  return sq
-            if isinstance(sq, str):   return {"question": sq, "preferred_source": None}
+            if isinstance(sq, dict): return sq
+            if isinstance(sq, str):  return {"question": sq, "preferred_source": None}
             return {"question": str(sq), "preferred_source": None}
 
         for task_key, task_label in [
@@ -1264,9 +1044,9 @@ Answer:"""
     def format_research_hybrid(self, research: Dict) -> str:
         formatted = " TASK 1 - System Understanding\n\n"
         for item in research["task_1"]:
-            formatted += f"*Question:* {item['question']}\n\n"
+            formatted += f"Question: {item['question']}\n\n"
             if item.get("kb_findings"):
-                formatted += "*From Security KB:*\n\n"
+                formatted += "From Security KB:\n\n"
                 for idx, f in enumerate(item["kb_findings"][:3], 1):
                     formatted += (
                         f"{idx}. [{f.get('source','?')}] "
@@ -1274,7 +1054,7 @@ Answer:"""
                         f"   {f.get('content','')[:400]}...\n\n"
                     )
             if item.get("user_findings"):
-                formatted += "*From Your Uploaded Documents:*\n\n"
+                formatted += "From Your Uploaded Documents:\n\n"
                 for idx, f in enumerate(item["user_findings"][:2], 1):
                     formatted += (
                         f"{idx}. {f.get('filename','?')} (Page {f.get('page','?')})\n"
@@ -1284,9 +1064,9 @@ Answer:"""
 
         formatted += " TASK 2 - Security Analysis\n\n"
         for item in research["task_2"]:
-            formatted += f"*Question:* {item['question']}\n\n"
+            formatted += f"Question: {item['question']}\n\n"
             if item.get("kb_findings"):
-                formatted += "*From Security KB:*\n\n"
+                formatted += "From Security KB:\n\n"
                 for idx, f in enumerate(item["kb_findings"][:3], 1):
                     formatted += (
                         f"{idx}. [{f.get('source','?')}] "
@@ -1294,7 +1074,7 @@ Answer:"""
                         f"   {f.get('content','')[:400]}...\n\n"
                     )
             if item.get("user_findings"):
-                formatted += "*From Your Uploaded Documents:*\n\n"
+                formatted += "From Your Uploaded Documents:\n\n"
                 for idx, f in enumerate(item["user_findings"][:2], 1):
                     formatted += (
                         f"{idx}. {f.get('filename','?')} (Page {f.get('page','?')})\n"
@@ -1324,11 +1104,11 @@ Answer:"""
 
         scan_text = ""
         if scan_results:
-            stack = scan_results.get("stack") or {}
+            stack      = scan_results.get("stack") or {}
             scan_text += f"\n\n TECH STACK\n   {stack.get('stack_summary','Unknown')}\n\n"
             for cve in scan_results.get("verified_cves", [])[:5]:
                 scan_text += (
-                    f"*{cve.get('cve_id','?')}* [{cve.get('severity','?')}] "
+                    f"{cve.get('cve_id','?')} [{cve.get('severity','?')}] "
                     f"CVSS: {cve.get('cvss_score','?')}\n"
                     f"   {cve.get('description','')[:300]}\n\n"
                 )
@@ -1340,11 +1120,11 @@ Answer:"""
             if confirmed:
                 scan_text += " CONFIRMED VULNERABILITIES\n\n"
                 for v in confirmed:
-                    scan_text += f"*{v.get('type','?')}* — {v.get('severity','?')}\n   {v.get('details','')[:200]}\n\n"
+                    scan_text += f"{v.get('type','?')} — {v.get('severity','?')}\n   {v.get('details','')[:200]}\n\n"
             if potential:
                 scan_text += " POTENTIAL VULNERABILITIES\n\n"
                 for v in potential:
-                    scan_text += f"*{v.get('type','?')}* — {v.get('severity','?')}\n   {v.get('details','')[:200]}\n\n"
+                    scan_text += f"{v.get('type','?')} — {v.get('severity','?')}\n   {v.get('details','')[:200]}\n\n"
 
             stride_threats = scan_results.get("stride_threats", [])
             if stride_threats:
@@ -1352,7 +1132,7 @@ Answer:"""
                 for t in stride_threats:
                     label = "CONFIRMED" if t.get("confirmed") else "POTENTIAL"
                     scan_text += (
-                        f"*[{label}] {t.get('category','?')}: {t.get('threat','?')}*\n"
+                        f"[{label}] {t.get('category','?')}: {t.get('threat','?')}\n"
                         f"   Evidence: {t.get('evidence','?')}\n\n"
                     )
             else:
@@ -1538,11 +1318,10 @@ Answer:"""
         section_4  = _build_section_4(potential_vulns)                  or ""
         section_5  = _build_section_5(stride_threats)                   or ""
         section_6  = _build_section_6(confirmed_vulns, potential_vulns) or ""
-        section_7  = _build_section_7(confirmed_vulns)                  or ""
 
         final = "\n\n".join([
             s for s in [section_1, section_2, section_3, section_3b,
-                        section_4, section_5, section_6, section_7]
+                        section_4, section_5, section_6]
             if s
         ])
 
@@ -1560,7 +1339,7 @@ Answer:"""
                 final = final + "\n\n" + section_9
 
         report_sections = []
-        _section_defs = [
+        for _sid, _title, _content in [
             ("1",  "Executive Summary",   section_1),
             ("2",  "Tech Stack",          section_2),
             ("3",  "Confirmed Vulns",     section_3),
@@ -1568,11 +1347,9 @@ Answer:"""
             ("4",  "Potential Vulns",     section_4),
             ("5",  "STRIDE Model",        section_5),
             ("6",  "Remediation Roadmap", section_6),
-            ("7",  "Compliance Mapping",  section_7),
             ("8",  "AI/ML Analysis",      section_8),
             ("9",  "AI Infra Attacks",    section_9),
-        ]
-        for _sid, _title, _content in _section_defs:
+        ]:
             if _content and _content.strip():
                 report_sections.append({"id": _sid, "title": _title, "content": _content})
 
@@ -1602,19 +1379,19 @@ Answer:"""
         vulns     = scan_results.get("vulnerabilities", [])
         endpoints = scan_results.get("endpoints_discovered", [])
         return {
-            "stack":                 (scan_results.get("stack") or {}).get("stack_summary", "Unknown"),
-            "endpoints_found":       len(endpoints),
-            "endpoints_interesting": sum(1 for e in endpoints if e.get("interesting")),
-            "verified_cves":         len(scan_results.get("verified_cves") or []),
-            "confirmed_vulns":       sum(1 for v in vulns if v.get("status") == "Confirmed"),
-            "potential_vulns":       sum(1 for v in vulns if v.get("status") == "Potential"),
-            "tasks_generated":       scan_results.get("tasks_generated", 0),
-            "tasks_executed":        scan_results.get("tasks_executed",  0),
-            "forms_discovered":      scan_results.get("forms_discovered", 0),
-            "urls_discovered":       scan_results.get("urls_discovered",  0),
-            "scan_duration":         scan_results.get("scan_duration",    0),
-            "is_ai_powered":         scan_results.get("is_ai_powered", False),
-            "avid_findings":         len(scan_results.get("avid_findings", [])),
+            "stack":                     (scan_results.get("stack") or {}).get("stack_summary", "Unknown"),
+            "endpoints_found":           len(endpoints),
+            "endpoints_interesting":     sum(1 for e in endpoints if e.get("interesting")),
+            "verified_cves":             len(scan_results.get("verified_cves") or []),
+            "confirmed_vulns":           sum(1 for v in vulns if v.get("status") == "Confirmed"),
+            "potential_vulns":           sum(1 for v in vulns if v.get("status") == "Potential"),
+            "tasks_generated":           scan_results.get("tasks_generated", 0),
+            "tasks_executed":            scan_results.get("tasks_executed",  0),
+            "forms_discovered":          scan_results.get("forms_discovered", 0),
+            "urls_discovered":           scan_results.get("urls_discovered",  0),
+            "scan_duration":             scan_results.get("scan_duration",    0),
+            "is_ai_powered":             scan_results.get("is_ai_powered", False),
+            "avid_findings":             len(scan_results.get("avid_findings", [])),
             "strategic_recommendations": len(scan_results.get("strategic_recommendations", [])),
-            "vulnerabilities":       vulns,
+            "vulnerabilities":           vulns,
         }

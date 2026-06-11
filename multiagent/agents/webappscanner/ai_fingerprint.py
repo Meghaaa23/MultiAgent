@@ -44,11 +44,6 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Strong Signal 1: ML API endpoint URL patterns
-# Universal REST conventions used by all ML serving frameworks.
-# ---------------------------------------------------------------------------
-
 ML_ENDPOINT_PATTERNS = [
     r"/predict/?$",
     r"/prediction/?$",
@@ -94,14 +89,13 @@ ML_ENDPOINT_PATTERNS = [
     r"/invocations",
     r"/predictions",
     r"/serving",
-    # Generic API roots that AI apps commonly expose
-    r"/api/tags",                # Ollama model list
-    r"/api/version",             # Ollama/generic version endpoint
-    r"/api/health",              # Health check (AI APIs)
-    r"/api/config",              # Config endpoint (OpenWebUI)
-    r"/v2/health/ready",         # Triton Inference Server
-    r"/v2/models",               # Triton Inference Server
-    r"/openai/",                 # OpenAI-proxy path prefix
+    r"/api/tags",               
+    r"/api/version",            
+    r"/api/health",             
+    r"/api/config",              
+    r"/v2/health/ready",         
+    r"/v2/models",             
+    r"/openai/",                
     r"/ollama/", 
     r"/v1/embeddings",
     r"/v1/responses",
@@ -146,11 +140,6 @@ ML_ENDPOINT_PATTERNS = [
     r"/stream"               
 ]
 
-# ---------------------------------------------------------------------------
-# Strong Signal 2: AI-specific HTTP response headers
-# Added by ML serving infrastructure — framework-agnostic.
-# ---------------------------------------------------------------------------
-
 AI_RESPONSE_HEADERS = [
     "x-model-version",
     "x-model-id",
@@ -168,16 +157,13 @@ AI_RESPONSE_HEADERS = [
     "x-trace-id"
 ]
 
-# AI serving frameworks in X-Powered-By
 AI_SERVING_FRAMEWORKS = [
     "tensorflow", "pytorch", "triton", "torchserve",
     "sagemaker", "onnx", "ollama", "vllm", "tgi",
     "ray serve", "bentoml", "seldon", "mlflow",
 ]
 
-# ---------------------------------------------------------------------------
-# Strong Signal 3: Dangerous model file extensions
-# ---------------------------------------------------------------------------
+
 
 MODEL_FILE_EXTENSIONS = [
     ".pkl", ".pickle",
@@ -192,48 +178,45 @@ MODEL_FILE_EXTENSIONS = [
     
 ]
 
-# ---------------------------------------------------------------------------
-# Strong Signal 4: AI response body JSON field patterns
-# Any ML API returns these regardless of framework.
-# ---------------------------------------------------------------------------
+
 
 AI_RESPONSE_BODY_PATTERNS = [
-    # LLM API response fields (OpenAI-compatible, Ollama, LocalAI)
-    r'"choices"\s*:\s*\[',          # OpenAI completions/chat
-    r'"prompt_tokens"\s*:',           # Token usage
-    r'"completion_tokens"\s*:',       # Token usage
-    r'"finish_reason"\s*:',           # Completion reason
-    r'"usage"\s*:\s*\{',            # Usage object
-    r'"model"\s*:\s*"[^"]*"',        # Model name (any length)
-    r'"models"\s*:\s*\[',           # Models list (Ollama /api/tags, /v1/models)
+    
+    r'"choices"\s*:\s*\[',          
+    r'"prompt_tokens"\s*:',           
+    r'"completion_tokens"\s*:',       
+    r'"finish_reason"\s*:',           
+    r'"usage"\s*:\s*\{',            
+    r'"model"\s*:\s*"[^"]*"',        
+    r'"models"\s*:\s*\[',           
 
-    # ML inference response fields
-    r'"logits"\s*:',                  # Raw model outputs
-    r'"embeddings"\s*:',              # Vector embeddings
-    r'"probabilities"\s*:',           # Classification probs
-    r'"predictions"\s*:',             # Generic predictions array
-    r'"confidence"\s*:',              # Confidence score
+   
+    r'"logits"\s*:',                  
+    r'"embeddings"\s*:',              
+    r'"probabilities"\s*:',           
+    r'"predictions"\s*:',             
+    r'"confidence"\s*:',             
 
     # Ollama-specific
-    r'"done"\s*:\s*(?:true|false)',   # Ollama streaming done field
-    r'"done_reason"\s*:',             # Ollama completion reason
-    r'"total_duration"\s*:',          # Ollama timing info
-    r'"eval_count"\s*:',              # Ollama token count
+    r'"done"\s*:\s*(?:true|false)',   
+    r'"done_reason"\s*:',             
+    r'"total_duration"\s*:',          
+    r'"eval_count"\s*:',              
 
-    # Model list responses (any ML API listing available models)
-    r'"object"\s*:\s*"(?:model|list)"', # OpenAI object type
-    r'"model_name"\s*:',              # TorchServe model info
-    r'"model_version"\s*:',           # Model versioning
+    
+    r'"object"\s*:\s*"(?:model|list)"', 
+    r'"model_name"\s*:',              
+    r'"model_version"\s*:',           
 
     # Generic ML serving
-    r'"version"\s*:\s*"[0-9]',       # Version endpoint (Ollama, etc.)
-    r'"score"\s*:\s*[\d.]+',        # Similarity/relevance score
-    r'"labels"\s*:\s*\[',           # Classification labels,
-    # Conversational AI / chatbot platforms (Flowise, Botpress, etc.)
-    r'"chatId"\s*:',                  # Chat session ID (Flowise)
-    r'"sourceDocuments"\s*:',         # RAG source documents (Flowise/LangChain)
-    r'"agentReasoning"\s*:',          # Agent reasoning trace (Flowise)
-    r'"sessionId"\s*:\s*"[^"]{8,}"', # Session IDs in AI chat APIs
+    r'"version"\s*:\s*"[0-9]',      
+    r'"score"\s*:\s*[\d.]+',        
+    r'"labels"\s*:\s*\[',           
+   
+    r'"chatId"\s*:',                
+    r'"sourceDocuments"\s*:',         
+    r'"agentReasoning"\s*:',          
+    r'"sessionId"\s*:\s*"[^"]{8,}"', 
     r'"tool_calls"\s*:',
     r'"function_call"\s*:',
     r'"assistant"\s*:',
@@ -246,9 +229,6 @@ AI_RESPONSE_BODY_PATTERNS = [
     r'"retrieval"\s*:'
 ]
 
-# ---------------------------------------------------------------------------
-# Weak Signal 5: ML library JS imports in HTML/JS source
-# ---------------------------------------------------------------------------
 
 ML_LIBRARY_JS_SIGNATURES = {
     "TensorFlow.js":    [r"@tensorflow/tfjs", r"tensorflow\.js", r"tf\.tensor"],
@@ -265,10 +245,7 @@ ML_LIBRARY_JS_SIGNATURES = {
     
 }
 
-# ---------------------------------------------------------------------------
-# Weak Signal 6: SSE streaming to inference endpoints
-# EventSource or fetch with streaming to AI paths = live inference signal.
-# ---------------------------------------------------------------------------
+
 
 SSE_STREAMING_PATTERNS = [
     r"EventSource\(['\"][^'\"]*(?:completions|generate|chat|infer)[^'\"]*['\"]",
@@ -277,9 +254,6 @@ SSE_STREAMING_PATTERNS = [
     r"text/event-stream",
 ]
 
-# ---------------------------------------------------------------------------
-# Weak Signal 7: Universal AI interaction DOM patterns (semantic HTML only)
-# ---------------------------------------------------------------------------
 
 AI_DOM_PATTERNS = [
     r'role=["\']assistant["\']',
@@ -288,9 +262,7 @@ AI_DOM_PATTERNS = [
     r'data-message-role=["\']assistant["\']',
 ]
 
-# ---------------------------------------------------------------------------
-# ATLAS technique mapping
-# ---------------------------------------------------------------------------
+
 
 ATLAS_TECHNIQUE_MAP = {
     "ml_endpoint":    "AML.T0043 — Craft Adversarial Data",
@@ -377,7 +349,6 @@ class AIFingerprintAgent:
                     "sse_signals", "dom_signals", "evidence"]:
             result[key] = list(dict.fromkeys(result[key]))
 
-        # ── Confidence scoring ────────────────────────────────────────
         strong = (
             len(result["ml_endpoints"]) +
             len(result["ai_headers"]) +
@@ -404,7 +375,6 @@ class AIFingerprintAgent:
                     f"AI-specific testing skipped."
                 )
 
-        # ATLAS technique mapping
         if result["ml_endpoints"]:
             result["atlas_techniques"].append(ATLAS_TECHNIQUE_MAP["ml_endpoint"])
             llm_paths = ["/chat", "/completions", "/generate"]
@@ -438,15 +408,13 @@ class AIFingerprintAgent:
             path   = urllib.parse.urlparse(url).path.lower()
             status = ep.get("status", 0)
 
-            # Check 1: path pattern matches ML endpoint convention
+           
             for pattern in ML_ENDPOINT_PATTERNS:
                 if re.search(pattern, path, re.IGNORECASE):
                     ml_endpoints.append(url)
                     evidence.append(f"ML endpoint pattern match: {path}")
                     break
 
-            # Check 2: endpoint responded 200 — fetch body to check for AI patterns
-            # This catches /api, /api/v1 etc that responded but aren't in ML patterns
             if status == 200 and url not in ml_endpoints:
                 try:
                     loop = asyncio.get_event_loop()
@@ -461,7 +429,7 @@ class AIFingerprintAgent:
                             evidence.append(
                                 f"ML API confirmed by response body at {path}"
                             )
-                        # Also check for AI-specific headers in this response
+                        
                         resp_lower = {k.lower(): v for k, v in resp_headers.items()}
                         if any(h in resp_lower for h in AI_RESPONSE_HEADERS):
                             if url not in ml_endpoints:
@@ -472,10 +440,6 @@ class AIFingerprintAgent:
                 except Exception:
                     pass
 
-            # Check 3: model file upload endpoints
-            # Require both the path to mention a model file extension AND
-            # the endpoint to be a POST/PUT form (not a GET page).
-            # This avoids flagging generic /upload pages as ML upload endpoints.
             if ep.get("method") in ("POST", "PUT"):
                 for ext in MODEL_FILE_EXTENSIONS:
                     if ext.lstrip(".") in path:
@@ -554,19 +518,19 @@ class AIFingerprintAgent:
         Only endpoints that actually respond are flagged.
         """
         probe_paths = [
-            # OpenAI-compatible (OpenWebUI, LM Studio, LocalAI, Jan, Ollama)
+            
             "/v1/models",
             "/v1/chat/completions",
             "/v1/completions",
             "/v1/embeddings",
             "/v1/images/generations",
-            "/openai/v1/models",          # OpenWebUI proxy path
+            "/openai/v1/models",          
 
             # Ollama-specific
-            "/api/tags",                  # lists local models
+            "/api/tags",                  
             "/api/generate",
             "/api/chat",
-            "/api/version",               # returns {"version": "0.x.x"}
+            "/api/version",              
 
             # OpenWebUI-specific
             "/api/models",
@@ -584,17 +548,17 @@ class AIFingerprintAgent:
             "/api/v1/generate",
             "/api/v1/chat",
             "/api/v1/model",
-            "/api/v1/prediction",         # Flowise
+            "/api/v1/prediction",         
 
             # AnythingLLM / generic
-            "/api/docs",                  # FastAPI autodoc = ML app signal
+            "/api/docs",                  
             "/api/health",
             "/health",
-            "/ping",                      # SageMaker
+            "/ping",                    
 
             # Framework-specific serving
-            "/invocations",               # SageMaker
-            "/predictions",               # TorchServe
+            "/invocations",               
+            "/predictions",              
             "/predict",
             "/inference",
             "/classify",
@@ -609,8 +573,8 @@ class AIFingerprintAgent:
             "/api/upload",
             "/ml/predict",
             # Additional paths missed above
-            "/models",                    # TorchServe, generic
-            "/api/v1/chatflows",          # Flowise
+            "/models",                    
+            "/api/v1/chatflows",          
             "/api/v1/models",
         ]
 
@@ -631,7 +595,7 @@ class AIFingerprintAgent:
                 content_type = resp_headers.get("Content-Type", "").lower()
                 is_json      = "json" in content_type
 
-                # Best confirmation: AI body patterns in JSON response
+                
                 if is_json and body:
                     if any(re.search(p, body, re.IGNORECASE)
                            for p in AI_RESPONSE_BODY_PATTERNS):
@@ -641,7 +605,7 @@ class AIFingerprintAgent:
                         )
                         return
 
-                # Second confirmation: AI headers in this response
+                
                 resp_lower = {k.lower(): v for k, v in resp_headers.items()}
                 if any(h in resp_lower for h in AI_RESPONSE_HEADERS):
                     ml_endpoints.append(url)
@@ -650,9 +614,7 @@ class AIFingerprintAgent:
                     )
                     return
 
-                # Endpoint exists with a non-HTML error status (401/403/405):
-                # This indicates a real API endpoint refusing access/method,
-                # NOT an SPA fallback. SPAs return 200+HTML for all unknown paths.
+          
                 is_html = "html" in content_type
                 if status in (401, 403, 405) and not is_html:
                     for pattern in ML_ENDPOINT_PATTERNS:
@@ -663,8 +625,7 @@ class AIFingerprintAgent:
                             )
                             break
 
-                # Model upload: require 405 (POST-only endpoint) or explicit
-                # multipart/form-data accept header — not just path name match.
+            
                 if status == 405 and (
                     "upload" in path or any(
                         ext.lstrip(".") in path for ext in MODEL_FILE_EXTENSIONS
