@@ -1,23 +1,4 @@
 # agents/browser_controller.py
-"""
-BrowserController
-=================
-YuraScanner-style browser automation controller.
-
-Architecture (unchanged from original design):
-  SENSORS   → capture DOM state and extract interactive elements
-  BRIDGE    → LLM decision-making for next action
-  ACTUATORS → execute actions (click, fill forms, navigate)
-
-browser_controller.py:
-  ✓ generate_tasks() now chunked (50 elements/call, max 6 LLM calls, 15 tasks)
-  ✓ Elements filtered to form/link only before LLM call  (Tier 1)
-  ✓ _format_ui_elements() helper — compact readable string vs raw JSON
-  ✓ Task schema normalisation — accepts both "name" and "task" keys
-  ✓ execute_task() uses task.get("name") or task.get("task") safely
-  ✓ capture_page() returns html + elements dict (compatible with WebScannerAgent)
-  ✓ Falls back to urllib if Playwright is not installed
-"""
 
 import asyncio
 import json
@@ -30,14 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class BrowserController:
-    """
-    YuraScanner-style browser automation controller.
-
-    Components:
-      SENSORS   — capture DOM state and extract interactive elements
-      BRIDGE    — LLM decision-making for next action
-      ACTUATORS — execute actions (click, fill forms, navigate)
-    """
+ 
 
     def __init__(self, openai_client, llm_model: str = "Qwen-2.5"):
         self.openai_client  = openai_client
@@ -74,10 +48,7 @@ class BrowserController:
         return await self._urllib_capture(url)
 
     async def capture_ui_elements(self, url: str) -> List[Dict]:
-        """
-        Capture interactive elements only (clickables + forms).
-        Compatible with original browser_controller.py API.
-        """
+       
         page_data = await self.capture_page(url)
         return page_data.get("elements", [])
 
@@ -241,9 +212,9 @@ class BrowserController:
 
         return elements
 
-    # ==================================================================
-    # TASK GENERATION  (Tier 1 + Tier 2 improvements)
-    # ==================================================================
+    # =================
+    # TASK GENERATION 
+    # =================
 
     def _format_ui_elements(self, elements: List[Dict]) -> str:
         """
@@ -280,39 +251,18 @@ class BrowserController:
                              openai_client,
                              llm_model: str,
                              target_url: str = "") -> List[Dict]:
-        """
-        Generate security testing tasks with chunked element processing.
-
-        Tier 1 improvements applied here:
-          • Filter to form + link only  (removes noise)
-          • Process in chunks of 50     (handles large SPAs)
-          • Cap at 6 LLM calls          (prevents runaway cost on huge sites)
-          • Deduplicate by name         (merges duplicate tasks across chunks)
-          • Hard limit of 15 tasks      (prevents runaway queues)
-
-        Parameters
-        ----------
-        elements        : raw element list from capture_page()
-        page_description: optional text description of the page
-        openai_client   : LLM client
-        llm_model       : model name
-        target_url      : base URL (used as default task URL)
-
-        Returns
-        -------
-        List of task dicts: [{"name": ..., "description": ..., "url": ...}]
-        """
-        # ── Tier 1: filter to security-relevant element types only ────────
+      
+       
         filtered = [
             e for e in elements
             if e.get("type") in ("form", "link")
         ]
 
         if not filtered:
-            # SPA with no discoverable elements — generate generic tasks
+         
             filtered = [{"type": "link", "href": target_url}]
 
-        # ── Tier 1: chunk + cap LLM calls ────────────────────────────────
+        
         chunk_size  = 50
         max_chunks  = 6
         chunks      = [
@@ -366,7 +316,7 @@ Respond with JSON only — no explanation:
                 data        = json.loads(resp.choices[0].message.content)
                 chunk_tasks = data.get("tasks", [])
 
-                # Normalise schema: accept both "name" and "task" keys
+               
                 for t in chunk_tasks:
                     if "task" in t and "name" not in t:
                         t["name"] = t.pop("task")
@@ -378,7 +328,7 @@ Respond with JSON only — no explanation:
             except Exception as e:
                 logger.warning(f"Task generation chunk {idx}/{len(chunks)} failed: {e}")
 
-        # ── Deduplicate by name (case-insensitive) ────────────────────────
+       
         seen:   Set[str]   = set()
         unique: List[Dict] = []
         for task in all_tasks:
@@ -387,7 +337,7 @@ Respond with JSON only — no explanation:
                 seen.add(name)
                 unique.append(task)
 
-        # ── Hard cap ──────────────────────────────────────────────────────
+       
         return unique[:15]
 
     # ==================================================================
@@ -397,13 +347,7 @@ Respond with JSON only — no explanation:
     async def _decide_next_action(self, task: str,
                                   current_state: Dict,
                                   history: List[Dict]) -> Dict:
-        """
-        BRIDGE: LLM decides the next browser action.
-
-        Returns
-        -------
-        {"command": "CLICK"|"FILL_FORM"|"STOP", "target_id": int, "reasoning": str}
-        """
+       
         state_text  = f"URL: {current_state.get('url', '')}\n"
         state_text += f"Title: {current_state.get('title', '')}\n\n"
         state_text += "Available Actions:\n"

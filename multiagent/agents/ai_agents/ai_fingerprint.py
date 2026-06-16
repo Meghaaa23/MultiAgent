@@ -1,39 +1,6 @@
 # agents/webappscanner/ai_fingerprint_agent.py
-"""
-AIFingerprintAgent
-==================
-Detects whether a web application uses AI/ML components using
-universal black-box signals only.
-
-Architecture (per design spec):
-  - Traditional scanning always runs first
-  - This agent runs on every scan to check for AI components
-  - If AI detected → escalate to specialized AI vuln tests
-  - If not detected → skip AI section entirely (no speculation)
-
-Detection philosophy:
-  NO platform-specific names (no gradio, streamlit, chatbot widget names).
-  ONLY universal signals that ANY AI system exposes regardless of framework:
-
-  Strong signals (concrete, network-level — trigger escalation):
-    1. ML API endpoints that actually respond (200/401/403/405)
-    2. AI-specific HTTP response headers (x-model-id, openai-version, etc.)
-    3. Model file upload endpoints accepting .pkl/.pt/.onnx
-    4. AI response body patterns (logits, embeddings, prompt_tokens, choices)
-
-  Weak signals (HTML/JS — need strong corroboration):
-    5. ML library JS imports (TensorFlow.js, ONNX Runtime, OpenAI SDK)
-    6. SSE streaming to inference endpoints (EventSource → /completions)
-    7. Structured assistant/role patterns in DOM
-
-Confidence tiers:
-  high:   strong >= 2, OR (strong >= 1 AND weak >= 2)
-  medium: strong == 1
-  low:    weak signals only → is_ai_powered = False (no escalation)
-"""
 
 import re
-import json
 import asyncio
 import logging
 import urllib.request
@@ -103,40 +70,27 @@ ML_ENDPOINT_PATTERNS = [
     r"/v1/threads",
     r"/v1/vector_stores",
     r"/v1/files",
-
     r"/api/embeds",
     r"/api/vector",
     r"/api/search", 
-
     r"/rag",
     r"/retrieval",
-
     r"/vector",
     r"/vectors",
-
     r"/agent",
     r"/agents",
-
     r"/assistant",
     r"/assistants",
-
     r"/chatbot",
     r"/bot",
-
     r"/conversation",
     r"/conversations",
-
     r"/message",        
     r"/messages",
-
     r"/ask",
-
     r"/completion",
-
     r"/llm",
-
     r"/generateStream",
-
     r"/stream"               
 ]
 
@@ -188,31 +142,24 @@ AI_RESPONSE_BODY_PATTERNS = [
     r'"finish_reason"\s*:',           
     r'"usage"\s*:\s*\{',            
     r'"model"\s*:\s*"[^"]*"',        
-    r'"models"\s*:\s*\[',           
-
-   
+    r'"models"\s*:\s*\[',            
     r'"logits"\s*:',                  
     r'"embeddings"\s*:',              
     r'"probabilities"\s*:',           
     r'"predictions"\s*:',             
     r'"confidence"\s*:',             
-
     # Ollama-specific
     r'"done"\s*:\s*(?:true|false)',   
     r'"done_reason"\s*:',             
     r'"total_duration"\s*:',          
-    r'"eval_count"\s*:',              
-
-    
+    r'"eval_count"\s*:',                 
     r'"object"\s*:\s*"(?:model|list)"', 
     r'"model_name"\s*:',              
     r'"model_version"\s*:',           
-
     # Generic ML serving
     r'"version"\s*:\s*"[0-9]',      
     r'"score"\s*:\s*[\d.]+',        
     r'"labels"\s*:\s*\[',           
-   
     r'"chatId"\s*:',                
     r'"sourceDocuments"\s*:',         
     r'"agentReasoning"\s*:',          
@@ -229,7 +176,6 @@ AI_RESPONSE_BODY_PATTERNS = [
     r'"retrieval"\s*:'
 ]
 
-
 ML_LIBRARY_JS_SIGNATURES = {
     "TensorFlow.js":    [r"@tensorflow/tfjs", r"tensorflow\.js", r"tf\.tensor"],
     "ONNX Runtime Web": [r"onnxruntime-web", r"ort\.InferenceSession"],
@@ -245,8 +191,6 @@ ML_LIBRARY_JS_SIGNATURES = {
     
 }
 
-
-
 SSE_STREAMING_PATTERNS = [
     r"EventSource\(['\"][^'\"]*(?:completions|generate|chat|infer)[^'\"]*['\"]",
     r"fetch\([^)]*(?:completions|generate|chat|infer)[^)]*stream.*true",
@@ -254,15 +198,12 @@ SSE_STREAMING_PATTERNS = [
     r"text/event-stream",
 ]
 
-
 AI_DOM_PATTERNS = [
     r'role=["\']assistant["\']',
     r'data-role=["\'](?:bot|assistant)["\']',
     r'aria-label=["\'][^"\']*(?:ai|assistant)[^"\']*["\']',
     r'data-message-role=["\']assistant["\']',
 ]
-
-
 
 ATLAS_TECHNIQUE_MAP = {
     "ml_endpoint":    "AML.T0043 — Craft Adversarial Data",
@@ -275,10 +216,6 @@ ATLAS_TECHNIQUE_MAP = {
 
 
 class AIFingerprintAgent:
-    """
-    Universal AI/ML component detector.
-    Uses only behavioral signals — no hardcoded platform or product names.
-    """
 
     def __init__(self, timeout: int = 8):
         self.timeout = timeout
@@ -393,7 +330,7 @@ class AIFingerprintAgent:
                 print(f"      Endpoints: {result['ml_endpoints'][:3]}")
                 print(f"      Libraries: {result['ml_libraries'][:3]}")
             else:
-                print(f"   ℹ No AI/ML detected (strong={strong}, weak={weak})")
+                print(f"No AI/ML detected (strong={strong}, weak={weak})")
 
         return result
 
@@ -513,10 +450,7 @@ class AIFingerprintAgent:
 
     async def _probe_ml_endpoints(self, base: str,
                                    verbose: bool) -> Dict:
-        """
-        Actively probe universal ML serving paths.
-        Only endpoints that actually respond are flagged.
-        """
+       
         probe_paths = [
             
             "/v1/models",

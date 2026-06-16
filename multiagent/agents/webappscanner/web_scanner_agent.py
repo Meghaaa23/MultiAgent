@@ -14,10 +14,10 @@ from .endpoint_discovery_agent  import EndpointDiscoveryAgent
 from .browser_controller        import BrowserController
 from .vulnerability_tester      import VulnerabilityTester
 from .attack_verification_agent import AttackVerificationAgent, VulnStatus
-from .ai_fingerprint            import AIFingerprintAgent
-from .avid_lookup_agent         import AVIDLookupAgent
-from .ai_vulnerability_test     import AIVulnerabilityTester
-from .Ai_Infra_agent            import AIInfraAgent
+from ..ai_agents.ai_fingerprint            import AIFingerprintAgent
+from ..ai_agents.avid_lookup_agent         import AVIDLookupAgent
+from ..ai_agents.ai_vulnerability_test     import AIVulnerabilityTester
+from ..ai_agents.Ai_Infra_agent            import AIInfraAgent
 
 logger = logging.getLogger(__name__)
 
@@ -154,10 +154,10 @@ class WebScannerAgent:
 
         self.ai_fingerprinter = AIFingerprintAgent(timeout=8)
         self.avid_lookup      = AVIDLookupAgent(timeout=15)
-        self.ai_vuln_tester   = AIVulnerabilityTester(timeout=10)
-        self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client)
+        self.ai_vuln_tester   = AIVulnerabilityTester(timeout=10, openai_client=self.openai_client)
+        self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client, llm_model=self.llm_model)
 
-        print("✓ WebScannerAgent initialized (v8 — soft-404 probe filter)")
+        print(" WebScannerAgent initialized ")
 
     async def scan_application(self, target_url: str,
                                max_time_minutes: int = 10,
@@ -173,7 +173,7 @@ class WebScannerAgent:
 
         if verbose:
             print(f"\n{'='*70}")
-            print(f"Evidence-Based Web Application Scan + AI Backdoor Detection")
+            print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
             if auth_cookie:
                 print(f"  Auth   : Session cookie provided (authenticated scan)")
             print(f"  Target : {target_url}")
@@ -188,7 +188,7 @@ class WebScannerAgent:
         initial_headers: Dict       = {}
 
         if verbose:
-            print("Phase 0: Technology Fingerprinting...")
+            print(" Technology Fingerprinting...")
         try:
             page            = await self.browser.capture_page(target_url)
             html            = page.get("html", "")
@@ -206,7 +206,7 @@ class WebScannerAgent:
             stack = {"stack_summary": "Unknown", "vuln_hints": []}
 
         if verbose:
-            print(f"  ✓ Stack: {stack.get('stack_summary','Unknown')}\n")
+            print(f"  Stack: {stack.get('stack_summary','Unknown')}\n")
 
         app_identity = None
         if _HAS_APP_IDENTITY:
@@ -254,18 +254,15 @@ class WebScannerAgent:
                         if "Unknown" in stack.get("stack_summary", ""):
                             stack["stack_summary"] = app_identity.name
                     if verbose:
-                        print(f"  ✓ App identity: {app_identity.name!r} v{app_identity.version or '?'} [{app_identity.confidence}]\n")
+                        print(f"   App identity: {app_identity.name!r} v{app_identity.version or '?'} [{app_identity.confidence}]\n")
             except Exception as e:
                 logger.debug(f"App identity failed: {e}")
 
         verified_cves = None
 
-        # ------------------------------------------------------------------
-        # Phase 2a: Endpoint Discovery
-        # (calibration is now done inside endpoint_disco.discover() itself)
-        # ------------------------------------------------------------------
+      
         if verbose:
-            print("Phase 2a: Endpoint Discovery...")
+            print("Endpoint Discovery...")
         discovered_endpoints: List[Dict] = []
         try:
             discovered_endpoints = await self.endpoint_disco.discover(
@@ -273,8 +270,7 @@ class WebScannerAgent:
             )
             for ep in discovered_endpoints:
                 if ep.get("url") and ep.get("interesting") and ep.get("method") == "GET":
-                    # Only add to crawl URLs if the endpoint genuinely resolved
-                    # (not access-controlled, not a soft-404 artefact)
+                   
                     if ep.get("category") != "discovered_protected":
                         all_urls.append(ep["url"])
         except Exception as e:
@@ -284,15 +280,13 @@ class WebScannerAgent:
             interesting = sum(1 for e in discovered_endpoints if e.get("interesting"))
             protected   = sum(1 for e in discovered_endpoints if e.get("access_controlled"))
             soft_mode   = getattr(self.endpoint_disco, "_soft_mode", False)
-            print(f"  ✓ {len(discovered_endpoints)} endpoints "
+            print(f"   {len(discovered_endpoints)} endpoints "
                   f"({interesting} interesting, {protected} access-controlled)"
                   + (" [soft-404 filter active]" if soft_mode else "") + "\n")
 
-        # ------------------------------------------------------------------
-        # Phase 0c: AI/ML Component Detection
-        # ------------------------------------------------------------------
+      
         if verbose:
-            print("Phase 0c: AI/ML Component Detection...")
+            print("AI/ML Component Detection...")
 
         ai_fingerprint  = None
         avid_results    = None
@@ -329,7 +323,7 @@ class WebScannerAgent:
                     ai_fingerprint=ai_fingerprint, ml_stack=ml_stack, verbose=verbose,
                 )
                 if verbose:
-                    print(f"  ✓ AVID: {avid_results.get('total_found',0)} findings "
+                    print(f"   AVID: {avid_results.get('total_found',0)} findings "
                           f"({len(avid_results.get('backdoor_relevant',[]))} backdoor-relevant)\n")
 
                 if verbose:
@@ -341,8 +335,8 @@ class WebScannerAgent:
                     c = len(ai_vuln_results.get("confirmed_ai_vulns", []))
                     p = len(ai_vuln_results.get("potential_ai_vulns", []))
                     s = len(ai_vuln_results.get("strategic_recommendations", []))
-                    print(f"  ✓ AI vulns: {c} confirmed, {p} potential")
-                    print(f"  ✓ Strategic recommendations: {s} ATLAS-based\n")
+                    print(f"   AI vulns: {c} confirmed, {p} potential")
+                    print(f"   Strategic recommendations: {s} ATLAS-based\n")
             else:
                 if verbose:
                     if raw_is_ai and not has_concrete:
@@ -362,15 +356,12 @@ class WebScannerAgent:
                     target_url=target_url, ai_stack=ai_fingerprint,
                 )
                 if verbose:
-                    print(f"  ✓ AI Infra threats: {len(ai_infra_result.threats)} total\n")
+                    print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
         except Exception as e:
             logging.warning(f"AIInfraAgent failed: {e}")
 
-        # ------------------------------------------------------------------
-        # Phase 1b: CVE Lookup
-        # ------------------------------------------------------------------
         if verbose:
-            print("Phase 1b: CVE Lookup (NVD/OSV)...")
+            print(" CVE Lookup (NVD/OSV)...")
         try:
             app_name    = stack.get("app_identity_name", "")
             app_version = stack.get("app_identity_version", "")
@@ -417,13 +408,10 @@ class WebScannerAgent:
 
         if verbose:
             cve_count = len(verified_cves) if verified_cves is not None else "lookup failed"
-            print(f"  ✓ Verified CVEs: {cve_count}\n")
+            print(f"   Verified CVEs: {cve_count}\n")
 
-        # ------------------------------------------------------------------
-        # Phase 2b: Browser Crawl
-        # ------------------------------------------------------------------
         if verbose:
-            print("Phase 2b: Browser Crawl...")
+            print("Browser Crawl...")
 
         filtered = [e for e in elements if e.get("type") in ("form", "link")]
         tasks    = await self.browser.generate_tasks(
@@ -452,13 +440,11 @@ class WebScannerAgent:
             all_params.update(urllib.parse.parse_qs(urllib.parse.urlparse(url).query).keys())
 
         if verbose:
-            print(f"  ✓ {tasks_executed}/{len(tasks)} tasks | {len(all_forms)} forms | {len(all_urls)} URLs\n")
+            print(f"   {tasks_executed}/{len(tasks)} tasks | {len(all_forms)} forms | {len(all_urls)} URLs\n")
 
-        # ------------------------------------------------------------------
-        # Phase 2c: SPA Scanning
-        # ------------------------------------------------------------------
+   
         if verbose:
-            print("Phase 2c: SPA Scanning...")
+            print("SPA Scanning...")
         try:
             spa_forms, spa_urls = await _scan_spa_routes(target_url, verbose=verbose)
             if spa_forms or spa_urls:
@@ -467,17 +453,15 @@ class WebScannerAgent:
                 all_urls  = _dedup_urls(all_urls)[:50]
                 all_forms = _dedup_forms(all_forms)[:20]
                 if verbose:
-                    print(f"  ✓ SPA: {len(spa_forms)} forms, {len(spa_urls)} URLs\n")
+                    print(f"   SPA: {len(spa_forms)} forms, {len(spa_urls)} URLs\n")
             elif verbose:
                 print("  Not an SPA or Playwright unavailable\n")
         except Exception as e:
             logger.warning(f"SPA scanning failed: {e}")
 
-        # ------------------------------------------------------------------
-        # Phase 3: Vulnerability Testing
-        # ------------------------------------------------------------------
+       
         if verbose:
-            print("Phase 3: Vulnerability Testing...")
+            print("Vulnerability Testing...")
         raw_findings: List[Dict] = []
         try:
             raw_findings = await self.vuln_tester.test_all(
@@ -495,13 +479,11 @@ class WebScannerAgent:
         if verbose:
             c = sum(1 for f in raw_findings if f.get("status") == "Confirmed")
             p = sum(1 for f in raw_findings if f.get("status") == "Potential")
-            print(f"  ✓ {c} confirmed, {p} potential\n")
+            print(f"  {c} confirmed, {p} potential\n")
 
-        # ------------------------------------------------------------------
-        # Phase 4: Attack Verification
-        # ------------------------------------------------------------------
+     
         if verbose:
-            print("Phase 4: Attack Verification...")
+            print(" Attack Verification...")
         verified_findings: List[Dict] = []
         cors_misconfigured = False
         try:
@@ -568,11 +550,8 @@ class WebScannerAgent:
                     seen.add(key)
                     all_findings.append(f)
 
-        # ------------------------------------------------------------------
-        # Phase 4c: Action Agent
-        # ------------------------------------------------------------------
         if verbose:
-            print("Phase 4c: Action Agent (PoC + fix generation)...")
+            print(" Action Agent (PoC + fix generation)...")
         action_results: List[Dict] = []
         try:
             from .action_agent import ActionAgent
@@ -600,15 +579,10 @@ class WebScannerAgent:
                 print(f"  Infra threats: {len(ai_infra_result.threats) if ai_infra_result else 0}")
             print(f"{'='*70}\n")
 
-        # ------------------------------------------------------------------
-        # Build endpoint surface for the report
-        # "access_controlled" endpoints appear as recon (discovered but blocked)
-        # rather than confirmed findings; all others filtered by interesting flag
-        # ------------------------------------------------------------------
         report_endpoints = []
         for ep in discovered_endpoints:
             if ep.get("access_controlled"):
-                # Rename so the report renders "Discovered (access-controlled)"
+          
                 report_ep = dict(ep)
                 report_ep["category"]   = "discovered_protected"
                 report_ep["note"]       = (
@@ -667,9 +641,7 @@ class WebScannerAgent:
             return {}
 
 
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
+
 
 async def _scan_spa_routes(base_url: str, verbose: bool = False):
     if _spa_scanner_instance is None:

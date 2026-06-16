@@ -14,7 +14,7 @@ import pytest
 import pytest_asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
 
-from multiagent.agents.webappscanner.Ai_Infra_agent import (
+from multiagent.agents.ai_agents.Ai_Infra_agent import (
     AIInfraAgent,
     AIInfraScanResult,
     AIInfraThreat,

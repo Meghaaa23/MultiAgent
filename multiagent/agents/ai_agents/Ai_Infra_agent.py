@@ -1,18 +1,4 @@
-"""
-agents/webappscanner/ai_infra_agent.py
-
-AI Infrastructure Attack Agent
-────────────────────────────────
-Threat-models the AI infrastructure layer of an application.
-Detection is purely signal-based: endpoint paths, not framework names.
-
-Attack planes covered:
-  PLANE 1  BUILD          : weight download, dependency install, training pipeline
-  PLANE 2  DEPLOYMENT     : actor restart window, route table, config injection
-  PLANE 3  RUNTIME        : inference exposure, prompt injection, model extraction, DoS
-  PLANE 4  ORCHESTRATION  : write endpoints, info disclosure, Kubernetes control plane
-"""
-
+import os
 import asyncio
 import logging
 import httpx
@@ -146,34 +132,45 @@ MANAGEMENT_PATHS = [
 ]
 
 WRITE_ENDPOINTS = {
-    "/api/pull":                 ("model pull",       "CRITICAL", "AML.T0010"),
-    "/api/delete":               ("model delete",     "CRITICAL", "AML.T0029"),
-    "/api/copy":                 ("model copy",       "HIGH",     "AML.T0010"),
-    "/management/api/v1/models": ("model register",  "CRITICAL", "AML.T0010"),
-    "/api/serve/deployments":    ("deployment config","CRITICAL", "AML.T0010"),
-    "/api/jobs/":                ("code execution",   "CRITICAL", "AML.T0010"),
-    "/v2/repository/models":     ("model register",  "CRITICAL", "AML.T0010"),
+    "/api/pull":                 ("model pull",        "CRITICAL", "AML.T0010"),
+    "/api/delete":               ("model delete",      "CRITICAL", "AML.T0029"),
+    "/api/copy":                 ("model copy",        "HIGH",     "AML.T0010"),
+    "/management/api/v1/models": ("model register",   "CRITICAL", "AML.T0010"),
+    "/api/serve/deployments":    ("deployment config", "CRITICAL", "AML.T0010"),
+    "/api/jobs/":                ("code execution",    "CRITICAL", "AML.T0010"),
+    "/v2/repository/models":     ("model register",   "CRITICAL", "AML.T0010"),
 }
 
 INFO_ENDPOINTS = {
-    "/api/show":     ("model metadata",    "MEDIUM", "AML.T0044"),
-    "/api/tags":     ("model list",        "MEDIUM", "AML.T0044"),
-    "/v1/models":    ("model list",        "MEDIUM", "AML.T0044"),
-    "/v2/models":    ("model list",        "MEDIUM", "AML.T0044"),
-    "/info":         ("service metadata",  "MEDIUM", "AML.T0044"),
-    "/openapi.json": ("API schema",        "LOW",    "AML.T0044"),
+    "/api/show":     ("model metadata",   "MEDIUM", "AML.T0044"),
+    "/api/tags":     ("model list",       "MEDIUM", "AML.T0044"),
+    "/v1/models":    ("model list",       "MEDIUM", "AML.T0044"),
+    "/v2/models":    ("model list",       "MEDIUM", "AML.T0044"),
+    "/info":         ("service metadata", "MEDIUM", "AML.T0044"),
+    "/openapi.json": ("API schema",       "LOW",    "AML.T0044"),
 }
+
+# Paths that exist on many non-AI sites — require AI body signals to count as exposed
+GENERIC_PATHS = {
+    "/docs", "/health", "/healthz", "/readyz",
+    "/metrics", "/openapi.json", "/info", "/ping",
+}
+
+# Body keywords that confirm a path is serving AI/ML content
+AI_BODY_SIGNALS = [
+    "model", "ollama", "vllm", "embedding", "inference",
+    "completion", "generate", "torch", "tensorflow", "llm",
+    "cuda", "gpu", "triton", "ray", "bentoml", "langchain",
+    "huggingface", "transformers", "tokenizer", "checkpoint",
+]
 
 
 class AIInfraAgent:
-    """
-    Threat-models the AI infrastructure layer of an application.
-    All detection is signal-based (endpoint paths and HTTP responses).
-    """
 
-    def __init__(self, openai_client, timeout: int = 15):
-        self.client  = openai_client
-        self.timeout = timeout
+    def __init__(self, openai_client, timeout: int = 15, llm_model: str = None):
+        self.client    = openai_client
+        self.timeout   = timeout
+        self.llm_model = llm_model or os.getenv("AZURE_OPENAI_DEPLOYMENT", "MultiAgentLLM")
 
     async def scan(self, target_url: str, ai_stack: Optional[dict] = None) -> AIInfraScanResult:
         target_url = target_url.rstrip("/")
@@ -203,7 +200,7 @@ class AIInfraAgent:
         return result
 
     async def _probe_ai_endpoints(self, base_url: str, ai_stack: Optional[dict]) -> dict:
-        confirmed = ai_stack.get("ml_endpoints", []) if ai_stack else []
+        confirmed       = ai_stack.get("ml_endpoints", []) if ai_stack else []
         confirmed_paths = [urlparse(e).path for e in confirmed]
 
         paths_to_probe = []
@@ -230,9 +227,9 @@ class AIInfraAgent:
         paths_to_probe += UNIVERSAL_PATHS
         paths_to_probe += MANAGEMENT_PATHS
         paths_to_probe += KUBERNETES_PATHS
-        paths_to_probe = list(dict.fromkeys(paths_to_probe))
+        paths_to_probe  = list(dict.fromkeys(paths_to_probe))
 
-        exposed = {}
+        raw_exposed = {}
         async with httpx.AsyncClient(
             timeout=self.timeout,
             verify=False,
@@ -245,9 +242,30 @@ class AIInfraAgent:
             if isinstance(res, Exception):
                 continue
             status, snippet = res
-            if status not in (404, 502, 503, 0):
-                exposed[path] = {"status": status, "body": snippet}
-                logger.info(f"[AIInfraAgent] EXPOSED → {path} [{status}]")
+
+            # ── Hard skip: definitely not exposed ────────────────────────────
+            if status in (404, 501, 502, 503, 0):
+                continue
+
+            # ── 403 on non-AI-confirmed app = WAF block, not real exposure ───
+            if status == 403 and not confirmed_paths:
+                continue
+
+            raw_exposed[path] = {"status": status, "body": snippet}
+
+        # ── Filter generic paths: only count them if body has AI signals ─────
+        exposed = {}
+        for path, data in raw_exposed.items():
+            if path in GENERIC_PATHS:
+                body_lower = data.get("body", "").lower()
+                if not any(signal in body_lower for signal in AI_BODY_SIGNALS):
+                    logger.debug(
+                        f"[AIInfraAgent] Skipping generic path {path} "
+                        f"[{data['status']}] — no AI body signals"
+                    )
+                    continue
+            exposed[path] = data
+            logger.info(f"[AIInfraAgent] EXPOSED → {path} [{data['status']}]")
 
         return exposed
 
@@ -268,10 +286,10 @@ class AIInfraAgent:
     async def _analyze_build_plane(
         self, url: str, ai_stack: Optional[dict], exposed: dict
     ) -> list[AIInfraThreat]:
-        threats = []
-        confirmed = ai_stack.get("ml_endpoints", []) if ai_stack else []
+        threats         = []
+        confirmed       = ai_stack.get("ml_endpoints", []) if ai_stack else []
         confirmed_paths = [urlparse(e).path for e in confirmed]
-        pull_exposed = "/api/pull" in exposed
+        pull_exposed    = "/api/pull" in exposed
 
         if confirmed_paths or exposed:
             threats.append(AIInfraThreat(
@@ -299,24 +317,24 @@ class AIInfraAgent:
                 )
             ))
 
-        threats.append(AIInfraThreat(
-            attack_name="ML Dependency Confusion Attack",
-            attack_plane="BUILD",
-            stride_category="Tampering",
-            severity="HIGH",
-            description=(
-                "ML frameworks installed via pip without exact version pinning or hash "
-                "verification. An attacker can publish a malicious package with a higher "
-                "version number to PyPI, causing automatic installation of the compromised "
-                "package on next rebuild."
-            ),
-            evidence="AI serving stack detected; dependency integrity cannot be verified remotely",
-            atlas_technique="AML.T0010",
-            mitigation=(
-                "Pin all ML dependencies with exact versions and hashes in requirements.txt. "
-                "Use pip --require-hashes. Consider private PyPI mirror."
-            )
-        ))
+            threats.append(AIInfraThreat(
+                attack_name="ML Dependency Confusion Attack",
+                attack_plane="BUILD",
+                stride_category="Tampering",
+                severity="HIGH",
+                description=(
+                    "ML frameworks installed via pip without exact version pinning or hash "
+                    "verification. An attacker can publish a malicious package with a higher "
+                    "version number to PyPI, causing automatic installation of the compromised "
+                    "package on next rebuild."
+                ),
+                evidence="AI serving stack detected; dependency integrity cannot be verified remotely",
+                atlas_technique="AML.T0010",
+                mitigation=(
+                    "Pin all ML dependencies with exact versions and hashes in requirements.txt. "
+                    "Use pip --require-hashes. Consider private PyPI mirror."
+                )
+            ))
 
         training_paths = ["/train", "/fine-tune", "/finetune", "/training", "/api/train"]
         if (
@@ -354,7 +372,7 @@ class AIInfraAgent:
     ) -> list[AIInfraThreat]:
         threats = []
 
-        serve_signals = ["/-/routes", "/api/serve/deployments", "/-/healthz", "/api/jobs/"]
+        serve_signals  = ["/-/routes", "/api/serve/deployments", "/-/healthz", "/api/jobs/"]
         detected_serve = [p for p in serve_signals if p in exposed]
 
         if detected_serve:
@@ -403,7 +421,7 @@ class AIInfraAgent:
     ) -> list[AIInfraThreat]:
         threats = []
 
-        inference_paths = [
+        inference_paths   = [
             "/v1/chat/completions", "/v1/completions",
             "/api/generate", "/api/chat", "/generate",
         ]
@@ -473,6 +491,28 @@ class AIInfraAgent:
                 )
             ))
 
+            threats.append(AIInfraThreat(
+                attack_name="Long-Context Prompt DoS (KV-Cache Exhaustion)",
+                attack_plane="RUNTIME",
+                stride_category="Denial of Service",
+                severity="HIGH",
+                description=(
+                    "LLMs are vulnerable to memory exhaustion via long-context prompts. The "
+                    "KV-cache grows linearly with context length. An attacker sending repeated "
+                    "max-context requests saturates available memory, triggering OOM and actor "
+                    "restarts (measured at 632s recovery time per Wu et al. SEC'25). During "
+                    "this window service is completely unavailable."
+                ),
+                evidence="Unauthenticated inference endpoint exposed — no token/context limits detected",
+                atlas_technique="AML.T0029",
+                mitigation=(
+                    "Set max_tokens hard cap at inference endpoint level. "
+                    "Implement request queue depth limit. "
+                    "Set memory_request and memory_limit per serving pod. "
+                    "Deploy horizontal autoscaler with memory-based scaling."
+                )
+            ))
+
         if "/metrics" in exposed:
             d = exposed["/metrics"]
             threats.append(AIInfraThreat(
@@ -493,28 +533,6 @@ class AIInfraAgent:
                 )
             ))
 
-        threats.append(AIInfraThreat(
-            attack_name="Long-Context Prompt DoS (KV-Cache Exhaustion)",
-            attack_plane="RUNTIME",
-            stride_category="Denial of Service",
-            severity="HIGH",
-            description=(
-                "LLMs are vulnerable to memory exhaustion via long-context prompts. The "
-                "KV-cache grows linearly with context length. An attacker sending repeated "
-                "max-context requests saturates available memory, triggering OOM and actor "
-                "restarts (measured at 632s recovery time per Wu et al. SEC'25). During "
-                "this window service is completely unavailable."
-            ),
-            evidence="Large model serving detected on potentially resource-constrained infrastructure",
-            atlas_technique="AML.T0029",
-            mitigation=(
-                "Set max_tokens hard cap at inference endpoint level. "
-                "Implement request queue depth limit. "
-                "Set memory_request and memory_limit per serving pod. "
-                "Deploy horizontal autoscaler with memory-based scaling."
-            )
-        ))
-
         return threats
 
     async def _analyze_orchestration_plane(
@@ -525,7 +543,7 @@ class AIInfraAgent:
         for path, (action, severity, atlas) in WRITE_ENDPOINTS.items():
             if path not in exposed:
                 continue
-            d = exposed[path]
+            d           = exposed[path]
             status_note = "(accessible, requires body) " if d["status"] == 400 else ""
             threats.append(AIInfraThreat(
                 attack_name=f"Unauthenticated {action.title()} Endpoint",
@@ -547,7 +565,7 @@ class AIInfraAgent:
                 continue
             if path in WRITE_ENDPOINTS:
                 continue
-            d = exposed[path]
+            d           = exposed[path]
             status_note = "(accessible, requires body) " if d["status"] == 400 else ""
             threats.append(AIInfraThreat(
                 attack_name=f"Unauthenticated {info_type.title()} Disclosure",
@@ -618,7 +636,7 @@ Be direct and technical. Reference STRIDE categories and MITRE ATLAS where relev
         try:
             response = await asyncio.to_thread(
                 self.client.chat.completions.create,
-                model="gpt-4o",
+                model=self.llm_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=800
@@ -628,7 +646,7 @@ Be direct and technical. Reference STRIDE categories and MITRE ATLAS where relev
             logger.warning(f"[AIInfraAgent] LLM synthesis failed: {e}")
             critical = [t for t in threats if t.severity == "CRITICAL"]
             high     = [t for t in threats if t.severity == "HIGH"]
-            top = critical[:3] if critical else high[:3]
+            top      = critical[:3] if critical else high[:3]
             return (
                 f"AI Infrastructure Threat Summary for {url}\n"
                 f"Total threats: {len(threats)} "
@@ -651,7 +669,7 @@ Be direct and technical. Reference STRIDE categories and MITRE ATLAS where relev
                 "references": {
                     "atlas": t.atlas_technique,
                     "cve":   t.cve_reference,
-                    "paper": "Wu et al. SEC'25 — Edge GenAI on Distributed AI Infrastructure"
+                    "paper": "Edge GenAI on Distributed AI Infrastructure"
                 }
             })
         return {
