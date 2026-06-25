@@ -145,6 +145,27 @@ SECURITY_HEADERS = [
     "Permissions-Policy",
 ]
 
+# Server/X-Powered-By values that disclose no version or meaningful software
+# detail — kept consistent with vulnerability_tester._server_header_is_leaky
+# and action_agent._server_is_leaky so all three agree on what counts as a
+# real information-disclosure finding.
+_SAFE_SERVER_PATTERNS = re.compile(
+    r"^(cloudflare|cloudfront|awselb|fastly|google frontend|"
+    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik)$",
+    re.I,
+)
+
+
+def _server_header_is_leaky(value: str) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return False
+    if re.search(r"\d+\.\d+", v):
+        return True
+    if _SAFE_SERVER_PATTERNS.fullmatch(v):
+        return False
+    return True
+
 
 class AttackVerificationAgent:
 
@@ -158,7 +179,16 @@ class AttackVerificationAgent:
                          candidate_forms: List[Dict],
                          stack: Dict,
                          vuln_hints: List[str] = None,
+                         shared_headers: Optional[Dict] = None,
                          verbose: bool = False) -> List[Finding]:
+        """
+        shared_headers: pre-fetched response headers for target_url, supplied
+            by the caller (WebScannerAgent) so the header/clickjacking checks
+            below use the SAME captured response as the fingerprinter and
+            Action Agent, instead of making yet another independent request
+            that could disagree (e.g. a CDN edge returning a different
+            Server header on a second hit).
+        """
         if verbose:
             print(f"\n Attack Verification Agent")
             print(f"   Target: {target_url}")
@@ -167,11 +197,11 @@ class AttackVerificationAgent:
         findings: List[Finding] = []
 
         results = await asyncio.gather(
-            self._check_security_headers(target_url, verbose),
+            self._check_security_headers(target_url, verbose, shared_headers=shared_headers),
             self._check_urls_for_params(target_url, candidate_urls, verbose),
             self._check_forms(candidate_forms, verbose),
             self._check_cors(target_url, verbose),
-            self._check_clickjacking(target_url, verbose),
+            self._check_clickjacking(target_url, verbose, shared_headers=shared_headers),
             return_exceptions=True
         )
 
@@ -220,10 +250,18 @@ class AttackVerificationAgent:
         return findings
 
     async def _check_security_headers(self, url: str,
-                                      verbose: bool = False) -> List[Finding]:
+                                      verbose: bool = False,
+                                      shared_headers: Optional[Dict] = None) -> List[Finding]:
         findings = []
         try:
-            headers = await self._get_headers(url)
+            if shared_headers:
+                headers = shared_headers
+                if verbose:
+                    print(f"      [AttackVerification] using shared headers ({len(headers)} keys)")
+            else:
+                headers = await self._get_headers(url)
+                if verbose and headers:
+                    print(f"      [AttackVerification] fetched {len(headers)} headers independently")
             if not headers:
                 return findings
 
@@ -253,6 +291,10 @@ class AttackVerificationAgent:
 
             for key, val in headers.items():
                 if key.lower() in ("server", "x-powered-by", "x-aspnet-version"):
+                    if not _server_header_is_leaky(val):
+                        if verbose:
+                            print(f"      [AttackVerification] {key}: {val!r} — not leaky, skipping")
+                        continue
                     has_version = bool(re.search(r'\d+\.\d+', val))
                     findings.append(Finding(
                         vuln_type   = f"Information Disclosure: {key} header",
@@ -687,14 +729,26 @@ class AttackVerificationAgent:
         return findings
 
     async def _check_clickjacking(self, url: str,
-                                  verbose: bool = False) -> Optional[Finding]:
+                                  verbose: bool = False,
+                                  shared_headers: Optional[Dict] = None) -> Optional[Finding]:
         try:
-            headers = await self._get_headers(url)
+            if shared_headers:
+                headers = shared_headers
+                if verbose:
+                    print(f"      [AttackVerification] clickjacking check using shared headers")
+            else:
+                headers = await self._get_headers(url)
+                if verbose and headers:
+                    print(f"      [AttackVerification] clickjacking check fetched headers independently")
             if not headers:
                 return None
 
-            xfo = headers.get("X-Frame-Options", "")
-            csp = headers.get("Content-Security-Policy", "")
+            # Headers may arrive with mixed casing depending on the source
+            # (urllib.request preserves original casing; shared_headers from
+            # WebScannerAgent is lowercased). Normalise locally so both work.
+            headers_lower = {k.lower(): v for k, v in headers.items()}
+            xfo = headers_lower.get("x-frame-options", "")
+            csp = headers_lower.get("content-security-policy", "")
 
             if not xfo and "frame-ancestors" not in csp.lower():
                 return Finding(
