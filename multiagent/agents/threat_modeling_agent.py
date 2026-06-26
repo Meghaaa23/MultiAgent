@@ -140,7 +140,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
 
     authenticated = (scan_results or {}).get("authenticated_scan", False)
     actions = [
-        v.get("remediation", "")[:100]
+        v.get("remediation", "")[:160]
         for v in (confirmed_vulns + potential_vulns)[:3]
         if v.get("remediation")
     ] or ["No immediate action required — continue monitoring."]
@@ -307,7 +307,7 @@ def _build_section_3(confirmed_vulns):
 def render_section_3b(action_results: list) -> str:
     if not action_results:
         return ""
-    lines = ["\n 3b. ACTION AGENT — ATTACK PoCs & FIX SNIPPETS"]
+    lines = ["\n Verification Evidence & FIX SNIPPETS"]
     for a in action_results:
         e        = a.get("effort_minutes", 0)
         effort   = f"{e} min" if e < 60 else f"{e//60}h {e%60}min"
@@ -317,7 +317,7 @@ def render_section_3b(action_results: list) -> str:
         lines += [
             f" [{a['severity']}] {a['finding_type']}",
             f"Location: `{a['location']}` | Estimated fix effort: {effort}\n",
-            f"Attack PoC ({a.get('poc_type', '')}):",
+            f"Observed Evidence:",
             f"```{poc_lang}",
             a["attack_poc"],
             "```\n",

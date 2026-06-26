@@ -63,13 +63,17 @@ def _validate_stack(stack, response_headers, body):
 
 def _build_evidence_gated_stride(target_url, response_headers,
                                   discovered_params, discovered_forms,
-                                  cors_misconfigured, stack) -> List[Dict]:
+                                  cors_misconfigured, stack,
+                                  headers_capture_failed: bool = False) -> List[Dict]:
     threats = []
     hdrs    = {k.lower(): v for k, v in response_headers.items()}
     xfo     = hdrs.get("x-frame-options", "")
     csp     = hdrs.get("content-security-policy", "")
 
-    if not xfo and "frame-ancestors" not in csp.lower():
+    # If the header fetch itself failed, we have no basis to claim clickjacking
+    # is present OR absent — surfacing it here would be exactly the kind of
+    # unevidenced claim this pipeline is supposed to eliminate.
+    if not headers_capture_failed and not xfo and "frame-ancestors" not in csp.lower():
         threats.append({
             "category":   "Spoofing",
             "threat":     "Clickjacking",
@@ -186,6 +190,7 @@ class WebScannerAgent:
         stack:           Dict       = {}
         elements:        List[Dict] = []
         initial_headers: Dict       = {}
+        headers_capture_failed: bool = False
 
         if verbose:
             print(" Technology Fingerprinting...")
@@ -193,9 +198,10 @@ class WebScannerAgent:
             page            = await self.browser.capture_page(target_url)
             html            = page.get("html", "")
             elements        = page.get("elements", [])
-            initial_headers = await self._get_real_headers(target_url)
+            initial_headers, headers_capture_failed = await self._get_real_headers(target_url, verbose=verbose)
             stack           = await self.fingerprinter.fingerprint(
-                target_url=target_url, page_html=html, verbose=verbose
+                target_url=target_url, page_html=html,
+                response_headers=initial_headers, verbose=verbose
             )
             stack = _validate_stack(stack, initial_headers, html) or {
                 "stack_summary": "Unknown", "technologies": [],
@@ -207,6 +213,9 @@ class WebScannerAgent:
 
         if verbose:
             print(f"  Stack: {stack.get('stack_summary','Unknown')}\n")
+            if headers_capture_failed:
+                print("  ⚠ Could not capture live response headers for the target — "
+                      "header-dependent findings will be marked as evidence-incomplete.\n")
 
         app_identity = None
         if _HAS_APP_IDENTITY:
@@ -471,6 +480,7 @@ class WebScannerAgent:
                     ep.get("url", "") for ep in discovered_endpoints
                     if ep.get("interesting")
                 ],
+                shared_headers=initial_headers,
                 verbose=verbose,
             )
         except Exception as e:
@@ -490,7 +500,8 @@ class WebScannerAgent:
             av_findings = await self.verifier.verify_all(
                 target_url=target_url, candidate_urls=all_urls,
                 candidate_forms=all_forms, stack=stack,
-                vuln_hints=stack.get("vuln_hints", []), verbose=verbose,
+                vuln_hints=stack.get("vuln_hints", []),
+                shared_headers=initial_headers, verbose=verbose,
             )
             for f in av_findings:
                 d = f.to_dict() if hasattr(f, "to_dict") else f
@@ -516,6 +527,7 @@ class WebScannerAgent:
             stride_threats = _build_evidence_gated_stride(
                 target_url, initial_headers, all_params,
                 all_forms, cors_misconfigured, stack,
+                headers_capture_failed=headers_capture_failed,
             )
 
         seen:         set        = set()
@@ -622,23 +634,47 @@ class WebScannerAgent:
                 if ai_infra_result else None
             ),
             "action_results": action_results,
+            "headers_capture_failed": headers_capture_failed,
         }
 
-    async def _get_real_headers(self, url: str) -> Dict:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self._sync_headers(url))
+    async def _get_real_headers(self, url: str, verbose: bool = False) -> tuple:
+        """
+        Fetch the target's response headers once, to be shared as ground
+        truth across the AI fingerprinter, STRIDE builder, and Action Agent.
 
-    def _sync_headers(self, url: str) -> Dict:
+        Returns (headers_dict, capture_failed_bool). A failure is logged
+        (not swallowed) so a downstream "no evidence captured" placeholder
+        can be traced back to its actual cause instead of looking like a
+        mystery three call-layers later.
+        """
+        loop = asyncio.get_event_loop()
+        headers, error = await loop.run_in_executor(None, lambda: self._sync_headers(url))
+        if not headers:
+            logger.warning(
+                "Header capture failed for %s — downstream header-based "
+                "findings will be marked evidence-incomplete. Cause: %s",
+                url, error or "empty response",
+            )
+            if verbose:
+                print(f"   ⚠ Header capture failed for {url}: {error or 'empty response'}")
+            return {}, True
+        return headers, False
+
+    def _sync_headers(self, url: str) -> tuple:
         try:
             req = urllib.request.Request(
                 url, headers={"User-Agent": "Mozilla/5.0 (SecurityScanner)"}
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                return {k.lower(): v for k, v in resp.headers.items()}
-        except urllib.request.HTTPError as e:
-            return {k.lower(): v for k, v in e.headers.items()} if e.headers else {}
-        except Exception:
-            return {}
+                return {k.lower(): v for k, v in resp.headers.items()}, None
+        except urllib.error.HTTPError as e:
+            # An HTTP error still carries real headers (e.g. a 403 from a WAF) —
+            # this is captured evidence, not a failure.
+            if e.headers:
+                return {k.lower(): v for k, v in e.headers.items()}, None
+            return {}, f"HTTPError {e.code} with no headers"
+        except Exception as e:
+            return {}, f"{type(e).__name__}: {e}"
 
 
 
