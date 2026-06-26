@@ -36,6 +36,9 @@ class AIInfraScanResult:
     orch_threats:    list[AIInfraThreat] = field(default_factory=list)
     summary:         str = ""
     error:           str = ""
+    catch_all_detected: bool = False
+
+    auth_protected_endpoints: list[str] = field(default_factory=list)
 
 
 RAY_SERVE_PATHS = [
@@ -142,27 +145,27 @@ WRITE_ENDPOINTS = {
 }
 
 INFO_ENDPOINTS = {
-    "/api/show":     ("model metadata",   "MEDIUM", "AML.T0044"),
-    "/api/tags":     ("model list",       "MEDIUM", "AML.T0044"),
-    "/v1/models":    ("model list",       "MEDIUM", "AML.T0044"),
-    "/v2/models":    ("model list",       "MEDIUM", "AML.T0044"),
-    "/info":         ("service metadata", "MEDIUM", "AML.T0044"),
-    "/openapi.json": ("API schema",       "LOW",    "AML.T0044"),
+    "/api/show":     ("model metadata",       "MEDIUM", "AML.T0044"),
+    "/api/tags":     ("Ollama model list",     "MEDIUM", "AML.T0044"),
+    "/v1/models":    ("OpenAI-style model list","MEDIUM", "AML.T0044"),
+    "/v2/models":    ("Triton model list",     "MEDIUM", "AML.T0044"),
+    "/info":         ("service metadata",      "MEDIUM", "AML.T0044"),
+    "/openapi.json": ("API schema",            "LOW",    "AML.T0044"),
 }
 
-# Paths that exist on many non-AI sites — require AI body signals to count as exposed
 GENERIC_PATHS = {
     "/docs", "/health", "/healthz", "/readyz",
     "/metrics", "/openapi.json", "/info", "/ping",
 }
 
-# Body keywords that confirm a path is serving AI/ML content
 AI_BODY_SIGNALS = [
     "model", "ollama", "vllm", "embedding", "inference",
     "completion", "generate", "torch", "tensorflow", "llm",
     "cuda", "gpu", "triton", "ray", "bentoml", "langchain",
     "huggingface", "transformers", "tokenizer", "checkpoint",
 ]
+
+CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
 
 
 class AIInfraAgent:
@@ -181,7 +184,16 @@ class AIInfraAgent:
         )
         logger.info(f"[AIInfraAgent] Starting AI infra threat scan → {target_url}")
         try:
-            exposed = await self._probe_ai_endpoints(target_url, ai_stack)
+          
+            for ev in (ai_stack or {}).get("evidence", []):
+                if "HTTP 401" in ev or "HTTP 403" in ev:
+                    for ep in (ai_stack or {}).get("ml_endpoints", []):
+                        if urlparse(ep).path in ev and ep not in result.auth_protected_endpoints:
+                            result.auth_protected_endpoints.append(ep)
+
+            exposed, catch_all = await self._probe_ai_endpoints(target_url, ai_stack)
+            result.catch_all_detected = catch_all
+
             result.build_threats   = await self._analyze_build_plane(target_url, ai_stack, exposed)
             result.deploy_threats  = await self._analyze_deployment_plane(target_url, exposed)
             result.runtime_threats = await self._analyze_runtime_plane(target_url, exposed)
@@ -193,34 +205,64 @@ class AIInfraAgent:
                 result.orch_threats
             )
             result.threats = all_threats
-            result.summary = await self._synthesize_report(target_url, ai_stack, all_threats)
+            result.summary = await self._synthesize_report(
+                target_url, ai_stack, all_threats, catch_all,
+                result.auth_protected_endpoints
+            )
         except Exception as e:
             logger.error(f"[AIInfraAgent] Scan error: {e}", exc_info=True)
             result.error = str(e)
         return result
 
-    async def _probe_ai_endpoints(self, base_url: str, ai_stack: Optional[dict]) -> dict:
+    async def _detect_catch_all(self, base_url: str) -> bool:
+        """
+        Probe a deliberately nonsense path. If it returns 200, the server is
+        either an SPA dev server with client-side routing fallback, or a
+        misconfigured proxy — either way, status codes alone cannot be
+        trusted to mean "this AI endpoint exists."
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as http:
+                r = await http.get(f"{base_url}{CANARY_PATH}",
+                                   headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200:
+                    logger.warning(
+                        f"[AIInfraAgent] Catch-all/SPA-fallback detected at {base_url} "
+                        f"(nonexistent path returned 200). Switching to content-based "
+                        f"verification — status codes alone will be ignored."
+                    )
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _probe_ai_endpoints(self, base_url: str, ai_stack: Optional[dict]):
+        """
+        Returns (exposed: dict, catch_all_detected: bool).
+
+        Two probing strategies:
+          - Normal server: status-code based, as before (fast).
+          - Catch-all/SPA server: content-based — a path only counts as
+            exposed if the response is actual JSON with plausible API
+            content, not the HTML app shell.
+        """
+        is_catch_all = await self._detect_catch_all(base_url)
+
         confirmed       = ai_stack.get("ml_endpoints", []) if ai_stack else []
         confirmed_paths = [urlparse(e).path for e in confirmed]
 
         paths_to_probe = []
-
         if any(p in confirmed_paths for p in ["/api/tags", "/api/generate", "/api/chat"]):
             paths_to_probe += OLLAMA_PATHS
-
         if any(p in confirmed_paths for p in ["/v1/models", "/v1/chat/completions"]):
             paths_to_probe += VLLM_PATHS
             paths_to_probe += LANGSERVE_PATHS
-
         if any(p in confirmed_paths for p in ["/-/routes", "/-/healthz", "/api/serve/deployments"]):
             paths_to_probe += RAY_SERVE_PATHS
-
         if any(p in confirmed_paths for p in ["/generate", "/generate_stream", "/info"]):
             paths_to_probe += TGI_PATHS
-
         if any(p in confirmed_paths for p in ["/ping", "/predictions", "/models"]):
             paths_to_probe += TORCHSERVE_PATHS
-
         if any(p in confirmed_paths for p in ["/v2/models", "/v2/health/ready"]):
             paths_to_probe += TRITON_PATHS
 
@@ -229,11 +271,13 @@ class AIInfraAgent:
         paths_to_probe += KUBERNETES_PATHS
         paths_to_probe  = list(dict.fromkeys(paths_to_probe))
 
+        if is_catch_all:
+            exposed = await self._probe_with_content_check(base_url, paths_to_probe)
+            return exposed, True
+
         raw_exposed = {}
         async with httpx.AsyncClient(
-            timeout=self.timeout,
-            verify=False,
-            follow_redirects=True
+            timeout=self.timeout, verify=False, follow_redirects=True
         ) as http:
             tasks   = [self._probe_path(http, base_url, p) for p in paths_to_probe]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -243,17 +287,14 @@ class AIInfraAgent:
                 continue
             status, snippet = res
 
-            # ── Hard skip: definitely not exposed ────────────────────────────
-            if status in (404, 501, 502, 503, 0):
+            if status in (404, 405, 501, 502, 503, 0):
                 continue
 
-            # ── 403 on non-AI-confirmed app = WAF block, not real exposure ───
             if status == 403 and not confirmed_paths:
                 continue
 
             raw_exposed[path] = {"status": status, "body": snippet}
 
-        # ── Filter generic paths: only count them if body has AI signals ─────
         exposed = {}
         for path, data in raw_exposed.items():
             if path in GENERIC_PATHS:
@@ -267,6 +308,44 @@ class AIInfraAgent:
             exposed[path] = data
             logger.info(f"[AIInfraAgent] EXPOSED → {path} [{data['status']}]")
 
+        return exposed, False
+
+    async def _probe_with_content_check(self, base_url: str, paths_to_probe: list) -> dict:
+        """
+        Used when the server has SPA-style catch-all routing (e.g. Open WebUI).
+        A path only counts as exposed if:
+          1. The response is NOT HTML (i.e. not the SPA app shell), AND
+          2. The Content-Type is JSON, AND
+          3. The body contains plausible API/AI content (not just '{}').
+        This eliminates the false positives that come from every path
+        returning 200 with the same HTML shell.
+        """
+        exposed = {}
+        async with httpx.AsyncClient(timeout=self.timeout, verify=False) as http:
+            for path in paths_to_probe:
+                try:
+                    r = await http.get(f"{base_url}{path}",
+                                       headers={"User-Agent": "Mozilla/5.0"})
+                    ct   = r.headers.get("content-type", "").lower()
+                    body = r.text[:500] if r.text else ""
+                    body_stripped = body.strip().lower()
+
+                    if "html" in ct or body_stripped.startswith(("<!doctype", "<html")):
+                        continue
+
+                    if "json" not in ct:
+                        continue
+
+                    if body_stripped in ("", "{}", "[]", "null"):
+                        continue
+
+                    exposed[path] = {"status": r.status_code, "body": body[:300]}
+                    logger.info(
+                        f"[AIInfraAgent] EXPOSED (content-verified) → {path} "
+                        f"[{r.status_code}]"
+                    )
+                except Exception:
+                    continue
         return exposed
 
     async def _probe_path(self, http: httpx.AsyncClient, base: str, path: str):
@@ -291,7 +370,12 @@ class AIInfraAgent:
         confirmed_paths = [urlparse(e).path for e in confirmed]
         pull_exposed    = "/api/pull" in exposed
 
-        if confirmed_paths or exposed:
+       
+        weak_only_paths    = {"/health", "/healthz", "/readyz", "/metrics", "/docs", "/openapi.json"}
+        meaningful_exposed = {p for p in exposed if p not in weak_only_paths}
+        has_ai_signal      = bool(confirmed_paths) or bool(meaningful_exposed)
+
+        if has_ai_signal:
             threats.append(AIInfraThreat(
                 attack_name="Model Weight Substitution via Unverified Download",
                 attack_plane="BUILD",
@@ -606,10 +690,37 @@ class AIInfraAgent:
         return threats
 
     async def _synthesize_report(
-        self, url: str, ai_stack: Optional[dict], threats: list[AIInfraThreat]
+        self, url: str, ai_stack: Optional[dict], threats: list[AIInfraThreat],
+        catch_all_detected: bool = False,
+        auth_protected_endpoints: Optional[list] = None,
     ) -> str:
+        auth_protected_endpoints = auth_protected_endpoints or []
+        auth_note = ""
+        if auth_protected_endpoints:
+            auth_note = (
+                f"\n\nSECURE FINDING (true negative): {len(auth_protected_endpoints)} "
+                f"AI endpoint(s) were confirmed present but correctly require "
+                f"authentication (HTTP 401/403): {', '.join(auth_protected_endpoints[:5])}. "
+                f"This is the desired secure configuration, not a vulnerability."
+            )
+
         if not threats:
-            return "No AI infrastructure threats detected."
+            base = "No AI infrastructure threats detected."
+            if catch_all_detected:
+                base += (
+                    " Note: this target uses catch-all/SPA-style routing "
+                    "(a nonexistent path returned HTTP 200), so endpoint exposure "
+                    "was verified by response content rather than status code alone."
+                )
+            return base + auth_note
+
+        catch_all_note = (
+            "\n\nNOTE: This target uses catch-all/SPA-style routing — a nonexistent "
+            "path returned HTTP 200. All findings below were verified by inspecting "
+            "response content (JSON body), not status codes alone, to avoid false "
+            "positives from the frontend's client-side-routing fallback."
+            if catch_all_detected else ""
+        )
 
         threat_list = "\n".join([
             f"- [{t.stride_category}] {t.attack_name} (Plane: {t.attack_plane}, "
@@ -621,6 +732,8 @@ class AIInfraAgent:
 
 Target: {url}
 Detected AI Stack: {json.dumps(ai_stack or {}, indent=2)}
+{catch_all_note}
+{auth_note}
 
 Identified Threats:
 {threat_list}
@@ -630,6 +743,7 @@ Write a concise executive summary (3-4 paragraphs) that:
 2. Identifies the top 3 most critical threats and why
 3. Gives a prioritized remediation roadmap (immediate / short-term / long-term)
 4. Notes which threats are specific to AI infrastructure vs general web vulnerabilities
+5. If any endpoints were confirmed properly authenticated (see SECURE FINDING note), explicitly acknowledge this as good security practice rather than treating the app as fully compromised.
 
 Be direct and technical. Reference STRIDE categories and MITRE ATLAS where relevant."""
 
@@ -647,13 +761,14 @@ Be direct and technical. Reference STRIDE categories and MITRE ATLAS where relev
             critical = [t for t in threats if t.severity == "CRITICAL"]
             high     = [t for t in threats if t.severity == "HIGH"]
             top      = critical[:3] if critical else high[:3]
-            return (
+            fallback = (
                 f"AI Infrastructure Threat Summary for {url}\n"
                 f"Total threats: {len(threats)} "
                 f"({len(critical)} CRITICAL, {len(high)} HIGH)\n\n"
                 f"Top priority threats:\n" +
                 "\n".join(f"• {t.attack_name} [{t.severity}]" for t in top)
             )
+            return fallback + auth_note
 
     def format_for_stride_report(self, result: AIInfraScanResult) -> dict:
         findings = []
@@ -680,5 +795,7 @@ Be direct and technical. Reference STRIDE categories and MITRE ATLAS where relev
             "threat_count":   len(result.threats),
             "findings":       findings,
             "summary":        result.summary,
+            "catch_all_detected": result.catch_all_detected,
+            "auth_protected_endpoints": result.auth_protected_endpoints,
             "planes_covered": ["BUILD", "DEPLOYMENT", "RUNTIME", "ORCHESTRATION"]
         }
