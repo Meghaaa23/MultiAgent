@@ -343,16 +343,7 @@ class ActionAgent:
                                 stack_keywords: List[str],
                                 evidence: Optional[Dict] = None,
                                 response_headers: Optional[Dict] = None) -> Dict:
-        """
-        response_headers — the actual response headers captured for `location`
-        (the same shared dict used by VulnerabilityTester / AttackVerification
-        / the fingerprinter). This is real observed evidence, not a separate
-        capture — rendering it here is what keeps this PoC consistent with
-        whatever confidence/evidence claim section 3 of the report makes
-        about the SAME finding. There is no code path in which this finding
-        reaches the Action Agent without a header check having actually run,
-        so there is no legitimate "not verified" state to render here.
-        """
+      
         header       = vuln_type.replace("Missing Security Header:", "").strip()
         stack_key    = self._best_stack_for_header(stack_keywords)
         header_lower = header.lower()
@@ -361,24 +352,20 @@ class ActionAgent:
 
         status_code = evidence.get("response_status") or evidence.get("status_code")
 
-        # This finding type only exists because a header check already ran
-        # and observed a response — so an empty hdrs dict here means the
-        # shared headers were lost in transit between that check and the
-        # Action Agent, not that verification never happened. Surface that
-        # distinction plainly instead of rendering a fabricated status line.
+       
         if not hdrs and status_code is None:
             evidence_block = (
                 "Request:\n"
                 f"  GET {location}\n\n"
                 "Observed Response:\n"
-                "  [response headers were not passed through to the report "
+                "  [Response headers were not passed through to the report "
                 "renderer for this finding — the header check that confirmed "
                 "this finding ran successfully, but its captured headers were "
                 "not threaded to this step]\n\n"
                 f"Missing:\n"
                 f"  - {header}\n\n"
                 "Verification Method:\n"
-                "  Direct HTTP header inspection (see section 3 evidence for "
+                "  Direct HTTP Header Inspection (see section 3 evidence for "
                 "the original capture)"
             )
         else:
@@ -402,7 +389,7 @@ class ActionAgent:
                 f"Missing Security Header:\n"
                 f"  - {header}\n\n"
                 "Verification Method:\n"
-                "  Direct HTTP header inspection"
+                "  Direct HTTP Header Inspection"
             )
 
         impact_text = {
@@ -901,8 +888,8 @@ class ActionAgent:
         m    = re.search(r"(/\S+)", vuln_type)
         path = m.group(1) if m else urlparse(location).path
 
-        status_code  = evidence.get("status_code") or evidence.get("response_status")
-        body_snippet = evidence.get("response_snippet") or evidence.get("response_body_snippet")
+        status_code  = evidence.get("status") or evidence.get("status_code") or evidence.get("response_status")
+        body_snippet = evidence.get("body_snippet") or evidence.get("response_snippet") or evidence.get("response_body_snippet")
 
         if status_code is not None:
             request = evidence.get("request", f"GET {location}")
@@ -918,10 +905,25 @@ class ActionAgent:
                     f"\n\nObserved Body Snippet:\n"
                     f"{body_snippet[:200]}"
                 )
+            method = evidence.get("method")
+            confidence = evidence.get("confidence")
+
+            if method:
+                evidence_comment += (
+                    f"\n\nVerification Method:\n"
+                    f"  {method}"
+                )
+
+            if confidence:
+                evidence_comment += (
+                    f"\n\nConfidence:\n"
+                    f"  {confidence}"
+                )
+                
             evidence_captured = True
         else:
             evidence_comment = (
-                "# [NO EVIDENCE CAPTURED — response status/body for this path "
+                " [NO EVIDENCE CAPTURED — response status/body for this path "
                 "was not recorded; existence is unconfirmed]"
             )
             evidence_captured = False
@@ -936,16 +938,16 @@ class ActionAgent:
 
         if is_access_controlled:
             fix_snippet = (
-                f"# {path} returned HTTP {status_code} — access control is functioning.\n"
-                f"# No removal needed. Recommended actions:\n"
-                f"#   1. Confirm {path} requires authentication AND authorization\n"
-                f"#      (a 403 alone doesn't prove authorization is checked correctly\n"
-                f"#      post-login — verify with an authenticated low-privilege account).\n"
-                f"#   2. Ensure {path} is not also reachable via an alternate path/method\n"
-                f"#      that bypasses the same access control (e.g. trailing slash,\n"
-                f"#      case variation, or a different HTTP verb).\n"
-                f"#   3. Monitor for regressions — re-check after deploys that the\n"
-                f"#      control hasn't been loosened or removed."
+                f" {path} returned HTTP {status_code} — access control is functioning.\n"
+                f" No removal needed. Recommended actions:\n"
+                f"   1. Confirm {path} requires authentication AND authorization\n"
+                f"      (a 403 alone doesn't prove authorization is checked correctly\n"
+                f"      post-login — verify with an authenticated low-privilege account).\n"
+                f"   2. Ensure {path} is not also reachable via an alternate path/method\n"
+                f"      that bypasses the same access control (e.g. trailing slash,\n"
+                f"      case variation, or a different HTTP verb).\n"
+                f"   3. Monitor for regressions — re-check after deploys that the\n"
+                f"      control hasn't been loosened or removed."
             )
             fix_language = "text"
             fix_context  = "Access control verification (no code change required)"

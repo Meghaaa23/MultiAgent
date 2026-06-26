@@ -140,7 +140,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
 
     authenticated = (scan_results or {}).get("authenticated_scan", False)
     actions = [
-        v.get("remediation", "")[:160]
+        v.get("remediation", "")[:200]
         for v in (confirmed_vulns + potential_vulns)[:3]
         if v.get("remediation")
     ] or ["No immediate action required — continue monitoring."]
@@ -167,12 +167,49 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     return f" 1. EXECUTIVE SUMMARY\n{summary}"
 
 
+def _tech_matches_cve_query(tech_name: str, cve_query: str) -> bool:
+    """
+    A CVE's `query` field (set by pipeline_agent.py) is one of the strings
+    CVEVerificationPipeline._build_queries() generated for a technology --
+    either the bare name ("WordPress") or "name version" ("WordPress
+    6.4.2"). Match on the query being exactly the tech name, or the tech
+    name followed by a space (so "WordPress" matches "WordPress 6.4.2"
+    but does not falsely match an unrelated tech whose name happens to
+    start with the same characters).
+    """
+    tn = (tech_name or "").strip().lower()
+    cq = (cve_query or "").strip().lower()
+    if not tn or not cq:
+        return False
+    return cq == tn or cq.startswith(tn + " ")
+
+
+def _cves_for_tech(tech_name: str, cves: Optional[List[Dict]]) -> List[Dict]:
+    if not cves:
+        return []
+    matched = [c for c in cves if _tech_matches_cve_query(tech_name, c.get("query", ""))]
+    seen_ids: set = set()
+    deduped: List[Dict] = []
+    for c in matched:
+        cid = c.get("cve_id", "")
+        if cid and cid in seen_ids:
+            continue
+        if cid:
+            seen_ids.add(cid)
+        deduped.append(c)
+    sev_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Unknown": 4}
+    deduped.sort(key=lambda c: sev_order.get(c.get("severity", "Unknown"), 4))
+    return deduped
+
+
 def _build_section_2(stack, endpoints, cves):
-    lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack"]
+    lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack & Known CVEs"]
 
     technologies = stack.get("technologies") or []
     noise_words  = {"content", "unknown", "none", "null", "n/a",
                     "signals", "content signals", "true", "false"}
+
+    matched_cve_ids: set = set()
 
     if technologies and isinstance(technologies[0], dict):
         by_cat: Dict[str, list] = {}
@@ -196,6 +233,16 @@ def _build_section_2(stack, endpoints, cves):
                 conf    = dt.get("confidence", 0)
                 display = f"{name} {ver}".strip() if ver else name
                 lines.append(f"- {display}  [{cat}, {conf:.0%} confidence]")
+
+                tech_cves = _cves_for_tech(name, cves)
+                if tech_cves:
+                    for c in tech_cves:
+                        cid = c.get("cve_id", "") or c.get("title", "Unknown")
+                        if c.get("cve_id"):
+                            matched_cve_ids.add(c["cve_id"])
+                        lines.append(f"      - {cid}")
+                else:
+                    lines.append("      None found")
 
     elif technologies:
         confirmed = [
@@ -227,6 +274,23 @@ def _build_section_2(stack, endpoints, cves):
                     "Unknown — target is behind a CDN/WAF that strips "
                     "identifying headers. See Section 3 for detected headers."
                 )
+
+    if cves:
+        orphaned = [
+            c for c in cves
+            if c.get("cve_id") and c["cve_id"] not in matched_cve_ids
+        ]
+        seen_orphan_ids: set = set()
+        orphaned_deduped = []
+        for c in orphaned:
+            if c["cve_id"] in seen_orphan_ids:
+                continue
+            seen_orphan_ids.add(c["cve_id"])
+            orphaned_deduped.append(c)
+        if orphaned_deduped:
+            lines.append("- Other detected components")
+            for c in orphaned_deduped:
+                lines.append(f"      - {c.get('cve_id','Unknown')}")
 
     unverified = stack.get("unverified_hints", [])
     if unverified:
@@ -307,7 +371,7 @@ def _build_section_3(confirmed_vulns):
 def render_section_3b(action_results: list) -> str:
     if not action_results:
         return ""
-    lines = ["\n Verification Evidence & FIX SNIPPETS"]
+    lines = ["\n VERIFICATION EVIDENCE & FIX SNIPPETS"]
     for a in action_results:
         e        = a.get("effort_minutes", 0)
         effort   = f"{e} min" if e < 60 else f"{e//60}h {e%60}min"
@@ -317,7 +381,7 @@ def render_section_3b(action_results: list) -> str:
         lines += [
             f" [{a['severity']}] {a['finding_type']}",
             f"Location: `{a['location']}` | Estimated fix effort: {effort}\n",
-            f"Observed Evidence:",
+            f"Verification Evidence:",
             f"```{poc_lang}",
             a["attack_poc"],
             "```\n",
@@ -1106,7 +1170,8 @@ Answer:"""
         if scan_results:
             stack      = scan_results.get("stack") or {}
             scan_text += f"\n\n TECH STACK\n   {stack.get('stack_summary','Unknown')}\n\n"
-            for cve in scan_results.get("verified_cves", [])[:5]:
+            verified_cves = scan_results.get("verified_cves") or []
+            for cve in verified_cves[:5]:
                 scan_text += (
                     f"{cve.get('cve_id','?')} [{cve.get('severity','?')}] "
                     f"CVSS: {cve.get('cvss_score','?')}\n"
@@ -1174,7 +1239,7 @@ Answer:"""
 
         if scan_results:
             stack     = scan_results.get("stack") or {}
-            cves      = scan_results.get("verified_cves")
+            cves      = scan_results.get("verified_cves") or []
             endpoints = scan_results.get("endpoints_discovered", [])
             vulns     = scan_results.get("vulnerabilities", [])
 
@@ -1311,13 +1376,13 @@ Answer:"""
         action_agent   = ActionAgent()
         action_results = action_agent.process_all(confirmed_vulns, target_url, stack)
 
-        section_1  = _build_section_1(confirmed_vulns, potential_vulns, target_url or "", scan_results) or ""
-        section_2  = _build_section_2(stack, (scan_results or {}).get("endpoints_discovered", []), cves) or ""
-        section_3  = _build_section_3(confirmed_vulns)                  or ""
-        section_3b = render_section_3b(action_results)                  or ""
-        section_4  = _build_section_4(potential_vulns)                  or ""
-        section_5  = _build_section_5(stride_threats)                   or ""
-        section_6  = _build_section_6(confirmed_vulns, potential_vulns) or ""
+        section_1   = _build_section_1(confirmed_vulns, potential_vulns, target_url or "", scan_results) or ""
+        section_2   = _build_section_2(stack, (scan_results or {}).get("endpoints_discovered", []), cves) or ""
+        section_3   = _build_section_3(confirmed_vulns)                  or ""
+        section_3b  = render_section_3b(action_results)                  or ""
+        section_4   = _build_section_4(potential_vulns)                  or ""
+        section_5   = _build_section_5(stride_threats)                   or ""
+        section_6   = _build_section_6(confirmed_vulns, potential_vulns) or ""
 
         final = "\n\n".join([
             s for s in [section_1, section_2, section_3, section_3b,

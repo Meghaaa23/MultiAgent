@@ -7,6 +7,7 @@ import urllib.request
 import urllib.parse
 from typing import Dict, List, Optional, Set
 from datetime import datetime
+from pprint import pprint
 
 from .fingerprint_agent         import TechFingerprintAgent
 from .pipeline_agent            import CVEVerificationPipeline
@@ -70,9 +71,6 @@ def _build_evidence_gated_stride(target_url, response_headers,
     xfo     = hdrs.get("x-frame-options", "")
     csp     = hdrs.get("content-security-policy", "")
 
-    # If the header fetch itself failed, we have no basis to claim clickjacking
-    # is present OR absent — surfacing it here would be exactly the kind of
-    # unevidenced claim this pipeline is supposed to eliminate.
     if not headers_capture_failed and not xfo and "frame-ancestors" not in csp.lower():
         threats.append({
             "category":   "Spoofing",
@@ -370,7 +368,7 @@ class WebScannerAgent:
             logging.warning(f"AIInfraAgent failed: {e}")
 
         if verbose:
-            print(" CVE Lookup (NVD/OSV)...")
+            print(" CVE Lookup ")
         try:
             app_name    = stack.get("app_identity_name", "")
             app_version = stack.get("app_identity_version", "")
@@ -395,6 +393,7 @@ class WebScannerAgent:
                     "app_version":   app_version,
                 }
                 verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
+                
 
             elif not is_ai_powered and app_name:
                 cve_queries = []
@@ -402,12 +401,24 @@ class WebScannerAgent:
                     cve_queries.append(f"{app_name} {app_version}")
                 cve_queries.append(app_name)
                 cve_stack = {
-                    "technologies":  cve_queries,
-                    "stack_summary": app_name,
-                    "app_name":      app_name,
-                    "app_version":   app_version,
+                    "technologies": stack.get("technologies", []),
+                    "stack_summary": stack.get("stack_summary", ""),
+                    "server": stack.get("server"),
+                    "framework": stack.get("framework"),
+                    "cms": stack.get("cms"),
+                    "language": stack.get("language"),
                 }
+                
                 verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
+                verified_cves == verified_cves or []
+                
+                print("\n===== TECHNOLOGIES =====")
+                pprint(stack["technologies"])
+                print("========================")
+                print("\n========== VERIFIED CVES ==========")
+                
+                pprint(verified_cves)
+                print("===================================\n")
 
             else:
                 verified_cves = []

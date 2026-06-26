@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import re
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -187,6 +188,30 @@ class CVEVerificationPipeline:
                 queries.append(summary)
 
         return list(dict.fromkeys(q for q in queries if q and len(q) > 1))
+    
+
+    def _normalize_product(self, text: str) -> str:
+        text = text.lower()
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        return " ".join(text.split())
+
+
+    def _product_matches(self, keyword: str, description: str, affected: str) -> bool:
+        """
+        Return True only if the detected product actually appears in the
+        NVD description/configuration.
+        """
+
+        product = self._normalize_product(keyword)
+
+        # Remove version from the search term
+        product = re.sub(r"\b\d+(\.\d+)*\b", "", product).strip()
+
+        searchable = self._normalize_product(
+            f"{description} {affected}"
+        )
+
+        return product in searchable
 
     async def _fetch_nvd(self, keyword: str, verbose: bool = False) -> Optional[List[Dict]]:
         cache_key = f"nvd:{keyword}"
@@ -247,6 +272,10 @@ class CVEVerificationPipeline:
 
                 configs      = cve_data.get("configurations", [])
                 affected_str = self._extract_affected(configs)
+                if not self._product_matches(keyword, desc, affected_str):
+                    if verbose:
+                        print(f"Rejected {cve_id} (product mismatch)")
+                    continue
 
                 results.append({
                     "cve_id":      cve_id,
