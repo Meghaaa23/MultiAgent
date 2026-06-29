@@ -168,15 +168,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
 
 
 def _tech_matches_cve_query(tech_name: str, cve_query: str) -> bool:
-    """
-    A CVE's `query` field (set by pipeline_agent.py) is one of the strings
-    CVEVerificationPipeline._build_queries() generated for a technology --
-    either the bare name ("WordPress") or "name version" ("WordPress
-    6.4.2"). Match on the query being exactly the tech name, or the tech
-    name followed by a space (so "WordPress" matches "WordPress 6.4.2"
-    but does not falsely match an unrelated tech whose name happens to
-    start with the same characters).
-    """
+ 
     tn = (tech_name or "").strip().lower()
     cq = (cve_query or "").strip().lower()
     if not tn or not cq:

@@ -1,2 +1,17 @@
-multiagent/.env
+
 multiagent/multiagent-testbed/snapshots/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# VS Code
+.vscode/
+
+# Environment variables
+multiagent/.env

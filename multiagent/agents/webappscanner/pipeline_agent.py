@@ -120,12 +120,11 @@ class CVEVerificationPipeline:
                     if not name or tl in _SKIP_CVE:
                         continue
 
-                    if category in _CVE_WORTHY_CATEGORIES:
-                        if version:
-                            queries.append(f"{name} {version}")
-                        queries.append(name)
-                    elif category in _CVE_WORTHY_WITH_VERSION and version:
+                    if version:
                         queries.append(f"{name} {version}")
+                        queries.append(name)
+
+                    elif category in _CVE_WORTHY_CATEGORIES:
                         queries.append(name)
 
                 elif isinstance(tech, str):

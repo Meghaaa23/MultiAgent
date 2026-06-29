@@ -1,6 +1,6 @@
 {
   "/api": {
-    "target": "http://ems885-sidc-lab",
+    "target": "http://localhost:4200",
     "secure": false,
     "changeOrigin": true,
     "timeout": 600000,
