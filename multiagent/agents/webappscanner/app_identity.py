@@ -5,6 +5,7 @@ import urllib.request
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +200,7 @@ async def detect_app_identity(base_url: str,
                                response_headers: Dict,
                                wappalyzer_cms: Optional[str] = None,
                                verbose: bool = False) -> AppIdentity:
-    import asyncio
+    
 
     if not isinstance(response_headers, dict):
         response_headers = dict(response_headers)
@@ -259,6 +260,15 @@ async def detect_app_identity(base_url: str,
         pass
 
     technologies = _extract_technologies_from_headers(response_headers)
+    if wappalyzer_technologies:
+        for tech in wappalyzer_technologies:
+            if isinstance(tech, dict):
+                name = tech.get("name")
+                version = tech.get("version")
+
+                if name:
+                    entry = f"{name}/{version}" if version else name
+                    technologies.append(entry)
 
     for sig_name, sig_version, _, _ in signals:
         if sig_name:
@@ -281,6 +291,8 @@ async def detect_app_identity(base_url: str,
             evidence     = "no app identity signals found"
         )
         _build_cve_queries(identity, technologies)
+        print("\nRAW TECHNOLOGIES")
+        print(technologies)
         return identity
 
     signals.sort(key=lambda s: s[3], reverse=True)
@@ -292,20 +304,22 @@ async def detect_app_identity(base_url: str,
 
     if best:
         best_name, best_version, best_evidence, best_score = best
-        if wappalyzer_cms and best_name:
-            if best_name.lower() != wappalyzer_cms.lower():
-                version_only = next(
-                    (s for s in signals if "API" in s[2] and s[1]),
-                    None
-                )
-                if version_only:
-                    best_name    = wappalyzer_cms
-                    best_version = version_only[1]
-                else:
-                    best_name = wappalyzer_cms
-                    best_version = None
-    else:
-        best_name, best_version, best_evidence, best_score = None, None, "", 0
+        
+        preferred_app = None
+        if wappalyzer_technologies:
+            for tech in wappalyzer_technologies:
+                if not isinstance(tech, dict):
+                    continue
+
+                category = tech.get("category")
+                if category == "CMS":
+                    preferred_app = tech
+                elif category == "Other" and not tech.get("version") and tech.get("name") not in (
+                    "Ubuntu", "HTTP/2", "HTTP/3", "HSTS"
+                ):
+                    preferred_app = tech
+            else:
+                best_name, best_version, best_evidence, best_score = None, None, "", 0
 
     version_api_signal = next(
         (s for s in signals if "API" in s[2] and s[1]),
@@ -417,7 +431,7 @@ def _extract_technologies_from_headers(headers: Dict) -> List[str]:
 
     server = headers.get("server", "")
     if server:
-        m = re.match(r'^([A-Za-z][A-Za-z0-9_.-]+?)(?:/([0-9][0-9.]*))?', server)
+        m = re.match(r'^(.+?)(?:/(\d+(?:\.\d+)+))?$', server)
         if m:
             name = m.group(1).capitalize() if m.group(1).islower() else m.group(1)
             ver  = m.group(2)
@@ -426,7 +440,7 @@ def _extract_technologies_from_headers(headers: Dict) -> List[str]:
     powered = headers.get("x-powered-by", "")
     if powered:
         for part in [p.strip() for p in powered.split(",")]:
-            m = re.match(r'^([A-Za-z][A-Za-z0-9_.-]+?)(?:\s+|/)(\d[\d.]*)?', part)
+            m = re.match(r'^(.*?)(?:\s+v?(\d+(?:\.\d+)+)|/(\d+(?:\.\d+)+))?$', part)
             if m:
                 name = m.group(1).strip()
                 if len(name) >= 3:

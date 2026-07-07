@@ -212,23 +212,20 @@ class WebScannerAgent:
         if verbose:
             print(f"  Stack: {stack.get('stack_summary','Unknown')}\n")
             if headers_capture_failed:
-                print("  ⚠ Could not capture live response headers for the target — "
+                print(" Could not capture live response headers for the target — "
                       "header-dependent findings will be marked as evidence-incomplete.\n")
 
         app_identity = None
         if _HAS_APP_IDENTITY:
             try:
-                wap_cms = next(
-                    (dt.get("name","") for dt in stack.get("technologies",[])
-                     if isinstance(dt, dict) and dt.get("category") == "CMS"),
-                    None
-                )
                 app_identity = await detect_app_identity(
-                    base_url=target_url, html=html or "",
+                    base_url=target_url,
+                    html=html or "",
                     response_headers=initial_headers,
-                    wappalyzer_cms=wap_cms,
+                    wappalyzer_technologies=stack.get("technologies", []),
                     verbose=verbose,
                 )
+            
                 if app_identity and app_identity.name:
                     existing = stack.get("technologies", [])
                     if existing and isinstance(existing[0], dict):
@@ -395,11 +392,8 @@ class WebScannerAgent:
                 verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
                 
 
-            elif not is_ai_powered and app_name:
-                cve_queries = []
-                if app_version:
-                    cve_queries.append(f"{app_name} {app_version}")
-                cve_queries.append(app_name)
+            elif not is_ai_powered:
+                
                 cve_stack = {
                     "technologies": stack.get("technologies", []),
                     "stack_summary": stack.get("stack_summary", ""),
@@ -408,9 +402,11 @@ class WebScannerAgent:
                     "cms": stack.get("cms"),
                     "language": stack.get("language"),
                 }
-                
+                print("\n===== STACK SENT TO CVE LOOKUP =====")
+                pprint(cve_stack)
+                print("====================================")
                 verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
-                verified_cves == verified_cves or []
+                verified_cves = verified_cves or []
                 
                 print("\n===== TECHNOLOGIES =====")
                 pprint(stack["technologies"])

@@ -7,6 +7,10 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from typing import Dict, List, Optional
+import datetime
+from packaging.version import Version, InvalidVersion
+from pprint import pprint
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +47,13 @@ class CVEVerificationPipeline:
         self.web_search  = web_search_function
         self.nvd_api_key = nvd_api_key or os.environ.get("NVD_API_KEY", "")
         self._cache: Dict[str, List[Dict]] = {}
-
+    
     async def lookup(self, stack: Dict, verbose: bool = False) -> Optional[List[Dict]]:
+        print("\n========== ENTERED CVE LOOKUP ==========")
+        print("Stack received:")
+        from pprint import pprint
+        pprint(stack)
+        print("========================================\n")
         if verbose:
             print(f"\n CVE Verification Pipeline")
             print(f"   Stack: {stack.get('stack_summary', 'Unknown')}")
@@ -54,6 +63,12 @@ class CVEVerificationPipeline:
                 print("   NVD API key: absent (rate-limited to 5 req/30s)")
 
         queries = self._build_queries(stack)
+        print("\n===== STACK PASSED TO CVE PIPELINE =====")
+       
+        pprint(stack)
+
+        print("\n===== GENERATED QUERIES =====")
+        pprint(queries)
 
         if not queries:
             if verbose:
@@ -63,8 +78,19 @@ class CVEVerificationPipeline:
         if verbose:
             print(f"   Queries: {queries}")
 
-        tasks = [self._fetch_nvd(q, verbose) for q in queries]
-        tasks += [self._fetch_osv(q, stack, verbose) for q in queries]
+        tasks = []
+
+        for q in queries:
+           
+            tasks.append(
+                self._fetch_nvd(
+                keyword=q["keyword"],
+                detected_version=q["version"],
+                verbose=verbose,
+                )
+            )
+            
+        tasks += [self._fetch_osv(q["keyword"], stack, verbose) for q in queries]
 
         results_nested = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -121,11 +147,21 @@ class CVEVerificationPipeline:
                         continue
 
                     if version:
-                        queries.append(f"{name} {version}")
-                        queries.append(name)
+                        queries.append({
+                            "keyword": f"{name} {version}",
+                            "version": version,
+                        })
+
+                        queries.append({
+                            "keyword": name,
+                            "version": version,
+                        })
 
                     elif category in _CVE_WORTHY_CATEGORIES:
-                        queries.append(name)
+                        queries.append({
+                            "keyword": name,
+                            "version": "",
+                        })
 
                 elif isinstance(tech, str):
                     tech = tech.strip()
@@ -148,11 +184,11 @@ class CVEVerificationPipeline:
                         name = name.strip()
                         ver  = ver.strip()
                         if ver:
-                            queries.append(f"{name} {ver}")
-                        queries.append(name)
+                            queries.append({"keyword": f"{name} {ver}", "version": ver})
+                        queries.append({"keyword": name, "version": ver})
                     else:
                         if tl not in _GENERIC_RUNTIMES:
-                            queries.append(tech)
+                            queries.append({"keyword": tech, "version": ""})
 
         legacy_components = [
             stack.get("server"),
@@ -173,21 +209,40 @@ class CVEVerificationPipeline:
                     name, ver = component.split("/", 1)
                 else:
                     parts = component.split()
-                    name  = parts[0]
-                    ver   = parts[1] if len(parts) > 1 else ""
-                queries.append(f"{name.strip()} {ver.strip()}".strip())
-                queries.append(name.strip())
+
+                    ver = ""
+                    name = component
+
+                    for i, part in enumerate(parts):
+                        if re.fullmatch(r"\d+(?:\.\d+)+", part):
+                            ver = part
+                            name = " ".join(parts[:i])
+                            break
+
+                   
+                queries.append({"keyword": f"{name.strip()} {ver.strip()}".strip(), "version": ver.strip()})
+                queries.append({"keyword": name.strip(), "version": ver.strip()})
             elif tl not in _GENERIC_RUNTIMES:
-                queries.append(component)
+                queries.append({"keyword": component, "version": ""})
 
         summary = stack.get("stack_summary", "")
         if summary and summary not in ("Unknown", "") and not technologies:
             tl = summary.lower().split("/")[0].strip()
             if tl not in _SKIP_CVE and tl not in _GENERIC_RUNTIMES:
-                queries.append(summary)
+                queries.append({"keyword": summary, "version": ""})
 
-        return list(dict.fromkeys(q for q in queries if q and len(q) > 1))
-    
+        seen = set()
+        unique = []
+
+        for q in queries:
+            key = (q["keyword"], q["version"])
+
+            if key not in seen:
+                seen.add(key)
+                unique.append(q)
+
+        return unique
+            
 
     def _normalize_product(self, text: str) -> str:
         text = text.lower()
@@ -203,7 +258,7 @@ class CVEVerificationPipeline:
 
         product = self._normalize_product(keyword)
 
-        # Remove version from the search term
+       
         product = re.sub(r"\b\d+(\.\d+)*\b", "", product).strip()
 
         searchable = self._normalize_product(
@@ -211,9 +266,143 @@ class CVEVerificationPipeline:
         )
 
         return product in searchable
+    
+       
+    def _version_matches(
+        self,
+        detected_version: str,
+        description: str,
+        affected: str,
+        ) -> bool:
 
-    async def _fetch_nvd(self, keyword: str, verbose: bool = False) -> Optional[List[Dict]]:
-        cache_key = f"nvd:{keyword}"
+        print("\n==========================")
+        print("VERSION MATCH")
+        print("==========================")
+        print("Detected :", detected_version)
+        print("Affected :", affected)
+        print("Desc     :", description[:120])
+
+        if not detected_version:
+            print("-> No detected version -> ACCEPT")
+            return True
+
+        try:
+            detected = Version(detected_version)
+        except InvalidVersion:
+            print("-> Invalid detected version -> ACCEPT")
+            return True
+
+        text = f"{description} {affected}".lower()
+        m = re.search(
+            r"versions?\s+(\d+(?:\.\d+)+)\s+to\s+(\d+(?:\.\d+)+)",
+            text
+        )
+
+        if m:
+            try:
+                min_version = Version(m.group(1))
+                max_version = Version(m.group(2))
+                print("Matched RANGE:", min_version, max_version)
+                print("Compare:", detected)
+                result = min_version <= detected <= max_version
+                print("Result:", result)
+                return result
+
+            except InvalidVersion:
+                return True
+        
+        m = re.search(
+            r"from\s+versions?\s+(\d+(?:\.\d+)+)\s+until\s+(\d+(?:\.\d+)+)",
+            text
+        )
+
+        if m:
+            try:
+                min_version = Version(m.group(1))
+                max_version = Version(m.group(2))
+
+                return min_version <= detected <= max_version
+
+            except InvalidVersion:
+                return True
+        
+        m = re.search(
+            r"from\s+(\d+(?:\.\d+)+)\s+through\s+(\d+(?:\.\d+)+)",
+            text
+        )
+
+        if m:
+            try:
+                min_version = Version(m.group(1))
+                max_version = Version(m.group(2))
+
+                return min_version <= detected <= max_version
+
+            except InvalidVersion:
+                return True
+
+        m = re.search(
+            r">=\s*(\d+(?:\.\d+)+).*?<\s*(\d+(?:\.\d+)+)",
+            text
+        )
+
+        if m:
+            try:
+                min_version = Version(m.group(1))
+                max_version = Version(m.group(2))
+
+                return min_version <= detected < max_version
+
+            except InvalidVersion:
+                return True
+
+        m = re.search(
+            r"plugin\s+(\d+(?:\.\d+)+)",
+            text
+        )
+
+        if m:
+            try:
+                affected_version = Version(m.group(1))
+
+            
+                return detected == affected_version
+
+            except InvalidVersion:
+                return True
+       
+        m = re.search(r"through\s+(\d+(?:\.\d+)+)", text)
+        if m:
+            print("Matched THROUGH:", m.group(1))
+            max_version = Version(m.group(1))
+            print("Compare:", detected, "<=", max_version)
+            result = detected <= max_version
+            print("Result:", result)
+            return result
+
+        m = re.search(r"before\s+(\d+(?:\.\d+)+)", text)
+        if m:
+            print("Matched BEFORE:", m.group(1))
+            max_version = Version(m.group(1))
+            print("Compare:", detected, "<", max_version)
+            result = detected < max_version
+            print("Result:", result)
+            return result
+
+        m = re.search(r"<\s*(\d+(?:\.\d+)+)", text)
+        if m:
+            print("Matched <", m.group(1))
+            max_version = Version(m.group(1))
+            print("Compare:", detected, "<", max_version)
+            result = detected < max_version
+            print("Result:", result)
+            return result
+
+        print("No version pattern matched -> ACCEPT")
+        return True   
+
+    async def _fetch_nvd(self, keyword: str, detected_version: str = "", verbose: bool = False) -> Optional[List[Dict]]:
+        cache_key = f"nvd:{keyword}:{detected_version}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -241,7 +430,7 @@ class CVEVerificationPipeline:
             data            = json.loads(raw)
             vulnerabilities = data.get("vulnerabilities", [])
 
-            import datetime
+            
             _min_year = datetime.datetime.now(datetime.timezone.utc).year - 10
 
             for item in vulnerabilities:
@@ -274,6 +463,20 @@ class CVEVerificationPipeline:
                 if not self._product_matches(keyword, desc, affected_str):
                     if verbose:
                         print(f"Rejected {cve_id} (product mismatch)")
+                    continue
+                if verbose:
+                    print(
+                        f"\nChecking {cve_id}"
+                        f"\n  Query            : {keyword}"
+                        f"\n  Detected Version : {detected_version}"
+                        f"\n  Affected         : {affected_str}"
+                    )
+                if not self._version_matches(
+                    detected_version,
+                    desc,
+                    affected_str):
+                    if verbose:
+                        print(f"Rejected {cve_id} (version mismatch)")
                     continue
 
                 results.append({
@@ -348,7 +551,8 @@ class CVEVerificationPipeline:
 
         ecosystem = None
         for lang, eco in ecosystem_map.items():
-            if lang in combined:
+            key = lang.lstrip(".")
+            if re.search(rf"\b{re.escape(key)}\b", combined):
                 ecosystem = eco
                 break
 
