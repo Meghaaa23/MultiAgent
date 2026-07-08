@@ -37,10 +37,27 @@ async def main():
         response_headers     = {},   
         verbose              = True,
     )
+    print("\n========== RAW FINGERPRINT ==========")
+
+    for k, v in ai_fingerprint.items():
+        if isinstance(v, list):
+            print(f"{k}: {len(v)} items")
+        elif isinstance(v, dict):
+            print(f"{k}: {len(v)} keys")
+        else:
+            print(f"{k}: {v}")
 
     print(f"\n  AI detected : {ai_fingerprint['is_ai_powered']} [{ai_fingerprint['confidence']}]")
     print(f"  ML endpoints: {ai_fingerprint['ml_endpoints']}")
-    print(f"  Evidence    : {ai_fingerprint['evidence']}")
+    #print(f"  Evidence    : {ai_fingerprint['evidence']}")
+    print("\nEvidence:")
+
+    for item in ai_fingerprint["evidence_items"]:
+        print(
+            f"  +{item['weight']:2d} "
+            f"{item['key']:<30} "
+            f"{item['detail']}"
+        )
 
     if args.agent == "fingerprint":
         return

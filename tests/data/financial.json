@@ -1,0 +1,9 @@
+{
+    "page_title": "Banking AI",
+    "technologies": [
+        "OpenAI"
+    ],
+    "ml_endpoints": [
+        "/transaction"
+    ]
+}

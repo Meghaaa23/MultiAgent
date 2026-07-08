@@ -1,0 +1,9 @@
+{
+    "page_title": "AI Code Assistant",
+    "technologies": [
+        "OpenAI"
+    ],
+    "ml_endpoints": [
+        "/generate"
+    ]
+}

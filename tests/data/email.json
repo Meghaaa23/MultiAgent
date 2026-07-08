@@ -1,0 +1,9 @@
+{
+    "page_title": "Email Assistant",
+    "technologies": [
+        "OpenAI"
+    ],
+    "ml_endpoints": [
+        "/compose"
+    ]
+}

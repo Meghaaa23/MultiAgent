@@ -1,0 +1,9 @@
+{
+    "page_title": "Medical Diagnosis Assistant",
+    "technologies": [
+        "OpenAI"
+    ],
+    "ml_endpoints": [
+        "/diagnosis"
+    ]
+}

@@ -1,0 +1,10 @@
+{
+    "page_title": "Customer Support AI",
+    "technologies": [
+        "LangChain"
+    ],
+    "ml_endpoints": [
+        "/chat",
+        "/tickets"
+    ]
+}

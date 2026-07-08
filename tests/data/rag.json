@@ -1,0 +1,11 @@
+{
+    "page_title": "Knowledge Search",
+    "technologies": [
+        "Pinecone",
+        "LangChain"
+    ],
+    "ml_endpoints": [
+        "/retrieve",
+        "/query"
+    ]
+}
