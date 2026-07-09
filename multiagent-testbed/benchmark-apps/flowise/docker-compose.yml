@@ -1,0 +1,18 @@
+services:
+  flowise:
+    image: flowiseai/flowise:latest
+    container_name: benchmark-flowise
+
+    restart: unless-stopped
+
+    ports:
+      - "3100:3000"
+
+    environment:
+      - PORT=3000
+
+    volumes:
+      - ./data:/root/.flowise
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
