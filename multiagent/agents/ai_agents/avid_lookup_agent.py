@@ -1,5 +1,3 @@
-# agents/webappscanner/avid_lookup_agent.py
-
 import re
 import json
 import asyncio
@@ -11,13 +9,11 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-# AVID API endpoints
 AVID_BASE_URL   = "https://avidml.org"
 AVID_DB_URL     = "https://avidml.org/database/"
-AVID_API_URL    = "https://avidml.org/database/AVID"  
+AVID_API_URL    = "https://avidml.org/database/AVID"
 
 
-# ML library - AVID search terms mapping
 LIBRARY_SEARCH_TERMS = {
     "pytorch":       ["pytorch", "torch"],
     "tensorflow":    ["tensorflow", "keras"],
@@ -32,7 +28,7 @@ LIBRARY_SEARCH_TERMS = {
     "bentoml":       ["bentoml"],
     "gradio":        ["gradio"],
     "streamlit":     ["streamlit"],
-    "fastapi":       ["fastapi"],   
+    "fastapi":       ["fastapi"],
     "pickle":        ["pickle", "picklescan", "deserialization"],
     "jupyter":       ["jupyter", "notebook"],
 }
@@ -50,7 +46,7 @@ AVID_BACKDOOR_ENTRIES = [
         "cvss_score":  7.5,
         "source":      "AVID",
         "url":         "https://avidml.org/database/AVID-2026-R0035",
-        "atlas_technique": "AML.T0018.002 — Embed Malware",
+        "atlas_technique": "AML.T0018.002 - Embed Malware",
         "report_type": "Advisory",
         "ai_backdoor_relevant": True,
     },
@@ -65,7 +61,7 @@ AVID_BACKDOOR_ENTRIES = [
         "cvss_score":  7.5,
         "source":      "AVID",
         "url":         "https://avidml.org/database/AVID-2026-R0036",
-        "atlas_technique": "AML.T0018.002 — Embed Malware",
+        "atlas_technique": "AML.T0018.002 - Embed Malware",
         "report_type": "Advisory",
         "ai_backdoor_relevant": True,
     },
@@ -80,7 +76,7 @@ AVID_BACKDOOR_ENTRIES = [
         "cvss_score":  7.2,
         "source":      "AVID",
         "url":         "https://avidml.org/database/AVID-2026-R0037",
-        "atlas_technique": "AML.T0018.002 — Embed Malware",
+        "atlas_technique": "AML.T0018.002 - Embed Malware",
         "report_type": "Advisory",
         "ai_backdoor_relevant": True,
     },
@@ -95,7 +91,7 @@ AVID_BACKDOOR_ENTRIES = [
         "cvss_score":  9.1,
         "source":      "AVID",
         "url":         "https://avidml.org/database/AVID-2026-R0034",
-        "atlas_technique": "AML.T0018 — Backdoor ML Model",
+        "atlas_technique": "AML.T0018 - Backdoor ML Model",
         "report_type": "Advisory",
         "ai_backdoor_relevant": True,
     },
@@ -110,7 +106,7 @@ AVID_BACKDOOR_ENTRIES = [
         "cvss_score":  9.8,
         "source":      "AVID",
         "url":         "https://avidml.org/database/AVID-2026-R0023",
-        "atlas_technique": "AML.T0018.002 — Embed Malware",
+        "atlas_technique": "AML.T0018.002 - Embed Malware",
         "report_type": "Advisory",
         "ai_backdoor_relevant": True,
     },
@@ -125,7 +121,7 @@ AVID_BACKDOOR_ENTRIES = [
         "cvss_score":  9.8,
         "source":      "AVID",
         "url":         "https://avidml.org/database/AVID-2026-R0045",
-        "atlas_technique": "AML.T0018 — Backdoor ML Model",
+        "atlas_technique": "AML.T0018 - Backdoor ML Model",
         "report_type": "Advisory",
         "ai_backdoor_relevant": True,
     },
@@ -140,7 +136,7 @@ AVID_BACKDOOR_ENTRIES = [
         "cvss_score":  9.8,
         "source":      "AVID",
         "url":         "https://avidml.org/database/AVID-2026-R0057",
-        "atlas_technique": "AML.T0018.002 — Embed Malware",
+        "atlas_technique": "AML.T0018.002 - Embed Malware",
         "report_type": "Advisory",
         "ai_backdoor_relevant": True,
     },
@@ -155,7 +151,7 @@ AVID_BACKDOOR_ENTRIES = [
         "cvss_score":  9.8,
         "source":      "AVID",
         "url":         "https://avidml.org/database/AVID-2026-R0058",
-        "atlas_technique": "AML.T0049 — Exploit Public-Facing Application",
+        "atlas_technique": "AML.T0049 - Exploit Public-Facing Application",
         "report_type": "Advisory",
         "ai_backdoor_relevant": True,
     },
@@ -163,7 +159,7 @@ AVID_BACKDOOR_ENTRIES = [
 
 
 class AVIDLookupAgent:
-  
+
     def __init__(self, timeout: int = 15):
         self.timeout = timeout
         self._cache: Dict[str, List[Dict]] = {}
@@ -171,7 +167,6 @@ class AVIDLookupAgent:
     async def lookup(self, ai_fingerprint: Dict,
                      ml_stack: List[str],
                      verbose: bool = False) -> Dict:
-       
         if verbose:
             print(f"\n  AVID Lookup Agent")
             print(f"   ML Stack: {ml_stack[:5]}")
@@ -183,16 +178,13 @@ class AVIDLookupAgent:
             "sources_queried":   ["AVID (avidml.org)"],
         }
 
-        
         search_terms = self._build_search_terms(ml_stack, ai_fingerprint)
 
         if verbose:
             print(f"   Search terms: {search_terms[:5]}")
 
-      
         live_results = await self._query_avid_live(search_terms, verbose)
 
-       
         static_results = self._get_static_backdoor_entries(ml_stack, ai_fingerprint)
 
         all_results = live_results + static_results
@@ -207,7 +199,6 @@ class AVIDLookupAgent:
         severity_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Unknown": 4}
         deduped.sort(key=lambda x: severity_order.get(x.get("severity", "Unknown"), 4))
 
-        # Split into backdoor-relevant and general
         result["avid_findings"]     = deduped
         result["backdoor_relevant"] = [
             r for r in deduped if r.get("ai_backdoor_relevant")
@@ -220,37 +211,30 @@ class AVIDLookupAgent:
 
         return result
 
-
     def _build_search_terms(self, ml_stack: List[str],
                              ai_fingerprint: Dict) -> List[str]:
         terms = set()
 
-        # From ML libraries
         for lib in ml_stack:
             lib_lower = lib.lower()
             for key, search_list in LIBRARY_SEARCH_TERMS.items():
                 if key in lib_lower or lib_lower in key:
                     terms.update(search_list)
                     break
-            terms.add(lib_lower.split("/")[0]) 
+            terms.add(lib_lower.split("/")[0])
 
-        
         if ai_fingerprint.get("model_upload_endpoints"):
             terms.update(["pickle", "deserialization", "model loading"])
 
-       
         if ai_fingerprint.get("chat_components"):
             terms.update(["prompt injection", "llm", "jailbreak"])
 
-     
         terms.update(["backdoor", "model poisoning", "supply chain"])
 
-        return list(terms)[:10] 
-
+        return list(terms)[:10]
 
     async def _query_avid_live(self, search_terms: List[str],
                                 verbose: bool) -> List[Dict]:
-    
         results = []
 
         try:
@@ -261,7 +245,7 @@ class AVIDLookupAgent:
 
             if not html:
                 if verbose:
-                    print(" AVID live fetch failed — using cached entries")
+                    print(" AVID live fetch failed - using cached entries")
                 return results
 
             table_pattern = re.compile(
@@ -274,13 +258,11 @@ class AVIDLookupAgent:
                 url         = match.group(2).strip()
                 description = match.group(3).strip()
 
-                
                 desc_lower = description.lower()
                 relevant   = any(term.lower() in desc_lower
                                  for term in search_terms)
 
                 if relevant:
-                  
                     cve_match = re.search(r"CVE-\d{4}-\d+", description)
                     cve_id    = cve_match.group(0) if cve_match else None
 
@@ -306,12 +288,10 @@ class AVIDLookupAgent:
         except Exception as e:
             logger.warning(f"AVID live query failed: {e}")
 
-        return results[:20]  
-
+        return results[:20]
 
     def _get_static_backdoor_entries(self, ml_stack: List[str],
                                       ai_fingerprint: Dict) -> List[Dict]:
-   
         relevant = []
         stack_lower = " ".join(ml_stack).lower()
 
@@ -339,8 +319,6 @@ class AVIDLookupAgent:
 
         return relevant
 
-   
-
     def _infer_severity(self, text: str) -> str:
         text_lower = text.lower()
         if any(kw in text_lower for kw in
@@ -366,16 +344,16 @@ class AVIDLookupAgent:
     def _map_to_atlas(self, text: str) -> str:
         text_lower = text.lower()
         if "pickle" in text_lower or "deserializ" in text_lower:
-            return "AML.T0018.002 — Embed Malware"
+            return "AML.T0018.002 - Embed Malware"
         if "poison" in text_lower or "backdoor" in text_lower:
-            return "AML.T0018 — Backdoor ML Model"
+            return "AML.T0018 - Backdoor ML Model"
         if "supply chain" in text_lower:
-            return "AML.T0010 — ML Supply Chain Compromise"
+            return "AML.T0010 - ML Supply Chain Compromise"
         if "prompt injection" in text_lower:
-            return "AML.T0051 — LLM Prompt Injection"
+            return "AML.T0051 - LLM Prompt Injection"
         if "jailbreak" in text_lower:
-            return "AML.T0054 — LLM Jailbreak"
-        return "AML.T0019 — Exploit Software Dependencies"
+            return "AML.T0054 - LLM Jailbreak"
+        return "AML.T0019 - Exploit Software Dependencies"
 
     def _fetch_text(self, url: str) -> Optional[str]:
         try:

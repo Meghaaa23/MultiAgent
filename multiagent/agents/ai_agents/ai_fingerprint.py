@@ -1,75 +1,3 @@
-"""
-ai_fingerprint_agent.py  —  AI-application fingerprinting module.
-
-Architecture (paper §III-A):
-
-  Target URL
-      ↓
-  Passive collection (parallel)
-      ├── Homepage HTML
-      ├── robots.txt / sitemap.xml
-      ├── CSP header analysis
-      ├── Cookie inspection
-      ├── Meta-tag / favicon analysis
-      └── Response-header analysis
-      ↓
-  JS bundle analysis
-      ├── Extract <script src> from HTML
-      ├── Fetch bundles (capped at max_js_bundle_bytes)
-      ├── SDK signature matching
-      ├── fetch()/axios()/XHR/EventSource/WebSocket path extraction
-      └── Global variable / package.json hints
-      ↓
-  Schema discovery (parallel)
-      ├── OpenAPI / Swagger parsing
-      ├── GraphQL introspection probe
-      └── robots.txt → sitemap → link extraction
-      ↓
-  Active endpoint probing (ranked)
-      ├── JS-extracted paths first (highest prior)
-      ├── OpenAPI-discovered paths
-      ├── Ranked seed list (fallback)
-      └── Auth detection on 401/403
-      ↓
-  Behavioral probes
-      ├── "Hello" → LLM response heuristics
-      ├── "Repeat abc" → temperature / stochasticity signal
-      └── "What model are you?" → model self-report
-      ↓
-  Error-message fingerprinting (POST {} to AI paths)
-      ↓
-  Framework identification
-      ├── Signature library: Open WebUI, Flowise, Langflow, Dify,
-      │   AnythingLLM, LibreChat, Ollama, vLLM, TGI, LangGraph,
-      │   Haystack, OpenHands, AutoGen, CrewAI, LobeChat, OpenAI-compat
-      └── Infer capabilities from detected framework
-      ↓
-  Weighted evidence engine  →  0-100+ score  →  confidence band
-      ↓
-  Rich report: framework, inference server, model, capabilities,
-               auth requirements, ranked evidence table
-
-Design notes for the paper:
-  - Framework detection is the primary signal, not keyword matching.
-    Each framework has a multi-signal signature (headers, paths, JS globals,
-    body patterns, cookie names). Capability inference is derived from the
-    detected framework, not guessed from keywords.
-  - Evidence scoring is 0-100+ on a documented scale:
-      0-25:  None    26-50: Low    51-75: Medium
-      76-100: High   >100:  Very High
-  - Behavioral probes (item 11) are lightweight and stateless; they send
-    a "Hello" and "What model are you?" and classify the response. This
-    detects AI behavior even when all endpoints are obfuscated.
-  - GraphQL detection (item 6) covers agent platforms that expose their
-    API exclusively through GraphQL rather than REST.
-  - robots.txt / sitemap.xml parsing discovers endpoints the app itself
-    advertises, not endpoints we guess.
-  - Authentication is detected and reported; auth-gated endpoints are
-    reported as "discovered but not tested" rather than skipped silently.
-  - Recursive crawling belongs in web_scanner_agent.py; this agent does
-    single-depth link extraction from the homepage only.
-"""
-
 from __future__ import annotations
 
 import re
@@ -86,52 +14,20 @@ from typing import Dict, List, Optional, Set, Tuple
 logger = logging.getLogger(__name__)
 
 
-# ===========================================================================
-# §1  Evidence weights (0-100+ scale)
-# ---------------------------------------------------------------------------
-# Score bands:
-#   0-25    None      (no meaningful signal)
-#   26-50   Low       (weak signals, possible AI)
-#   51-75   Medium    (multiple consistent signals)
-#   76-100  High      (network-confirmed AI behavior)
-#   >100    Very High (schema + behavior + framework all confirmed)
-# ===========================================================================
-
-# ---------------------------------------------------------------------------
-# Evidence weights — calibrated so realistic detection scenarios score correctly.
-#
-# Calibration reference (from production output on Ollama at localhost:8024):
-#   - framework_identified (Ollama)         = 1 item
-#   - error_openai_format (2 endpoints)     = 2 items
-#   - ml_endpoint_200 (2 endpoints)         = 2 items
-#   Total = 5 evidence items → must score "high" (76+), not "low"
-#
-# Old weights: 20 + 9+9 + 6+6 = 50 → reported "low" (threshold 51 for medium)
-# New weights: ensure that combination reaches 76+.
-#
-# Principle: a confirmed framework match is the single strongest possible
-# signal — it means path + JS string + header + error-format all converged
-# on the same answer. Weight accordingly.
-# ---------------------------------------------------------------------------
 EVIDENCE_WEIGHTS: Dict[str, int] = {
-    # Schema-level proof
     "openapi_schema":           18,
     "openapi_ai_endpoint":      14,
     "graphql_schema":           14,
     "graphql_ai_field":         12,
 
-    # Framework identified — single strongest signal
-    # A framework match requires path + JS/header/cookie signals to converge.
     "framework_identified":     30,
     "framework_header":         15,
     "framework_cookie":         10,
 
-    # Behavioral probes (hard to fake, hard to hide)
     "behavior_llm_response":    22,
     "behavior_model_reported":  20,
     "behavior_streaming":       14,
 
-    # Network-confirmed endpoints
     "chat_endpoint_200":        14,
     "embedding_endpoint_200":   10,
     "tool_endpoint_200":        10,
@@ -139,9 +35,6 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
     "ml_endpoint_401_403":       6,
     "ml_endpoint_405":           5,
 
-    # Error-message fingerprinting
-    # These are particularly valuable: a 400 with {"error":{"type":...}}
-    # is definitive proof of the API protocol.
     "error_openai_format":      12,
     "error_missing_messages":   10,
     "error_missing_model":       8,
@@ -149,50 +42,26 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
     "error_huggingface_format":  7,
     "error_generic_validation":  4,
 
-    # SSE / streaming
     "sse_streaming_header":     10,
     "sse_chunked_transfer":      8,
     "sse_in_js":                 6,
     "websocket_ai_path":         6,
 
-    # Response headers
     "ai_response_header":        7,
 
-    # JS-bundle signals
     "js_ai_sdk":                 7,
     "js_api_path_extracted":     5,
 
-    # Passive / metadata
     "robots_ai_path":            5,
     "sitemap_ai_path":           4,
     "csp_ai_domain":             6,
     "meta_ai_tag":               4,
     "favicon_known_framework":   5,
 
-    # DOM / HTML (lowest)
     "dom_assistant_role":        3,
     "html_ai_form":              3,
 }
 
-# Confidence bands — calibrated against the weight table above.
-# Reference scores for common detection scenarios:
-#   Bare inference server (Ollama, no HTML):
-#     framework(30) + 2×error_openai(12) + 2×ml_200(8) = 70  → "medium"
-#     + behavioral probe(22) = 92  → "high"
-#   Full SPA with JS + OpenAPI + framework:
-#     framework(30) + openapi(18) + openapi_ai(14) + js_sdk(7) = 69 → "medium"
-#     + behavior(22) = 91 → "high"
-#   Only a couple of 200s, no framework match:
-#     2×ml_200(8) = 16 → "none"  (correct: not enough to claim AI)
-#     + error_openai(12) + sse(10) = 38 → "low"
-# Confidence bands — calibrated against concrete detection scenarios:
-#
-#   "none"   ( < 20): only 1-2 weak signals (2 ml_200 = 16)
-#   "low"    (20-39): a few signals but no framework match
-#   "medium" (40-64): multiple consistent signals OR framework without behavior
-#   "high"   (65-99): framework + network confirmation (Ollama bare = 70)
-#   "very_high"(100+): framework + behavior + schema all confirmed (= 84+)
-#
 CONFIDENCE_BANDS = [
     (100, "very_high"),
     ( 65, "high"),
@@ -208,14 +77,6 @@ def score_to_confidence(score: int) -> str:
             return label
     return "none"
 
-
-# ===========================================================================
-# §2  Framework signature library
-# ---------------------------------------------------------------------------
-# Each entry: name → {signals}
-# Signals checked: headers, paths, js_globals, js_strings, cookie_names,
-#                  body_patterns, favicon_hash, capabilities_implied
-# ===========================================================================
 
 FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
     "Open WebUI": {
@@ -286,11 +147,12 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
         "capabilities": ["rag", "chat", "tool_calling"],
     },
     "Ollama": {
-        "paths":       ["/api/chat", "/api/generate", "/api/tags", "/api/version"],
+        "paths":       ["/api/chat", "/api/generate", "/api/tags", "/api/version",
+                        "/api/show", "/api/pull", "/api/delete", "/api/copy"],
         "headers":     {"x-ollama-version": None},
         "js_strings":  ["ollama", "Ollama"],
         "body_patterns": [r'"done_reason"', r'"total_duration"', r'"eval_count"'],
-        "capabilities": ["chat", "code_execution", "embedding"],
+        "capabilities": ["chat", "embedding"],
     },
     "vLLM": {
         "paths":       ["/v1/chat/completions", "/v1/completions", "/v1/models"],
@@ -313,7 +175,6 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
     },
 }
 
-# Known model names for self-report behavioral probe
 MODEL_NAME_PATTERNS = [
     r'\b(gpt-?4|gpt-?3\.5|gpt-?4o)\b',
     r'\b(claude-?3|claude-?3\.5|claude-?sonnet|claude-?opus|claude-?haiku)\b',
@@ -326,7 +187,6 @@ MODEL_NAME_PATTERNS = [
     r'\b(command-?r)\b',
 ]
 
-# Capability inference for extended capability set (item 13)
 EXTENDED_CAPABILITIES = [
     "chat", "rag", "tool_calling", "memory", "code_execution",
     "email_send", "web_search", "browser", "sql", "filesystem",
@@ -336,7 +196,6 @@ EXTENDED_CAPABILITIES = [
     "cloud", "image_input",
 ]
 
-# AI response body patterns
 AI_RESPONSE_BODY_PATTERNS = [
     r'"choices"\s*:\s*\[',
     r'"prompt_tokens"\s*:',
@@ -366,7 +225,6 @@ AI_RESPONSE_BODY_PATTERNS = [
     r'"generated_text"\s*:',
 ]
 
-# LLM response heuristics for behavioral probe
 LLM_RESPONSE_SIGNALS = [
     r"\bI\s+(?:am|can|will|don'?t|cannot|understand)\b",
     r"\bAs\s+an?\s+(?:AI|assistant|language model)\b",
@@ -376,7 +234,6 @@ LLM_RESPONSE_SIGNALS = [
     r"\bIs\s+there\s+anything\b",
 ]
 
-# Error fingerprints
 ERROR_FINGERPRINTS: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r'"error"\s*:\s*\{.*?"type"\s*:', re.S),
      "error_openai_format", "OpenAI-compatible"),
@@ -399,14 +256,12 @@ AI_RESPONSE_HEADERS = [
     "x-ollama-version",
 ]
 
-# CSP domains that indicate AI API usage
 AI_CSP_DOMAINS = [
     "api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com",
     "api.cohere.ai", "api.mistral.ai", "api.groq.com", "api.together.xyz",
     "api.replicate.com", "api.perplexity.ai", "api.huggingface.co",
 ]
 
-# JS SDK signatures
 ML_LIBRARY_JS_SIGNATURES: Dict[str, List[str]] = {
     "OpenAI JS SDK":    ["openai.min.js", "from 'openai'", 'from "openai"', "new OpenAI("],
     "Anthropic JS SDK": ["@anthropic-ai/sdk", "new Anthropic("],
@@ -421,7 +276,6 @@ ML_LIBRARY_JS_SIGNATURES: Dict[str, List[str]] = {
     "Vercel AI SDK":    ["ai/react", "useChat(", "useCompletion("],
 }
 
-# Ranked seed endpoints
 SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
     ("/openapi.json",         "schema"),
     ("/swagger.json",         "schema"),
@@ -468,25 +322,21 @@ AI_DOM_PATTERNS = [
 ]
 
 ATLAS_TECHNIQUE_MAP = {
-    "chat":      "AML.T0051 — LLM Prompt Injection",
-    "ml":        "AML.T0043 — Craft Adversarial Data",
-    "schema":    "AML.T0063 — Discover AI Model Outputs",
-    "upload":    "AML.T0018.002 — Embed Malware via Model Upload",
-    "embedding": "AML.T0043 — Craft Adversarial Data",
-    "graphql":   "AML.T0051 — LLM Prompt Injection",
+    "chat":      "AML.T0051 - LLM Prompt Injection",
+    "ml":        "AML.T0043 - Craft Adversarial Data",
+    "schema":    "AML.T0063 - Discover AI Model Outputs",
+    "upload":    "AML.T0018.002 - Embed Malware via Model Upload",
+    "embedding": "AML.T0043 - Craft Adversarial Data",
+    "graphql":   "AML.T0051 - LLM Prompt Injection",
 }
 
-
-# ===========================================================================
-# §3  Data classes
-# ===========================================================================
 
 @dataclass
 class EvidenceItem:
     key:       str
     detail:    str
     weight:    int
-    source:    str     # "html"|"js_bundle"|"openapi"|"graphql"|"probe"|"header"|"behavior"|"passive"
+    source:    str
     endpoint:  str = ""
     framework: str = ""
 
@@ -502,61 +352,117 @@ class EvidenceItem:
 
 @dataclass
 class AuthSignal:
-    """Records authentication requirement discovered on an endpoint."""
     endpoint:    str
-    auth_type:   str   # "bearer" | "api_key" | "cookie" | "basic" | "unknown"
+    auth_type:   str
     status_code: int
     detail:      str
 
 
+ENDPOINT_TYPE_RULES: List[Tuple[re.Pattern, str, str]] = [
+    (re.compile(r"/(chat|completions|generate|messages|ask|conversation)", re.I), "inference",  "critical"),
+    (re.compile(r"/(embed|embedding)", re.I),                                      "embedding",  "high"),
+    (re.compile(r"/(pull|push|delete|copy|create|import)", re.I),                  "management", "critical"),
+    (re.compile(r"/(model|models|tags|version|health|info|config)", re.I),         "metadata",   "medium"),
+    (re.compile(r"/(tool|function|plugin|action|execute|run)", re.I),              "tool",       "high"),
+    (re.compile(r"/(memory|store|recall|history)", re.I),                          "memory",     "high"),
+    (re.compile(r"/(search|retrieve|vector|rag)", re.I),                           "retrieval",  "high"),
+    (re.compile(r"/(agent|orchestrat|workflow|plan)", re.I),                       "agentic",    "high"),
+    (re.compile(r"/(upload|file|image|audio|vision)", re.I),                       "multimodal", "medium"),
+    (re.compile(r"/(graphql|query)", re.I),                                        "graphql",    "high"),
+    (re.compile(r"/(openapi|swagger|docs|schema)", re.I),                          "schema",     "low"),
+]
+
+
+@dataclass
+class EndpointRecord:
+    url:           str
+    path:          str
+    endpoint_type: str
+    risk:          str
+    auth_required: bool = False
+    auth_type:     str  = ""
+    status_code:   int  = 200
+    verified:      bool = True
+
+
+def classify_endpoint(url: str, auth_signals: List[AuthSignal] = None) -> EndpointRecord:
+    path = urllib.parse.urlparse(url).path
+    ep_type = "unknown"
+    risk    = "low"
+    for pattern, t, r in ENDPOINT_TYPE_RULES:
+        if pattern.search(path):
+            ep_type = t
+            risk    = r
+            break
+
+    auth_required = False
+    auth_type     = ""
+    for sig in (auth_signals or []):
+        if sig.endpoint == url:
+            auth_required = True
+            auth_type     = sig.auth_type
+            break
+
+    return EndpointRecord(
+        url=url, path=path,
+        endpoint_type=ep_type, risk=risk,
+        auth_required=auth_required, auth_type=auth_type,
+    )
+
+
 @dataclass
 class FingerprintReport:
-    """
-    Structured fingerprint result.
-    Paper-accurate naming: framework is what was detected; capabilities are
-    inferred from the framework, not guessed independently.
-    """
-    # Identification
     is_ai_powered:    bool
     confidence:       str
     evidence_score:   int
 
-    # Framework / protocol
-    framework:        str = ""  # primary detected framework (Ollama, Flowise, etc.)
-    protocol:         str = ""  # wire protocol (OpenAI-compatible, TGI, Triton, etc.)
-    inference_server: str = ""  # inference backend when distinct from framework
-    model_reported:   str = ""  # model self-report from behavioral probe
+    framework:            str   = ""
+    framework_confidence: float = 0.0
+    framework_signals:    List[str] = field(default_factory=list)
+    protocol:             str   = ""
+    inference_server:     str   = ""
+    model_reported:       str   = ""
 
-    # Capabilities
-    capabilities:     List[str] = field(default_factory=list)
+    infra_layer: str = ""
+    app_layer:   str = ""
 
-    # Endpoints
-    ml_endpoints:        List[str] = field(default_factory=list)
-    discovered_paths:    List[str] = field(default_factory=list)
-    auth_required_paths: List[AuthSignal] = field(default_factory=list)
+    capabilities:  List[str] = field(default_factory=list)
 
-    # Signals
+    ml_endpoints:           List[str]         = field(default_factory=list)
+    classified_endpoints:   List[EndpointRecord] = field(default_factory=list)
+    discovered_paths:       List[str]         = field(default_factory=list)
+    auth_required_paths:    List[AuthSignal]  = field(default_factory=list)
+
     frameworks_detected: List[str] = field(default_factory=list)
     openapi_schema:      Dict       = field(default_factory=dict)
     graphql_types:       List[str]  = field(default_factory=list)
     technologies:        List[str]  = field(default_factory=list)
+    deployment_signals:  Dict       = field(default_factory=dict)
 
-    # Evidence
     evidence_items:   List[EvidenceItem] = field(default_factory=list)
     atlas_techniques: List[str]          = field(default_factory=list)
 
     def to_dict(self) -> Dict:
-        """Serialize to dict compatible with ai_vulnerability_tester.py."""
         return {
-            "is_ai_powered":    self.is_ai_powered,
-            "confidence":       self.confidence,
-            "evidence_score":   self.evidence_score,
-            "framework":        self.framework,
-            "protocol":         self.protocol,
-            "inference_server": self.inference_server,
-            "model_reported":   self.model_reported,
-            "capabilities":     self.capabilities,
-            "ml_endpoints":     self.ml_endpoints,
+            "is_ai_powered":          self.is_ai_powered,
+            "confidence":             self.confidence,
+            "evidence_score":         self.evidence_score,
+            "framework":              self.framework,
+            "framework_confidence":   round(self.framework_confidence * 100, 1),
+            "framework_signals":      self.framework_signals,
+            "protocol":               self.protocol,
+            "inference_server":       self.inference_server,
+            "infra_layer":            self.infra_layer,
+            "app_layer":              self.app_layer,
+            "model_reported":         self.model_reported,
+            "capabilities":           self.capabilities,
+            "ml_endpoints":           self.ml_endpoints,
+            "classified_endpoints": [
+                {"url": e.url, "path": e.path, "type": e.endpoint_type,
+                 "risk": e.risk, "auth_required": e.auth_required,
+                 "auth_type": e.auth_type}
+                for e in self.classified_endpoints
+            ],
             "discovered_paths": self.discovered_paths,
             "auth_required_paths": [
                 {"endpoint": a.endpoint, "auth_type": a.auth_type,
@@ -564,17 +470,16 @@ class FingerprintReport:
                 for a in self.auth_required_paths
             ],
             "frameworks_detected": self.frameworks_detected,
-            "openapi_schema":   self.openapi_schema,
-            "graphql_types":    self.graphql_types,
-            # Keys expected by ai_vulnerability_tester.detect_capabilities()
-            "page_title":       "",
-            "technologies":     self.technologies,
-            "api_schema":       {"tools": [], "openapi": self.openapi_schema},
-            "app_description":  "",
-            "response_headers": {},
-            "chat_components":  [],
-            # Evidence for reporting
-            "atlas_techniques": self.atlas_techniques,
+            "openapi_schema":      self.openapi_schema,
+            "graphql_types":       self.graphql_types,
+            "deployment_signals":  self.deployment_signals,
+            "page_title":          "",
+            "technologies":        self.technologies,
+            "api_schema":          {"tools": [], "openapi": self.openapi_schema},
+            "app_description":     "",
+            "response_headers":    {},
+            "chat_components":     [],
+            "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
                  "source": e.source, "endpoint": e.endpoint, "framework": e.framework}
@@ -583,69 +488,44 @@ class FingerprintReport:
         }
 
     def print_report(self) -> None:
-        """Print a human-readable report for analysts (item 18)."""
-        print(f"\n{'='*60}")
+        w = 62
+        print(f"\n{'='*w}")
         print(f"  AI Fingerprint Report")
-        print(f"{'='*60}")
-        print(f"  Confidence   : {self.confidence.upper()} (score={self.evidence_score})")
-        print(f"  Framework    : {self.framework or 'Unknown'}")
-        if self.protocol and self.protocol != self.framework:
-            print(f"  Protocol     : {self.protocol}")
-        if self.inference_server and self.inference_server != self.framework:
-            print(f"  Inference    : {self.inference_server}")
+        print(f"{'='*w}")
+        print(f"  Confidence       : {self.confidence.upper()} (score={self.evidence_score})")
+        if self.framework:
+            pct = f"{self.framework_confidence*100:.0f}%"
+            print(f"  Framework        : {self.framework}  (confidence {pct})")
+            if self.framework_signals:
+                print(f"  Matched signals  : {', '.join(self.framework_signals)}")
+        if self.protocol:
+            print(f"  Protocol         : {self.protocol}")
+        if self.infra_layer and self.infra_layer != self.framework:
+            print(f"  Infra layer      : {self.infra_layer}")
+        if self.app_layer:
+            print(f"  App layer        : {self.app_layer}")
         if self.model_reported:
-            print(f"  Model        : {self.model_reported}")
+            print(f"  Model            : {self.model_reported}")
         if self.capabilities:
-            print(f"  Capabilities : {', '.join(self.capabilities)}")
-        if self.ml_endpoints:
-            print(f"  AI Endpoints : {len(self.ml_endpoints)}")
-            for ep in self.ml_endpoints[:5]:
-                print(f"      {ep}")
+            print(f"  Capabilities     : {', '.join(self.capabilities)}")
+        if self.classified_endpoints:
+            print(f"  Endpoints ({len(self.classified_endpoints)}):")
+            risk_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
+            for ep in sorted(self.classified_endpoints,
+                             key=lambda e: risk_order.get(e.risk, 9)):
+                auth_tag = f" [{ep.auth_type}]" if ep.auth_required else " [no auth]"
+                print(f"    [{ep.risk.upper():8s}] {ep.endpoint_type:12s} {ep.path}{auth_tag}")
         if self.auth_required_paths:
-            print(f"  Auth-gated   : {len(self.auth_required_paths)} endpoint(s) "
-                  f"(not tested)")
-            for a in self.auth_required_paths[:3]:
-                print(f"      {a.endpoint}  [{a.auth_type}]")
+            print(f"  Auth-gated       : {len(self.auth_required_paths)} endpoint(s) (not tested)")
+        if self.deployment_signals:
+            print(f"  Deployment       : {self.deployment_signals}")
         print(f"\n  Evidence (top 8):")
         for ev in sorted(self.evidence_items, key=lambda x: x.weight, reverse=True)[:8]:
-            print(f"      +{ev.weight:3d}  [{ev.source:10s}]  {ev.detail[:65]}")
-        print(f"{'='*60}\n")
+            print(f"    +{ev.weight:3d}  [{ev.source:10s}]  {ev.detail[:60]}")
+        print(f"{'='*w}\n")
 
-
-# ===========================================================================
-# §4  Main agent
-# ===========================================================================
 
 class AIFingerprintAgent:
-    """
-    AI-application fingerprinting agent.
-
-    Pipeline stages (all network-bound stages run in parallel):
-      1.  Fetch homepage + robots.txt + sitemap.xml (if not provided)
-      2.  Passive HTML analysis: DOM, meta, favicon, links, CSP
-      3.  JS bundle fetch + analysis
-      4.  OpenAPI/Swagger probe
-      5.  GraphQL detection
-      6.  Ranked endpoint probing (JS-extracted > schema > seed)
-      7.  Error-message fingerprinting
-      8.  Behavioral probes: "Hello", "Repeat abc", "What model are you?"
-      9.  Response-header + cookie analysis
-      10. Framework identification from aggregated signals
-      11. Capability inference from framework
-      12. Weighted evidence aggregation → FingerprintReport
-
-    Parameters
-    ----------
-    timeout : int
-        Per-request timeout in seconds.
-    max_js_bundles : int
-        Max JS bundles to fetch and analyse per target.
-    max_js_bundle_bytes : int
-        Max bytes read per JS bundle (avoids 10 MB vendor bundles).
-    run_behavioral_probes : bool
-        Whether to send "Hello" / model-name probes. Adds 2-3 requests.
-        Disable for pure passive fingerprinting.
-    """
 
     def __init__(
         self,
@@ -659,10 +539,6 @@ class AIFingerprintAgent:
         self.max_js_bundle_bytes   = max_js_bundle_bytes
         self.run_behavioral_probes = run_behavioral_probes
 
-    # -------------------------------------------------------------------------
-    # Public entry point
-    # -------------------------------------------------------------------------
-
     async def fingerprint(
         self,
         target_url: str,
@@ -671,17 +547,12 @@ class AIFingerprintAgent:
         response_headers: Dict = None,
         verbose: bool = False,
     ) -> Dict:
-        """Run the full fingerprinting pipeline and return a serialized dict."""
         report = await self._fingerprint_internal(
             target_url, discovered_endpoints or [],
             page_html, response_headers or {}, verbose)
         if verbose:
             report.print_report()
         return report.to_dict()
-
-    # -------------------------------------------------------------------------
-    # Internal pipeline
-    # -------------------------------------------------------------------------
 
     async def _fingerprint_internal(
         self,
@@ -693,17 +564,14 @@ class AIFingerprintAgent:
     ) -> FingerprintReport:
         base = target_url.rstrip("/")
 
-        # Stage 1 — fetch homepage + robots/sitemap if not provided
         if not page_html:
             _, page_headers, page_html = self._fetch(base)
             if not response_headers:
                 response_headers = page_headers
 
-        # Stage 2 — passive HTML analysis (no network)
         js_urls, html_evidence, extracted_links = self._analyse_html(
             page_html, base, response_headers)
 
-        # Stages 3-9 run in parallel
         parallel = await asyncio.gather(
             self._fetch_and_analyse_js(js_urls, base, verbose),
             self._probe_openapi(base, verbose),
@@ -716,7 +584,6 @@ class AIFingerprintAgent:
         )
         js_r, openapi_r, graphql_r, passive_r, probe_r, header_r = parallel
 
-        # Collect all evidence
         all_evidence: List[EvidenceItem] = list(html_evidence)
         ml_endpoints:    List[str]  = []
         discovered_paths: List[str] = []
@@ -726,10 +593,6 @@ class AIFingerprintAgent:
         graphql_types:   List[str]  = []
         js_api_paths:    List[str]  = []
         raw_html_js = ""
-
-        def _collect(r, attr, target):
-            if isinstance(r, dict):
-                target.extend(r.get(attr, []))
 
         for r in [js_r, openapi_r, graphql_r, passive_r, probe_r, header_r]:
             if isinstance(r, dict):
@@ -752,7 +615,6 @@ class AIFingerprintAgent:
         if isinstance(passive_r, dict):
             discovered_paths.extend(passive_r.get("paths", []))
 
-        # Stage 8 — behavioral probes (on confirmed or likely AI endpoints)
         behav_r = None
         probe_targets = (ml_endpoints or [base + p for p, _ in SEED_ENDPOINT_RANKING
                                           if "chat" in _ or _ == "ml"])
@@ -760,29 +622,23 @@ class AIFingerprintAgent:
             behav_r = await self._behavioral_probes(probe_targets[:2], verbose)
             if isinstance(behav_r, dict):
                 all_evidence.extend(behav_r.get("evidence", []))
-                if behav_r.get("model_reported"):
-                    pass  # stored in behav_r
 
-        # Also probe JS-extracted paths not yet confirmed
         if js_api_paths:
             extra = await self._confirm_js_paths(base, js_api_paths, verbose)
             if isinstance(extra, dict):
                 all_evidence.extend(extra.get("evidence", []))
                 ml_endpoints.extend(extra.get("endpoints", []))
 
-        # Include upstream-discovered endpoints
         if discovered_endpoints:
             disc_r = await self._check_discovered_endpoints(discovered_endpoints)
             if isinstance(disc_r, dict):
                 all_evidence.extend(disc_r.get("evidence", []))
                 ml_endpoints.extend(disc_r.get("endpoints", []))
 
-        # Deduplicate
         ml_endpoints     = list(dict.fromkeys(ml_endpoints))
         discovered_paths = list(dict.fromkeys(discovered_paths))
         all_frameworks   = list(dict.fromkeys(all_frameworks))
 
-        # Stage 10 — framework identification
         framework_result = self._identify_framework(
             page_html, raw_html_js, response_headers,
             ml_endpoints + discovered_paths, all_evidence)
@@ -792,18 +648,17 @@ class AIFingerprintAgent:
         detected_infra       = framework_result.get("inference_server", "")
         if detected_framework and detected_framework not in all_frameworks:
             all_frameworks.insert(0, detected_framework)
+        if detected_protocol and detected_protocol not in all_frameworks:
+            all_frameworks.append(detected_protocol)
 
-        # Stage 11 — capability inference
         capabilities = self._infer_capabilities(
             detected_framework, all_frameworks, openapi_schema,
             ml_endpoints, graphql_types)
 
-        # Stage 12 — scoring
         total_score = sum(ev.weight for ev in all_evidence)
         confidence  = score_to_confidence(total_score)
-        is_ai       = total_score >= 26  # "low" threshold
+        is_ai       = total_score >= 26
 
-        # ATLAS
         atlas: List[str] = []
         for ep in ml_endpoints:
             path = urllib.parse.urlparse(ep).path.lower()
@@ -823,37 +678,56 @@ class AIFingerprintAgent:
         if isinstance(behav_r, dict):
             model_reported = behav_r.get("model_reported", "")
 
-        return FingerprintReport(
-            is_ai_powered       = is_ai,
-            confidence          = confidence,
-            evidence_score      = total_score,
-            framework           = detected_framework,
-            protocol            = detected_protocol,
-            inference_server    = detected_infra,
-            model_reported      = model_reported,
-            capabilities        = capabilities,
-            ml_endpoints        = ml_endpoints,
-            discovered_paths    = discovered_paths,
-            auth_required_paths = auth_signals,
-            frameworks_detected = all_frameworks,
-            openapi_schema      = openapi_schema,
-            graphql_types       = graphql_types,
-            technologies        = all_frameworks,
-            evidence_items      = all_evidence,
-            atlas_techniques    = atlas,
-        )
+        classified = [
+            classify_endpoint(ep, auth_signals)
+            for ep in ml_endpoints
+        ]
 
-    # =========================================================================
-    # §5  Passive HTML analysis
-    # =========================================================================
+        deployment = {}
+        for ev in all_evidence:
+            if ev.source == "header" and "framework" in ev.key:
+                deployment["server_header"] = ev.detail
+            if "docker" in ev.detail.lower() or "container" in ev.detail.lower():
+                deployment["containerized"] = True
+        if auth_signals:
+            deployment["authentication"] = list({a.auth_type for a in auth_signals})
+        else:
+            deployment["authentication"] = ["none"]
+
+        INFRA_FRAMEWORKS = {"Ollama", "vLLM", "TGI (HuggingFace)", "OpenAI-compatible",
+                            "Triton", "TorchServe", "SageMaker"}
+        infra_layer = detected_framework if detected_framework in INFRA_FRAMEWORKS else detected_infra
+        app_layer   = detected_framework if detected_framework not in INFRA_FRAMEWORKS else ""
+
+        return FingerprintReport(
+            is_ai_powered         = is_ai,
+            confidence            = confidence,
+            evidence_score        = total_score,
+            framework             = detected_framework,
+            framework_confidence  = framework_result.get("framework_confidence", 0.0),
+            framework_signals     = framework_result.get("framework_signals", []),
+            protocol              = detected_protocol,
+            inference_server      = detected_infra,
+            infra_layer           = infra_layer,
+            app_layer             = app_layer,
+            model_reported        = model_reported,
+            capabilities          = capabilities,
+            ml_endpoints          = ml_endpoints,
+            classified_endpoints  = classified,
+            discovered_paths      = discovered_paths,
+            auth_required_paths   = auth_signals,
+            frameworks_detected   = all_frameworks,
+            openapi_schema        = openapi_schema,
+            graphql_types         = graphql_types,
+            technologies          = all_frameworks,
+            deployment_signals    = deployment,
+            evidence_items        = all_evidence,
+            atlas_techniques      = atlas,
+        )
 
     def _analyse_html(
         self, html: str, base: str, headers: Dict
     ) -> Tuple[List[str], List[EvidenceItem], List[str]]:
-        """
-        Extract JS bundle URLs, DOM evidence, and page-internal links.
-        No network I/O.
-        """
         evidence: List[EvidenceItem] = []
         js_urls:  List[str]          = []
         links:    List[str]          = []
@@ -861,7 +735,6 @@ class AIFingerprintAgent:
         if not html:
             return js_urls, evidence, links
 
-        # JS bundle URLs
         for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I):
             src = m.group(1)
             if not src.startswith("http"):
@@ -872,20 +745,17 @@ class AIFingerprintAgent:
             ]):
                 js_urls.append(src)
 
-        # Meta tags
         for m in re.finditer(r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant)[^"\']*)["\']',
                              html, re.I):
             evidence.append(EvidenceItem.make(
                 "meta_ai_tag", f"AI meta tag: {m.group(1)[:60]}", "html"))
 
-        # DOM AI patterns
         for pattern in AI_DOM_PATTERNS:
             m = re.search(pattern, html, re.I)
             if m:
                 ev_key = "html_ai_form" if "form" in pattern else "dom_assistant_role"
                 evidence.append(EvidenceItem.make(ev_key, m.group(0)[:60], "html"))
 
-        # Internal links (for shallow link extraction)
         for m in re.finditer(r'href=["\']([^"\'#?]+)["\']', html, re.I):
             href = m.group(1)
             if href.startswith("/") and any(
@@ -896,10 +766,8 @@ class AIFingerprintAgent:
             ):
                 links.append(href)
 
-        # CSP analysis
         csp_header = headers.get("Content-Security-Policy", "")
         if not csp_header:
-            # Also check in HTML <meta http-equiv="Content-Security-Policy">
             m = re.search(r'<meta[^>]+content=["\']([^"\']*connect-src[^"\']*)["\']',
                           html, re.I)
             if m:
@@ -912,10 +780,6 @@ class AIFingerprintAgent:
                         f"CSP connect-src includes {domain}", "passive"))
 
         return list(dict.fromkeys(js_urls)), evidence, list(dict.fromkeys(links))
-
-    # =========================================================================
-    # §6  JS bundle analysis
-    # =========================================================================
 
     async def _fetch_and_analyse_js(
         self, js_urls: List[str], base: str, verbose: bool
@@ -949,12 +813,11 @@ class AIFingerprintAgent:
             if not js:
                 continue
             processed += 1
-            raw_js_combined += js[:50_000]  # cap per-bundle contribution
+            raw_js_combined += js[:50_000]
 
             if verbose:
                 print(f"    [js] {url[-60:]} ({len(js)} bytes)")
 
-            # SDK detection
             for sdk_name, patterns in ML_LIBRARY_JS_SIGNATURES.items():
                 for pat in patterns:
                     if pat.lower() in js.lower():
@@ -964,7 +827,6 @@ class AIFingerprintAgent:
                         frameworks.append(sdk_name)
                         break
 
-            # API path extraction
             extracted = self._extract_api_paths_from_js(js)
             api_paths.extend(extracted)
             if extracted:
@@ -973,7 +835,6 @@ class AIFingerprintAgent:
                     f"{len(extracted)} AI API path(s) in JS bundle",
                     "js_bundle", endpoint=url))
 
-            # EventSource
             for m in re.finditer(
                 r'new\s+EventSource\s*\(\s*["\`]([^"\'`]+)["\`]', js, re.I):
                 path = m.group(1).split("${")[0]
@@ -983,7 +844,6 @@ class AIFingerprintAgent:
                         "js_bundle", endpoint=url))
                     api_paths.append(path)
 
-            # WebSocket
             for m in re.finditer(
                 r'new\s+WebSocket\s*\(\s*["\`]([^"\'`]+)["\`]', js, re.I):
                 path = m.group(1)
@@ -992,12 +852,11 @@ class AIFingerprintAgent:
                         "websocket_ai_path", f"WebSocket({path[:50]})",
                         "js_bundle", endpoint=url))
 
-            # JS globals indicating known frameworks
             for fw_name, sig in FRAMEWORK_SIGNATURES.items():
                 for gs in sig.get("js_globals", []):
                     if gs in js:
                         evidence.append(EvidenceItem.make(
-                            "js_ai_sdk", f"JS global {gs} → {fw_name}",
+                            "js_ai_sdk", f"JS global {gs} -> {fw_name}",
                             "js_bundle", framework=fw_name))
                         frameworks.append(fw_name)
 
@@ -1034,10 +893,6 @@ class AIFingerprintAgent:
             "/v1/", "/api/", "/llm", "/ai/", "/messages",
             "/runs", "/threads", "/assistants",
         ])
-
-    # =========================================================================
-    # §7  OpenAPI / Swagger parsing
-    # =========================================================================
 
     async def _probe_openapi(self, base: str, verbose: bool) -> Dict:
         evidence:     List[EvidenceItem] = []
@@ -1123,10 +978,6 @@ class AIFingerprintAgent:
             result["paths"] = paths
         return result if result else None
 
-    # =========================================================================
-    # §8  GraphQL detection (item 6)
-    # =========================================================================
-
     async def _probe_graphql(self, base: str, verbose: bool) -> Dict:
         evidence: List[EvidenceItem] = []
         endpoints: List[str]         = []
@@ -1157,7 +1008,6 @@ class AIFingerprintAgent:
                 except Exception:
                     continue
 
-                # Successful introspection
                 schema_data = data.get("data", {})
                 if schema_data and "__schema" in schema_data:
                     evidence.append(EvidenceItem.make(
@@ -1165,7 +1015,6 @@ class AIFingerprintAgent:
                         f"GraphQL introspection at {path}",
                         "graphql", endpoint=url))
                     endpoints.append(url)
-                    # Extract type names for AI-capability hints
                     gql_types = [
                         t.get("name", "") for t in
                         schema_data.get("__schema", {}).get("types", [])
@@ -1187,7 +1036,6 @@ class AIFingerprintAgent:
                               f"ai={ai_types[:3]}")
                     break
 
-                # GraphQL endpoint exists but rejected introspection
                 if status == 400 and "errors" in body.lower():
                     evidence.append(EvidenceItem.make(
                         "graphql_schema",
@@ -1201,16 +1049,11 @@ class AIFingerprintAgent:
 
         return {"evidence": evidence, "endpoints": endpoints, "types": types}
 
-    # =========================================================================
-    # §9  Passive: robots.txt + sitemap.xml
-    # =========================================================================
-
     async def _fetch_robots_sitemap(self, base: str, verbose: bool) -> Dict:
         evidence: List[EvidenceItem] = []
         paths:    List[str]          = []
         loop = asyncio.get_event_loop()
 
-        # robots.txt
         try:
             _, _, body = await loop.run_in_executor(
                 None, lambda: self._fetch(base + "/robots.txt"))
@@ -1225,7 +1068,6 @@ class AIFingerprintAgent:
                                 f"robots.txt {line[:60]}",
                                 "passive"))
                             paths.append(path)
-                    # Sitemap URL
                     if line.lower().startswith("sitemap:"):
                         sitemap_url = line.split(":", 1)[1].strip()
                         try:
@@ -1247,10 +1089,6 @@ class AIFingerprintAgent:
 
         return {"evidence": evidence, "paths": list(dict.fromkeys(paths))}
 
-    # =========================================================================
-    # §10  Ranked endpoint probing + auth detection
-    # =========================================================================
-
     async def _probe_ranked_endpoints(
         self, base: str, extra_paths: List[str], verbose: bool
     ) -> Dict:
@@ -1261,7 +1099,6 @@ class AIFingerprintAgent:
         loop = asyncio.get_event_loop()
         confirmed = 0
 
-        # Build ordered probe list: schema → chat → embedding → ml
         ordered = (
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "schema"] +
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "chat"] +
@@ -1271,11 +1108,9 @@ class AIFingerprintAgent:
         async def probe(path: str, category: str):
             url = base + path
             try:
-                # GET first
                 status, resp_headers, body = await loop.run_in_executor(
                     None, lambda: self._fetch(url))
-                if status == 405:
-                    # Try POST with empty body
+                if status in (404, 405) and category in ("chat", "embedding", "ml", "graphql"):
                     status, resp_headers, body = await loop.run_in_executor(
                         None, lambda: self._fetch(url, data=b"{}", method="POST"))
                 return self._evaluate_probe_response(
@@ -1284,7 +1119,6 @@ class AIFingerprintAgent:
             except Exception:
                 return None
 
-        # Probe schema paths in parallel
         schema_paths = [(p, c) for p, c in ordered if c == "schema"]
         schema_results = await asyncio.gather(
             *[probe(p, c) for p, c in schema_paths], return_exceptions=True)
@@ -1295,18 +1129,18 @@ class AIFingerprintAgent:
                 frameworks.extend(r.get("frameworks", []))
                 confirmed += len(r.get("endpoints", []))
 
-        # Probe remaining sequentially; stop when well-confirmed
         for path, category in ordered:
-            if confirmed >= 4:
+            if confirmed >= 6:
                 break
             if category == "schema":
-                continue  # already done above
+                continue
             r = await probe(path, category)
             if isinstance(r, dict) and r:
                 evidence.extend(r.get("evidence", []))
-                if r.get("endpoints"):
-                    endpoints.extend(r["endpoints"])
-                    confirmed += len(r["endpoints"])
+                new_eps = r.get("endpoints", [])
+                if new_eps:
+                    endpoints.extend(new_eps)
+                    confirmed += len(new_eps)
                 frameworks.extend(r.get("frameworks", []))
 
         return {
@@ -1337,7 +1171,6 @@ class AIFingerprintAgent:
         ct = headers_low.get("content-type", "")
         body_l = (body or "").lower()
 
-        # 200 + AI body
         if status == 200 and body:
             if "json" in ct and any(re.search(p, body, re.I)
                                     for p in AI_RESPONSE_BODY_PATTERNS):
@@ -1349,7 +1182,6 @@ class AIFingerprintAgent:
                     "probe", endpoint=url))
                 endpoints.append(url)
 
-            # SSE streaming
             if "text/event-stream" in ct:
                 evidence.append(EvidenceItem.make(
                     "sse_streaming_header",
@@ -1361,7 +1193,6 @@ class AIFingerprintAgent:
                     "sse_chunked_transfer",
                     f"Chunked transfer at {path}", "probe", endpoint=url))
 
-        # 401/403 — auth-gated, detect auth type
         if status in (401, 403):
             auth_type = self._detect_auth_type(headers_low, body_l)
             auth_signals.append(AuthSignal(
@@ -1374,21 +1205,19 @@ class AIFingerprintAgent:
                     f"Auth-gated {path} (HTTP {status}, {auth_type})",
                     "probe", endpoint=url))
 
-        # 405 — endpoint exists, wrong method
         if status == 405 and category in ("chat", "embedding", "ml"):
             evidence.append(EvidenceItem.make(
                 "ml_endpoint_405",
                 f"Endpoint exists {path} (HTTP 405)",
                 "probe", endpoint=url))
 
-        # Error-message fingerprinting on 400/422
         if status in (400, 422) and body:
             fw = self._fingerprint_error_body(body, url, evidence)
             if fw:
                 frameworks.append(fw)
-                endpoints.append(url)
+                if url not in endpoints:
+                    endpoints.append(url)
 
-        # AI response headers
         for h in AI_RESPONSE_HEADERS:
             if h in headers_low:
                 evidence.append(EvidenceItem.make(
@@ -1406,7 +1235,6 @@ class AIFingerprintAgent:
 
     @staticmethod
     def _detect_auth_type(headers_low: Dict, body_l: str) -> str:
-        """Identify the authentication scheme required by an endpoint."""
         www_auth = headers_low.get("www-authenticate", "").lower()
         if "bearer" in www_auth or "jwt" in body_l or "token" in www_auth:
             return "bearer"
@@ -1432,19 +1260,9 @@ class AIFingerprintAgent:
                 return framework
         return None
 
-    # =========================================================================
-    # §11  Behavioral probes (item 11)
-    # =========================================================================
-
     async def _behavioral_probes(
         self, candidate_endpoints: List[str], verbose: bool
     ) -> Dict:
-        """
-        Send lightweight stateless probes and classify responses.
-        Probes:
-          A) "Hello"  — LLM-like response heuristics
-          B) "What model are you?"  — model self-report
-        """
         evidence:      List[EvidenceItem] = []
         model_reported: str              = ""
         loop = asyncio.get_event_loop()
@@ -1468,7 +1286,6 @@ class AIFingerprintAgent:
                     if status not in (200, 201):
                         continue
 
-                    # Extract text from response
                     text = ""
                     try:
                         parsed = json.loads(body)
@@ -1485,7 +1302,6 @@ class AIFingerprintAgent:
                     if not text:
                         continue
 
-                    # Probe A: LLM response heuristics
                     if probe_name == "hello":
                         if any(re.search(sig, text, re.I) for sig in LLM_RESPONSE_SIGNALS):
                             evidence.append(EvidenceItem.make(
@@ -1496,7 +1312,6 @@ class AIFingerprintAgent:
                             if verbose:
                                 print(f"    [behavior] LLM response at {endpoint}")
 
-                    # Probe B: model self-report
                     if probe_name == "model_query":
                         for pattern in MODEL_NAME_PATTERNS:
                             m = re.search(pattern, text, re.I)
@@ -1510,7 +1325,6 @@ class AIFingerprintAgent:
                                     print(f"    [behavior] model={model_reported}")
                                 break
 
-                    # SSE in response
                     ct = resp_headers.get("Content-Type", "").lower()
                     if "event-stream" in ct:
                         evidence.append(EvidenceItem.make(
@@ -1524,10 +1338,6 @@ class AIFingerprintAgent:
 
         return {"evidence": evidence, "model_reported": model_reported}
 
-    # =========================================================================
-    # §12  Header + cookie analysis
-    # =========================================================================
-
     async def _analyse_headers_cookies(
         self, headers: Dict, verbose: bool
     ) -> Dict:
@@ -1535,7 +1345,6 @@ class AIFingerprintAgent:
         frameworks: List[str]          = []
         headers_low = {k.lower(): v for k, v in headers.items()}
 
-        # AI-specific headers
         for h in AI_RESPONSE_HEADERS:
             if h in headers_low:
                 evidence.append(EvidenceItem.make(
@@ -1543,7 +1352,6 @@ class AIFingerprintAgent:
                     f"{h}: {headers_low[h][:50]}", "header"))
                 break
 
-        # Framework headers
         server = headers_low.get("server", "") + " " + headers_low.get("x-powered-by", "")
         for fw_name, sig in FRAMEWORK_SIGNATURES.items():
             for k, v in (sig.get("headers") or {}).items():
@@ -1555,7 +1363,6 @@ class AIFingerprintAgent:
                             "header", framework=fw_name))
                         frameworks.append(fw_name)
 
-        # Cookie names
         cookies = headers_low.get("set-cookie", "")
         for fw_name, sig in FRAMEWORK_SIGNATURES.items():
             for cookie_name in sig.get("cookie_names", []):
@@ -1568,10 +1375,6 @@ class AIFingerprintAgent:
 
         return {"evidence": evidence, "frameworks": list(dict.fromkeys(frameworks))}
 
-    # =========================================================================
-    # §13  Framework identification (item 2)
-    # =========================================================================
-
     def _identify_framework(
         self,
         html: str,
@@ -1580,59 +1383,53 @@ class AIFingerprintAgent:
         known_endpoints: List[str],
         existing_evidence: List[EvidenceItem],
     ) -> Dict:
-        """
-        Score each framework signature against all collected signals.
-        Returns the best-matched framework and inference server.
-        """
         evidence:    List[EvidenceItem] = []
         headers_low = {k.lower(): v for k, v in headers.items()}
         combined_text = (html + js).lower()
-
-        # Extract paths from known endpoints
         known_paths = {urllib.parse.urlparse(ep).path for ep in known_endpoints}
 
-        scores: Dict[str, int] = {}
+        scores:          Dict[str, int]       = {}
+        matched_signals: Dict[str, List[str]] = {}
 
         for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-            score = 0
+            score   = 0
+            signals = []
 
-            # Path matches
             for p in sig.get("paths", []):
                 if any(p in kp for kp in known_paths) or p in combined_text:
                     score += 3
+                    signals.append(f"path:{p}")
 
-            # JS string matches
             for s in sig.get("js_strings", []):
                 if s.lower() in combined_text:
                     score += 2
+                    signals.append(f"js:{s}")
 
-            # Header matches
             for k, v in (sig.get("headers") or {}).items():
                 if k in headers_low:
                     if v is None or v.lower() in headers_low[k].lower():
                         score += 5
+                        signals.append(f"header:{k}")
 
-            # Cookie matches
             cookie_header = headers_low.get("set-cookie", "")
             for cn in sig.get("cookie_names", []):
                 if cn.lower() in cookie_header.lower():
                     score += 3
+                    signals.append(f"cookie:{cn}")
 
-            # Body pattern matches (from collected evidence items)
             for pat in sig.get("body_patterns", []):
                 for ev in existing_evidence:
                     if re.search(pat, ev.detail, re.I):
                         score += 2
+                        signals.append(f"body:{pat[:20]}")
+                        break
 
             if score > 0:
-                scores[fw_name] = score
+                scores[fw_name]          = score
+                matched_signals[fw_name] = signals
 
-        # Separate "protocol" labels from "product" framework labels.
-        # OpenAI-compatible is an API wire protocol, not a product name.
-        # TGI is both a product and a protocol label — treat it as a product
-        # (framework) and record the protocol separately only when we have
-        # strong independent evidence for it.
         PROTOCOL_ONLY_LABELS = {"OpenAI-compatible"}
+        MAX_POSSIBLE_SCORE   = 12
 
         best_fw       = ""
         best_score    = 0
@@ -1640,7 +1437,6 @@ class AIFingerprintAgent:
 
         for fw, sc in scores.items():
             if fw in PROTOCOL_ONLY_LABELS:
-                # Record as protocol; only promote to framework if nothing else matched
                 if sc > 0:
                     best_protocol = fw
                 continue
@@ -1648,37 +1444,40 @@ class AIFingerprintAgent:
                 best_score = sc
                 best_fw = fw
 
-        # If no product framework matched, promote protocol to framework
         if not best_fw and best_protocol:
             best_fw = best_protocol
             best_protocol = ""
 
+        fw_confidence = min(best_score / MAX_POSSIBLE_SCORE, 1.0) if best_fw else 0.0
+        fw_signals    = matched_signals.get(best_fw, [])
+
         if best_fw and best_score >= 3:
+            pct = f"{fw_confidence*100:.0f}%"
             evidence.append(EvidenceItem.make(
                 "framework_identified",
-                f"Framework identified: {best_fw} (score={best_score})",
+                f"Framework: {best_fw} confidence={pct} signals={fw_signals[:4]}",
                 "passive", framework=best_fw))
-        elif best_fw:
-            # Low-score match — still report it, but don't add evidence weight
-            pass
 
-        # Infer inference server (may coincide with framework for Ollama/vLLM)
+        INFERENCE_SERVER_NAMES = set(FRAMEWORK_SIGNATURES.keys()) - PROTOCOL_ONLY_LABELS
         infra = ""
-        for server_name in ["Ollama", "vLLM", "TGI (HuggingFace)"]:
-            if server_name in scores and scores[server_name] >= 2:
-                infra = server_name
+        for fw_name in [best_fw] + sorted(scores.keys(), key=lambda x: scores.get(x,0), reverse=True):
+            sig = FRAMEWORK_SIGNATURES.get(fw_name, {})
+            if sig.get("paths") and any(
+                any(p in kp for kp in known_paths)
+                for p in sig.get("paths", [])
+                if any(x in p for x in ["/api/", "/v1/", "/v2/"])
+            ):
+                infra = fw_name
                 break
 
         return {
-            "evidence":        evidence,
-            "framework":       best_fw,
-            "protocol":        best_protocol or (best_fw if best_fw in PROTOCOL_LABELS else ""),
-            "inference_server": infra,
+            "evidence":            evidence,
+            "framework":           best_fw,
+            "framework_confidence": fw_confidence,
+            "framework_signals":   fw_signals,
+            "protocol":            best_protocol,
+            "inference_server":    infra or best_fw,
         }
-
-    # =========================================================================
-    # §14  Capability inference (item 13)
-    # =========================================================================
 
     def _infer_capabilities(
         self,
@@ -1688,22 +1487,18 @@ class AIFingerprintAgent:
         endpoints: List[str],
         graphql_types: List[str],
     ) -> List[str]:
-        """
-        Infer capabilities from detected framework + observed signals.
-        Framework-derived capabilities are the primary source (item 10).
-        """
         caps: Set[str] = set()
 
-        # From detected framework
         if framework and framework in FRAMEWORK_SIGNATURES:
             caps.update(FRAMEWORK_SIGNATURES[framework].get("capabilities", []))
 
-        # From other detected frameworks/SDKs
+        PROTOCOL_LABELS = {"OpenAI-compatible"}
         for fw in all_frameworks:
-            if fw in FRAMEWORK_SIGNATURES:
+            if fw in PROTOCOL_LABELS:
+                continue
+            if fw in FRAMEWORK_SIGNATURES and fw != framework:
                 caps.update(FRAMEWORK_SIGNATURES[fw].get("capabilities", []))
 
-        # From OpenAPI schema
         if openapi_schema:
             caps.add("chat")
             spec_paths = openapi_schema.get("paths", {})
@@ -1722,7 +1517,6 @@ class AIFingerprintAgent:
                 if "memory" in path_l or "remember" in path_l:
                     caps.add("memory")
 
-        # From endpoint paths
         for ep in endpoints:
             path = urllib.parse.urlparse(ep).path.lower()
             if "embed" in path:
@@ -1738,7 +1532,6 @@ class AIFingerprintAgent:
             if "code" in path or "exec" in path:
                 caps.add("code_execution")
 
-        # From GraphQL types
         for t in graphql_types:
             t_l = t.lower()
             if "chat" in t_l or "message" in t_l:
@@ -1750,12 +1543,7 @@ class AIFingerprintAgent:
             if "agent" in t_l:
                 caps.add("multi_agent")
 
-        # Normalize against known capability set
         return sorted(cap for cap in caps if cap in EXTENDED_CAPABILITIES)
-
-    # =========================================================================
-    # §15  Confirm JS-extracted paths
-    # =========================================================================
 
     async def _confirm_js_extracted_paths(
         self, base: str, paths: List[str], verbose: bool
@@ -1789,10 +1577,6 @@ class AIFingerprintAgent:
         await asyncio.gather(*[probe(p) for p in paths[:8]], return_exceptions=True)
         return {"evidence": evidence, "endpoints": list(dict.fromkeys(endpoints))}
 
-    # =========================================================================
-    # §16  Upstream discovered-endpoints passthrough
-    # =========================================================================
-
     async def _check_discovered_endpoints(
         self, endpoints: List[Dict]
     ) -> Dict:
@@ -1820,10 +1604,6 @@ class AIFingerprintAgent:
                     pass
 
         return {"evidence": evidence, "endpoints": list(dict.fromkeys(ml_endpoints))}
-
-    # =========================================================================
-    # §17  HTTP helpers
-    # =========================================================================
 
     def _fetch(
         self,
