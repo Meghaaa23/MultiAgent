@@ -327,11 +327,10 @@ class WebScannerAgent:
                 or ai_fingerprint.get("ai_headers")
                 or ai_fingerprint.get("auth_required_paths")
             )
-            # Brand/framework alone is enough to mark AI-powered (CVE/AVID/ATLAS),
-            # but active injection spray requires a live surface.
-            has_concrete = has_live_surface or bool(ai_fingerprint.get("framework"))
+            # Escalate AI analysis only with a live AI surface or a verified
+            # product framework — not from marketing "AI" copy alone (Zapier).
             is_ai_powered = raw_is_ai and (
-                confidence in ("high", "very_high") or has_concrete
+                has_live_surface or bool(ai_fingerprint.get("framework"))
             )
 
             if is_ai_powered:
@@ -341,10 +340,10 @@ class WebScannerAgent:
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
-                # Merge AI framework / brand into the reported tech stack so
-                # section 2 is not just "Uvicorn" when Open WebUI (etc.) is known.
+                # Merge AI framework into stack/CVE identity only when a live
+                # AI surface was verified (auth-gated or open inference).
                 fw = (ai_fingerprint.get("framework") or "").strip()
-                if fw:
+                if fw and has_live_surface:
                     stack["ai_framework"] = fw
                     techs = list(stack.get("technologies") or [])
                     names_lower = set()
@@ -363,6 +362,8 @@ class WebScannerAgent:
                         )
                     if not stack.get("app_identity_name"):
                         stack["app_identity_name"] = fw
+                elif fw and verbose:
+                    print(f"     (framework={fw!r} not merged into CVE stack — no live AI surface)\n")
 
                 if verbose:
                     print("  Querying AVID database for AI vulnerabilities...")

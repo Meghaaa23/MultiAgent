@@ -114,11 +114,11 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
         "capabilities": ["chat", "rag", "tool_calling", "workflow", "multi_agent"],
     },
     "Gradio": {
-        "paths":       ["/config", "/info", "/queue/join", "/run/predict",
-                        "/call/predict", "/gradio_api/info", "/gradio_api/config"],
-        "js_strings":  ["gradio", "Gradio", "__gradio_mode__", "gradio-app",
-                        "gradio_api"],
-        "title_hints": ["gradio", "langflow"],
+        "paths":       ["/gradio_api/info", "/gradio_api/config", "/queue/join",
+                        "/run/predict", "/call/predict"],
+        "js_strings":  ["__gradio_mode__", "gradio-app", "gradio_api",
+                        "gradio.Blocks", "window.gradio_config"],
+        "title_hints": ["gradio"],
         "capabilities": ["chat", "image_generation"],
     },
     "Dify": {
@@ -413,6 +413,41 @@ def is_inference_like_path(path: str) -> bool:
     return any(s in ("chat", "predict", "prediction", "generate", "inference",
                      "completions", "query", "ask", "invoke", "run", "messages")
                for s in segs)
+
+
+def _looks_like_gradio_config(body: str, path: str = "") -> bool:
+    """True only for Gradio-specific config/API responses — not generic SPA JSON."""
+    body_l = (body or "").lower()
+    path_l = (path or "").lower()
+    if "/gradio_api/" in path_l:
+        return bool(body.strip()) and body.strip()[:1] in "{["
+    # Explicit negative (Langflow mocks sometimes include "gradio": false).
+    if re.search(r'"gradio"\s*:\s*false\b', body_l):
+        return False
+    if re.search(r'gradio[_-]?(?:app|api|blocks|config|client|mode)', body_l):
+        return True
+    if "gradio" in body_l and '"gradio"' not in body_l:
+        # Free-text mention of Gradio product (not a JSON key alone).
+        return True
+    # Real Gradio /config usually pairs components/dependencies with Gradio keys.
+    specific = ("api_prefix", "root", "dev_mode", "space_id", "app_id",
+                "theme", "css", "js", "head")
+    if "components" in body_l and "dependencies" in body_l:
+        return sum(1 for k in specific if k in body_l) >= 2
+    return False
+
+
+def _looks_like_langflow_config(body: str, path: str = "") -> bool:
+    body_l = (body or "").lower()
+    path_l = (path or "").lower()
+    if "langflow" in body_l:
+        return True
+    if path_l in ("/api/v1/flows", "/api/v1/all") and (
+        '"flows"' in body_l or '"data"' in body_l
+    ):
+        # Require an AI-ish field, not any JSON list.
+        return any(k in body_l for k in ("langflow", "vertex", "chatinput", "prompt"))
+    return False
 
 
 def expand_semantic_candidates(observed_paths: List[str],
@@ -1049,7 +1084,10 @@ class AIFingerprintAgent:
         detected_protocol    = framework_result.get("protocol", "")
         detected_infra       = framework_result.get("inference_server", "")
         if not detected_framework and brand_frameworks:
-            detected_framework = brand_frameworks[0]
+            # Brand-only labels (HTML marketing copy) are not enough — require a
+            # verified ML/auth surface before promoting brand → framework.
+            if ml_endpoints or auth_signals:
+                detected_framework = brand_frameworks[0]
         if detected_framework and detected_framework not in all_frameworks:
             all_frameworks.insert(0, detected_framework)
         if detected_protocol and detected_protocol not in all_frameworks:
@@ -1324,7 +1362,8 @@ class AIFingerprintAgent:
                 ct = (headers.get("Content-Type") or headers.get("content-type") or "").lower()
                 if "json" not in ct and body.strip()[:1] not in "{[":
                     continue
-                if any(k in body_l for k in ("gradio", "components", "dependencies")):
+                # Require Gradio-specific proof — generic {"components":[]} is not Gradio.
+                if _looks_like_gradio_config(body, path):
                     evidence.append(EvidenceItem.make(
                         "ml_endpoint_200",
                         f"Gradio/config surface at {path}",
@@ -1333,18 +1372,15 @@ class AIFingerprintAgent:
                     frameworks.append("Gradio")
                     if verbose:
                         print(f"    [gradio] {path} confirmed")
-                if "langflow" in body_l or path.startswith("/api/v1/"):
-                    if '"flows"' in body_l or "langflow" in body_l or path in (
-                        "/api/v1/flows", "/api/v1/all",
-                    ):
-                        evidence.append(EvidenceItem.make(
-                            "ml_endpoint_200",
-                            f"Langflow API surface at {path}",
-                            "probe", endpoint=url, framework="Langflow"))
-                        endpoints.append(url)
-                        frameworks.append("Langflow")
-                        if verbose:
-                            print(f"    [langflow] {path} confirmed")
+                if _looks_like_langflow_config(body, path):
+                    evidence.append(EvidenceItem.make(
+                        "ml_endpoint_200",
+                        f"Langflow API surface at {path}",
+                        "probe", endpoint=url, framework="Langflow"))
+                    endpoints.append(url)
+                    frameworks.append("Langflow")
+                    if verbose:
+                        print(f"    [langflow] {path} confirmed")
             except Exception:
                 continue
         return {
@@ -1962,21 +1998,31 @@ class AIFingerprintAgent:
                     "sse_chunked_transfer",
                     f"Chunked transfer at {path}", "probe", endpoint=url))
 
-            # Gradio /config and similar schema endpoints.
+            # Gradio / Langflow schema endpoints — require product-specific proof.
             if category == "schema" and ("json" in ct or body.strip()[:1] in "{["):
-                if any(k in body_l for k in (
-                    "gradio", "components", "dependencies", "models",
-                    "chatflows", "flows", "ollama", "openai", "langflow",
+                if _looks_like_gradio_config(body, path):
+                    evidence.append(EvidenceItem.make(
+                        "ml_endpoint_200",
+                        f"Gradio schema/config at {path} (HTTP 200)",
+                        "probe", endpoint=url, framework="Gradio"))
+                    endpoints.append(url)
+                    frameworks.append("Gradio")
+                elif _looks_like_langflow_config(body, path):
+                    evidence.append(EvidenceItem.make(
+                        "ml_endpoint_200",
+                        f"Langflow schema/config at {path} (HTTP 200)",
+                        "probe", endpoint=url, framework="Langflow"))
+                    endpoints.append(url)
+                    frameworks.append("Langflow")
+                elif any(k in body_l for k in (
+                    "chatflows", "ollama", "openai", "huggingface",
+                    "flowise", "librechat", "open-webui",
                 )):
                     evidence.append(EvidenceItem.make(
                         "ml_endpoint_200",
                         f"AI schema/config at {path} (HTTP 200)",
                         "probe", endpoint=url))
                     endpoints.append(url)
-                    if "gradio" in body_l:
-                        frameworks.append("Gradio")
-                    if "langflow" in body_l:
-                        frameworks.append("Langflow")
 
         if status in (401, 403):
             auth_type = self._detect_auth_type(headers_low, body_l)
@@ -2205,12 +2251,34 @@ class AIFingerprintAgent:
             signals = []
 
             for p in sig.get("paths", []):
-                if any(p in kp for kp in known_paths) or p in combined_text:
+                # Only score against known live endpoints — never substring-match
+                # short paths like /config against HTML (false Gradio on Zapier).
+                path_hit = any(
+                    kp == p or kp.rstrip("/") == p.rstrip("/") or kp.endswith(p)
+                    for kp in known_paths
+                )
+                # Distinctive long paths may appear as string literals in JS bundles.
+                mention_hit = (
+                    len(p) >= 12
+                    and p.lower() in combined_text
+                    and any(tok in p.lower() for tok in (
+                        "gradio", "flowise", "langflow", "ollama", "webui",
+                        "librechat", "chatflows", "prediction",
+                    ))
+                )
+                if path_hit or mention_hit:
                     score += 3
                     signals.append(f"path:{p}")
 
             for s in sig.get("js_strings", []):
-                if s.lower() in combined_text:
+                # Prefer distinctive tokens; bare "gradio" is too weak alone.
+                token = s.lower()
+                if len(token) < 8 and token in ("gradio", "dify"):
+                    # Require word-ish boundary via non-alnum neighbors or exact.
+                    if not re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])",
+                                     combined_text):
+                        continue
+                if token in combined_text:
                     score += 2
                     signals.append(f"js:{s}")
 

@@ -151,7 +151,8 @@ SECURITY_HEADERS = [
 # real information-disclosure finding.
 _SAFE_SERVER_PATTERNS = re.compile(
     r"^(cloudflare|cloudfront|awselb|fastly|google frontend|"
-    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik)$",
+    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik|"
+    r"vercel|netlify|github\.com|amazon s3|s3)$",
     re.I,
 )
 

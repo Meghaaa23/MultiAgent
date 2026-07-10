@@ -167,7 +167,8 @@ _EFFORT_MINUTES = {
 
 _SAFE_SERVER_PATTERNS = re.compile(
     r"^(cloudflare|cloudfront|awselb|fastly|google frontend|"
-    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik)$",
+    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik|"
+    r"vercel|netlify|github\.com|amazon s3|s3)$",
     re.I,
 )
 
@@ -821,7 +822,18 @@ class ActionAgent:
     def _action_open_redirect(self, location: str, parameter: str,
                                evidence: Optional[Dict] = None) -> Dict:
         evidence = evidence or {}
-        location_header = evidence.get("redirect_location_header")
+        hdrs = {
+            str(k).lower(): str(v)
+            for k, v in (evidence.get("response_headers") or {}).items()
+        }
+        location_header = (
+            evidence.get("redirect_location_header")
+            or hdrs.get("location")
+            or evidence.get("details")  # sometimes "Redirects to: ..."
+            or ""
+        )
+        if isinstance(location_header, str) and location_header.startswith("Redirects to:"):
+            location_header = location_header.split(":", 1)[-1].strip()
         if location_header:
             evidence_note = f"# Captured Location header on redirect: {location_header}"
             evidence_captured = True
@@ -829,9 +841,14 @@ class ActionAgent:
             evidence_note = "# [NO EVIDENCE CAPTURED — redirect Location header was not recorded]"
             evidence_captured = False
 
+        req = evidence.get("request") or evidence.get("request_line") or ""
         poc = (
             f"{evidence_note}\n"
-            'curl -I "' + location + '?' + parameter + '=https://evil-attacker.example.com"\n'
+            + (f"# Probe: {req}\n" if req else "")
+            + 'curl -I -s "' + location + (
+                ('?' + parameter + '=https://evil-attacker.example.com"')
+                if parameter else '"'
+            ) + '\n'
             "# Check Location header — should point to attacker domain"
         )
         fix_snippet = textwrap.dedent("""\
