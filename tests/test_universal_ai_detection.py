@@ -16,6 +16,10 @@ from multiagent.agents.ai_agents.ai_fingerprint import (
     FRAMEWORK_SIGNATURES,
     _looks_html_body,
     classify_endpoint,
+    score_path_semantics,
+    is_inference_like_path,
+    expand_semantic_candidates,
+    rank_openapi_paths,
 )
 from multiagent.agents.ai_agents.Ai_Infra_agent import (
     AIInfraAgent,
@@ -385,5 +389,173 @@ async def test_infra_no_false_k8s_on_spa_flowise():
         names = [t.attack_name for t in result.threats]
         assert not any("Kubernetes" in n for n in names)
         assert not any("Model Pull" in n for n in names)
+    finally:
+        srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Discovery layer: custom paths (no hardcoded /assistant/query seed)
+# ---------------------------------------------------------------------------
+
+def test_score_path_semantics_assistant_query():
+    assert score_path_semantics("/assistant/query") >= 6
+    assert is_inference_like_path("/assistant/query")
+    assert score_path_semantics("/static/logo.png") == 0
+    assert classify_endpoint("http://x/assistant/query").endpoint_type == "inference"
+
+
+def test_expand_semantic_from_assistant_hint():
+    paths = expand_semantic_candidates(["/assistant"], ["My Assistant App"])
+    assert "/assistant/query" in paths
+    assert any(p.endswith("/ask") for p in paths)
+
+
+def test_rank_openapi_prefers_query_body_field():
+    spec = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/health": {"get": {"responses": {"200": {}}}},
+            "/assistant/query": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "query": {"type": "string"},
+                                        "prompt": {"type": "string"},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/users": {"get": {"responses": {"200": {}}}},
+        },
+    }
+    ranked = rank_openapi_paths(spec)
+    assert ranked[0][0] == "/assistant/query"
+    assert ranked[0][1] == "chat"
+    assert ranked[0][2] >= 10
+
+
+def test_js_extracts_assistant_query():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    js = '''
+      const API = { path: "/assistant/query" };
+      fetch("/assistant/query", { method: "POST", body: JSON.stringify({query: q}) });
+      axios.post("/api/v1/agent/ask", payload);
+    '''
+    paths = agent._extract_api_paths_from_js(js)
+    assert "/assistant/query" in paths
+    assert "/api/v1/agent/ask" in paths
+
+
+def test_vuln_uses_discovered_paths_not_generic_spray():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    # No framework, no ml_endpoints — must NOT invent /v1/chat/completions.
+    empty = t._build_endpoint_list([], [], "http://localhost:9", {})
+    assert empty == []
+    # Discovered custom path should be selected.
+    found = t._build_endpoint_list(
+        [], [], "http://localhost:9",
+        {"discovered_paths": ["/assistant/query"]},
+    )
+    assert found == ["http://localhost:9/assistant/query"]
+
+
+class CustomAssistantHandler(BaseHTTPRequestHandler):
+    """Custom AI app: only POST /assistant/query — not in any seed catalog."""
+
+    SHELL = (
+        "<!DOCTYPE html><html><head><title>Acme Assistant</title></head>"
+        "<body><a href='/assistant'>Open assistant</a>"
+        "<script src='/assets/app.js'></script></body></html>"
+    )
+
+    def _html(self):
+        data = self.SHELL.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, status, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path.startswith("/assets/"):
+            body = b'fetch("/assistant/query"); const p="/assistant/query";'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/openapi.json":
+            self._json(200, {
+                "openapi": "3.0.0",
+                "paths": {
+                    "/assistant/query": {
+                        "post": {
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "properties": {
+                                                "query": {"type": "string"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            })
+            return
+        if path == "/assistant":
+            self._html()
+            return
+        self._html()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        path = self.path.split("?")[0]
+        if path == "/assistant/query":
+            self._json(422, {"error": "query field required", "fields": ["query"]})
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_discovers_custom_assistant_query():
+    port = _free_port()
+    srv = _run_server(CustomAssistantHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["is_ai_powered"] is True
+        all_eps = result["ml_endpoints"] + [
+            a.get("endpoint", "") for a in result.get("auth_required_paths", [])
+        ]
+        assert any("/assistant/query" in e for e in all_eps), all_eps
+        assert any(
+            "/assistant/query" in (p if isinstance(p, str) else "")
+            for p in result.get("discovered_paths", [])
+        ) or any("/assistant/query" in e for e in all_eps)
     finally:
         srv.shutdown()

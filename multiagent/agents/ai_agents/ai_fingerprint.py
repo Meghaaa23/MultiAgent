@@ -63,6 +63,10 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
 
     "dom_assistant_role":        3,
     "html_ai_form":              3,
+
+    "discovery_openapi_ranked": 12,
+    "discovery_js_path":         6,
+    "discovery_semantic":        4,
 }
 
 CONFIDENCE_BANDS = [
@@ -300,55 +304,180 @@ ML_LIBRARY_JS_SIGNATURES: Dict[str, List[str]] = {
     "Vercel AI SDK":    ["ai/react", "useChat(", "useCompletion("],
 }
 
-SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
-    ("/openapi.json",         "schema"),
-    ("/swagger.json",         "schema"),
-    ("/api-docs",             "schema"),
-    ("/api/openapi.json",     "schema"),
-    ("/graphql",              "graphql"),
-    ("/api/graphql",          "graphql"),
-    ("/v1/chat/completions",  "chat"),
-    ("/api/chat/completions", "chat"),
-    ("/api/chat",             "chat"),
-    ("/v1/completions",       "chat"),
-    ("/v1/embeddings",        "embedding"),
-    ("/api/embeddings",       "embedding"),
-    ("/api/v1/prediction",    "chat"),
-    ("/api/generate",         "chat"),
-    ("/api/tags",             "schema"),
-    ("/v1/models",            "schema"),
-    ("/api/models",           "schema"),
-    ("/api/v1/models",        "schema"),
-    ("/v2/health/ready",      "schema"),
-    ("/v2/models",            "schema"),
-    ("/api/predict",          "ml"),
-    ("/predict",              "ml"),
-    ("/invocations",          "ml"),
-    ("/predictions",          "ml"),
-    ("/runs",                 "chat"),
-    ("/threads",              "chat"),
-    # Framework-specific seeds (SPA UIs often hide these behind auth)
-    ("/api/v1/chatflows",     "schema"),
-    ("/api/v1/flows",         "schema"),
-    ("/api/v1/run",           "chat"),
-    ("/api/v1/components",    "schema"),
-    ("/api/v1/nodes",         "schema"),
-    ("/api/v1/ping",          "schema"),
-    ("/api/ask",              "chat"),
-    ("/api/messages",         "chat"),
-    ("/api/convos",           "schema"),
-    ("/api/endpoints",        "schema"),
-    ("/api/workspace",        "schema"),
-    ("/api/system/env",       "schema"),
-    ("/api/v1/openai/chat/completions", "chat"),
-    ("/ollama/api/tags",      "schema"),
-    ("/config",               "schema"),
-    ("/info",                 "schema"),
-    ("/queue/join",           "chat"),
-    ("/run/predict",          "chat"),
-    ("/gradio_api/info",      "schema"),
-    ("/api/chat-messages",    "chat"),
+# ---------------------------------------------------------------------------
+# Discovery layer (extract → rank → verify)
+# Hardcoded full-path catalogs are NOT the primary strategy. Candidates come
+# from OpenAPI, JS/HTML, robots/sitemap, and semantic expansion of observed
+# nouns. PROTOCOL_BOOTSTRAP is last-resort only when discovery finds nothing.
+# ---------------------------------------------------------------------------
+
+# Noun / action segments used to *score* and *expand* observed paths — not a
+# catalog of endpoints to spray.
+AI_PATH_NOUNS = frozenset({
+    "assistant", "assistants", "agent", "agents", "copilot", "llm", "chat",
+    "ai", "bot", "bots", "completion", "completions", "embedding", "embeddings",
+    "model", "models", "predict", "prediction", "inference", "generate",
+    "rag", "workflow", "workflows", "message", "messages", "prompt", "prompts",
+    "query", "ask", "invoke", "run", "stream", "respond", "reply",
+    "conversation", "conversations", "thread", "threads",
+})
+
+AI_PATH_ACTIONS = (
+    "query", "ask", "chat", "complete", "completions", "generate", "predict",
+    "prediction", "invoke", "run", "message", "messages", "prompt", "infer",
+    "search", "embed", "embeddings", "stream", "respond", "reply", "complete",
+)
+
+INFERENCE_BODY_FIELDS = frozenset({
+    "messages", "prompt", "query", "input", "question", "text",
+    "content", "instruction", "inputs", "user_input", "message",
+})
+
+# Spec / introspection surfaces only — used to *find* schemas, not inference APIs.
+SCHEMA_BOOTSTRAP: List[Tuple[str, str]] = [
+    ("/openapi.json",     "schema"),
+    ("/swagger.json",     "schema"),
+    ("/api-docs",         "schema"),
+    ("/api/openapi.json", "schema"),
+    ("/v3/api-docs",      "schema"),
+    ("/graphql",          "graphql"),
+    ("/api/graphql",      "graphql"),
+    ("/config",           "schema"),
+    ("/info",             "schema"),
+    ("/gradio_api/info",  "schema"),
 ]
+
+# Last resort when extract→rank found zero candidates (bare protocol servers).
+PROTOCOL_BOOTSTRAP: List[Tuple[str, str]] = [
+    ("/v1/models",            "schema"),
+    ("/api/tags",             "schema"),
+    ("/v1/chat/completions",  "chat"),
+    ("/api/chat",             "chat"),
+    ("/api/generate",         "chat"),
+    ("/v1/embeddings",        "embedding"),
+]
+
+# Backward-compatible alias (tests / callers may still reference the old name).
+SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = SCHEMA_BOOTSTRAP + PROTOCOL_BOOTSTRAP
+
+
+def _path_segments(path: str) -> List[str]:
+    return [s for s in (path or "").lower().split("/") if s and s != "api"
+            and not re.fullmatch(r"v\d+", s)]
+
+
+def score_path_semantics(path: str) -> int:
+    """Score how likely a path is an AI/inference surface (0 = ignore)."""
+    segs = _path_segments(path)
+    if not segs:
+        return 0
+    score = 0
+    nouns = [s for s in segs if s in AI_PATH_NOUNS]
+    actions = [s for s in segs if s in AI_PATH_ACTIONS]
+    score += 3 * len(nouns) + 4 * len(actions)
+    # Compound like /assistant/query is strong.
+    if nouns and actions and set(nouns) != set(actions):
+        score += 6
+    low = (path or "").lower()
+    if any(p in low for p in ("/api/", "/v1/", "/v2/", "/graphql")):
+        score += 1
+    return score
+
+
+def is_inference_like_path(path: str) -> bool:
+    """True when path looks like it accepts prompts / runs models."""
+    segs = _path_segments(path)
+    if not segs:
+        return False
+    actions = AI_PATH_ACTIONS
+    if any(s in actions for s in segs):
+        return True
+    # Single-segment nouns that are themselves actions (chat, predict, …)
+    return any(s in ("chat", "predict", "prediction", "generate", "inference",
+                     "completions", "query", "ask", "invoke", "run", "messages")
+               for s in segs)
+
+
+def expand_semantic_candidates(observed_paths: List[str],
+                               text_hints: List[str] = None) -> List[str]:
+    """Generate candidate paths from nouns seen in links/JS/title — not a fixed catalog."""
+    nouns: Set[str] = set()
+    for p in observed_paths or []:
+        for seg in _path_segments(p):
+            if seg in AI_PATH_NOUNS:
+                nouns.add(seg)
+    for hint in text_hints or []:
+        low = (hint or "").lower()
+        for noun in AI_PATH_NOUNS:
+            if re.search(rf"\b{re.escape(noun)}\b", low):
+                nouns.add(noun)
+    # Prefer product-ish nouns for expansion.
+    expand_nouns = [n for n in nouns if n in (
+        "assistant", "assistants", "agent", "agents", "copilot", "llm",
+        "bot", "bots", "chat", "ai", "rag", "workflow", "workflows",
+    )]
+    out: List[str] = []
+    for noun in expand_nouns[:6]:
+        for action in AI_PATH_ACTIONS:
+            if action == noun:
+                continue
+            out.append(f"/{noun}/{action}")
+            out.append(f"/api/{noun}/{action}")
+            out.append(f"/api/v1/{noun}/{action}")
+    # Dedupe, cap.
+    return list(dict.fromkeys(out))[:48]
+
+
+def _openapi_json_properties(method_def: Dict) -> Set[str]:
+    props: Set[str] = set()
+    if not isinstance(method_def, dict):
+        return props
+    content = ((method_def.get("requestBody") or {}).get("content") or {})
+    for _ct, media in content.items():
+        if not isinstance(media, dict):
+            continue
+        schema = media.get("schema") or {}
+        raw = schema.get("properties") or {}
+        if isinstance(raw, dict):
+            props.update(raw.keys())
+        # Resolve simple $ref-less allOf/oneOf first object.
+        for key in ("allOf", "oneOf", "anyOf"):
+            for part in schema.get(key) or []:
+                if isinstance(part, dict) and isinstance(part.get("properties"), dict):
+                    props.update(part["properties"].keys())
+    return props
+
+
+def rank_openapi_paths(schema: Dict) -> List[Tuple[str, str, int]]:
+    """Return (path, category, score) ranked by POST + inference body fields."""
+    ranked: List[Tuple[str, str, int]] = []
+    for ep_path, methods in (schema or {}).get("paths", {}).items():
+        if not isinstance(methods, dict):
+            continue
+        score = score_path_semantics(ep_path)
+        category = "schema"
+        for method, defn in methods.items():
+            if not isinstance(defn, dict):
+                continue
+            m = method.lower()
+            if m in ("post", "put", "patch"):
+                score += 5
+                props = _openapi_json_properties(defn)
+                hits = INFERENCE_BODY_FIELDS & props
+                if hits:
+                    score += 10 * len(hits)
+                    category = "chat"
+                elif is_inference_like_path(ep_path):
+                    category = "chat"
+                    score += 3
+            elif m == "get" and is_inference_like_path(ep_path):
+                score += 1
+        if score <= 0 and category == "schema":
+            # Still keep documented paths — low priority verification.
+            score = 1
+        ranked.append((ep_path, category, score))
+    ranked.sort(key=lambda x: -x[2])
+    return ranked
 
 # Extra paths probed once a framework is identified from HTML/JS brand signals.
 FRAMEWORK_PROBE_PATHS: Dict[str, List[Tuple[str, str]]] = {
@@ -479,7 +608,7 @@ class AuthSignal:
 
 ENDPOINT_TYPE_RULES: List[Tuple[re.Pattern, str, str]] = [
     # Segment-aware: /chat matches /chat or /chat/... but NOT /chatflows.
-    (re.compile(r"/(?:chat|completions|generate|messages|ask|conversation|prediction|predict)(?:/|$)", re.I),
+    (re.compile(r"/(?:chat|completions|generate|messages|ask|conversation|prediction|predict|query|invoke)(?:/|$)", re.I),
      "inference",  "critical"),
     (re.compile(r"/(?:embed|embeddings?)(?:/|$)", re.I),                           "embedding",  "high"),
     (re.compile(r"/(?:pull|push|delete|copy|create|import)(?:/|$)", re.I),         "management", "critical"),
@@ -489,7 +618,7 @@ ENDPOINT_TYPE_RULES: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r"/(?:search|retrieve|vector|rag)(?:/|$)", re.I),                  "retrieval",  "high"),
     (re.compile(r"/(?:agents?|orchestrat|workflow|plan)(?:/|$)", re.I),            "agentic",    "high"),
     (re.compile(r"/(?:upload|file|image|audio|vision)(?:/|$)", re.I),              "multimodal", "medium"),
-    (re.compile(r"/(?:graphql|query)(?:/|$)", re.I),                               "graphql",    "high"),
+    (re.compile(r"/(?:graphql)(?:/|$)", re.I),                                     "graphql",    "high"),
     (re.compile(r"/(?:chatflows|flows|components|nodes|openapi|swagger|docs|schema)(?:/|$)", re.I),
      "schema",     "low"),
 ]
@@ -731,17 +860,16 @@ class AIFingerprintAgent:
             for path, _cat in FRAMEWORK_PROBE_PATHS.get(fw, []):
                 extra_seed_paths.append(path)
 
+        # Phase 1 — passive extract (no inference path spraying).
         parallel = await asyncio.gather(
             self._fetch_and_analyse_js(js_urls, base, verbose),
             self._probe_openapi(base, verbose),
             self._probe_graphql(base, verbose),
             self._fetch_robots_sitemap(base, verbose),
-            self._probe_ranked_endpoints(
-                base, extra_seed_paths, verbose, spa_catch_all=spa_catch_all),
             self._analyse_headers_cookies(response_headers, verbose),
             return_exceptions=True,
         )
-        js_r, openapi_r, graphql_r, passive_r, probe_r, header_r = parallel
+        js_r, openapi_r, graphql_r, passive_r, header_r = parallel
 
         all_evidence: List[EvidenceItem] = list(html_evidence)
         ml_endpoints:    List[str]  = list(gradio_endpoints)
@@ -753,7 +881,7 @@ class AIFingerprintAgent:
         js_api_paths:    List[str]  = []
         raw_html_js = ""
 
-        for r in [js_r, openapi_r, graphql_r, passive_r, probe_r, header_r]:
+        for r in [js_r, openapi_r, graphql_r, passive_r, header_r]:
             if isinstance(r, dict):
                 all_evidence.extend(r.get("evidence", []))
                 ml_endpoints.extend(r.get("endpoints", []))
@@ -764,19 +892,49 @@ class AIFingerprintAgent:
             js_api_paths = js_r.get("api_paths", [])
             raw_html_js  = js_r.get("raw_js", "")
             discovered_paths.extend(js_api_paths)
-            # JS may reveal a framework brand we missed in HTML.
             for fw in js_r.get("frameworks", []):
                 if fw in FRAMEWORK_SIGNATURES and fw not in brand_frameworks:
                     brand_frameworks.append(fw)
 
         if isinstance(openapi_r, dict) and openapi_r.get("found"):
             openapi_schema = openapi_r.get("schema", {})
+            discovered_paths.extend(
+                urllib.parse.urlparse(u).path
+                for u in openapi_r.get("endpoints", [])
+                if isinstance(u, str)
+            )
 
         if isinstance(graphql_r, dict):
             graphql_types = graphql_r.get("types", [])
 
         if isinstance(passive_r, dict):
             discovered_paths.extend(passive_r.get("paths", []))
+
+        # Phase 2 — rank candidates from discoveries (not a hardcoded path catalog).
+        text_hints = [page_title or "", *(brand_frameworks or [])]
+        candidates = self._build_discovery_candidates(
+            html_links=extracted_links,
+            js_paths=js_api_paths,
+            openapi_schema=openapi_schema,
+            robots_paths=list(passive_r.get("paths", []) if isinstance(passive_r, dict) else []),
+            brand_frameworks=brand_frameworks,
+            text_hints=text_hints,
+            extra_paths=extra_seed_paths,
+        )
+        discovered_paths.extend(p for p, _c, _s in candidates)
+
+        if verbose and candidates:
+            top = ", ".join(f"{p}({s})" for p, _c, s in candidates[:8])
+            print(f"    [discovery] {len(candidates)} candidate(s): {top}")
+
+        # Phase 3 — verify ranked candidates (POST-aware).
+        probe_r = await self._probe_ranked_endpoints(
+            base, candidates, verbose, spa_catch_all=spa_catch_all)
+        if isinstance(probe_r, dict):
+            all_evidence.extend(probe_r.get("evidence", []))
+            ml_endpoints.extend(probe_r.get("endpoints", []))
+            all_frameworks.extend(probe_r.get("frameworks", []))
+            auth_signals.extend(probe_r.get("auth_signals", []))
 
         # Second-pass: probe framework-specific paths once JS/HTML brands are known.
         fw_hint = brand_frameworks[:]
@@ -801,18 +959,25 @@ class AIFingerprintAgent:
         # Prefer unauthenticated chat endpoints for behavioral probes.
         auth_urls = {a.endpoint for a in auth_signals}
         open_targets = [e for e in ml_endpoints if e not in auth_urls]
-        probe_targets = open_targets or [
-            base + p for p, cat in SEED_ENDPOINT_RANKING
-            if cat in ("chat", "ml")
-        ]
+        # Fall back to top discovery chat candidates, not a hardcoded spray list.
+        if not open_targets:
+            open_targets = [
+                base + p for p, cat, _s in candidates
+                if cat in ("chat", "ml", "embedding")
+            ][:4]
+        probe_targets = open_targets
         if self.run_behavioral_probes and probe_targets:
             behav_r = await self._behavioral_probes(probe_targets[:2], verbose)
             if isinstance(behav_r, dict):
                 all_evidence.extend(behav_r.get("evidence", []))
 
-        if js_api_paths:
+        # Confirm JS / discovery paths that weren't already verified.
+        confirm_paths = list(dict.fromkeys(
+            js_api_paths + [p for p, c, s in candidates if c == "chat" and s >= 6]
+        ))
+        if confirm_paths:
             extra = await self._confirm_js_paths(
-                base, js_api_paths, verbose, spa_catch_all=spa_catch_all)
+                base, confirm_paths, verbose, spa_catch_all=spa_catch_all)
             if isinstance(extra, dict):
                 all_evidence.extend(extra.get("evidence", []))
                 ml_endpoints.extend(extra.get("endpoints", []))
@@ -875,7 +1040,8 @@ class AIFingerprintAgent:
         for ep in ml_endpoints:
             path = urllib.parse.urlparse(ep).path.lower()
             if any(x in path for x in ["/chat", "/completions", "/generate", "/messages",
-                                       "/ask", "/prediction", "/run"]):
+                                       "/ask", "/prediction", "/run", "/query",
+                                       "/assistant", "/invoke"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["chat"])
             elif any(x in path for x in ["/embed", "/embedding"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["embedding"])
@@ -1031,13 +1197,23 @@ class AIFingerprintAgent:
 
         for m in re.finditer(r'href=["\']([^"\'#?]+)["\']', html, re.I):
             href = m.group(1)
-            if href.startswith("/") and any(
-                x in href.lower() for x in [
+            if href.startswith("/") and (
+                score_path_semantics(href) > 0
+                or any(x in href.lower() for x in [
                     "/chat", "/api", "/playground", "/workspace",
-                    "/dashboard", "/app", "/assistant", "/flow",
-                ]
+                    "/dashboard", "/app", "/assistant", "/agent",
+                    "/copilot", "/flow", "/query", "/ask",
+                ])
             ):
                 links.append(href)
+
+        # Forms that POST to custom AI endpoints.
+        for m in re.finditer(
+            r'<form[^>]+action=["\']([^"\']+)["\']', html, re.I
+        ):
+            action = m.group(1)
+            if action.startswith("/") and score_path_semantics(action) > 0:
+                links.append(action)
 
         csp_header = headers.get("Content-Security-Policy", "")
         if not csp_header:
@@ -1220,31 +1396,129 @@ class AIFingerprintAgent:
         }
 
     def _extract_api_paths_from_js(self, js: str) -> List[str]:
+        """Extract API-looking paths from JS; rank/filter by semantics (not a fixed list)."""
         found: Set[str] = set()
-        for m in re.finditer(
-            r'(?:fetch|axios(?:\.get|\.post)?)\s*\(\s*["\']([^"\']+)["\']', js, re.I):
-            path = m.group(1)
-            if self._is_ai_api_path(path):
-                found.add(path if path.startswith("/") else "/" + path.lstrip("/"))
-        for m in re.finditer(r'(?:fetch|axios)\s*\(\s*`([^`]+)`', js):
-            path = m.group(1).split("${")[0].rstrip("/")
-            if self._is_ai_api_path(path):
-                found.add(path if path.startswith("/") else "/" + path.lstrip("/"))
-        for m in re.finditer(
-            r'\.open\s*\(\s*["\'][A-Z]+["\'],\s*["\']([^"\']+)["\']', js, re.I):
-            path = m.group(1)
-            if self._is_ai_api_path(path):
-                found.add(path if path.startswith("/") else "/" + path.lstrip("/"))
+        patterns = [
+            r'(?:fetch|axios(?:\.\w+)?)\s*\(\s*[\'"`]([^\'"`]+)[\'"`]',
+            r'\.open\s*\(\s*[\'"][A-Z]+[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]',
+            r'(?:url|path|endpoint|href|action|baseURL|BASE_URL)\s*[:=]\s*[\'"`](/[^\'"`\s]{2,120})[\'"`]',
+            r'[\'"`](/(?:api|v\d+|assistant|agent|agents|copilot|llm|ai|chat|'
+            r'predict|query|ask|generate|messages|completions)[^\'"`?\s]{0,100})[\'"`]',
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, js, re.I):
+                raw = m.group(1).split("${")[0].rstrip("/")
+                if not raw or raw.startswith("http") and "://" in raw:
+                    # Absolute same-path only — keep path component.
+                    if raw.startswith("http"):
+                        raw = urllib.parse.urlparse(raw).path or ""
+                if not raw.startswith("/"):
+                    continue
+                if len(raw) > 120 or " " in raw:
+                    continue
+                # Static assets are not API surfaces.
+                if re.search(r"\.(js|css|png|jpg|svg|woff2?|map)(?:$|\?)", raw, re.I):
+                    continue
+                if score_path_semantics(raw) > 0 or self._is_ai_api_path(raw):
+                    found.add(raw)
         return list(found)
 
     @staticmethod
     def _is_ai_api_path(path: str) -> bool:
-        return any(pat in path.lower() for pat in [
+        low = (path or "").lower()
+        if score_path_semantics(low) >= 3:
+            return True
+        return any(pat in low for pat in [
             "/chat", "/completions", "/generate", "/predict",
             "/embed", "/inference", "/infer", "/model",
             "/v1/", "/api/", "/llm", "/ai/", "/messages",
-            "/runs", "/threads", "/assistants",
+            "/runs", "/threads", "/assistant", "/agent",
+            "/copilot", "/query", "/ask", "/invoke",
         ])
+
+    def _build_discovery_candidates(
+        self,
+        html_links: List[str],
+        js_paths: List[str],
+        openapi_schema: Dict,
+        robots_paths: List[str],
+        brand_frameworks: List[str],
+        text_hints: List[str],
+        extra_paths: List[str] = None,
+    ) -> List[Tuple[str, str, int]]:
+        """Build (path, category, score) from discoveries — extract → rank."""
+        scored: Dict[str, Tuple[str, int]] = {}
+
+        def _add(path: str, category: str, score: int):
+            if not path:
+                return
+            path = path if path.startswith("/") else "/" + path.lstrip("/")
+            # Drop obvious non-API pages.
+            if path in ("/", "/favicon.ico", "/robots.txt", "/sitemap.xml"):
+                return
+            prev = scored.get(path)
+            if prev is None or score > prev[1]:
+                # Prefer chat category if either says chat.
+                cat = category
+                if prev and prev[0] == "chat":
+                    cat = "chat"
+                scored[path] = (cat, score)
+
+        # OpenAPI — strongest signal (POST + body fields).
+        for path, cat, score in rank_openapi_paths(openapi_schema or {}):
+            _add(path, cat, score + 8)
+
+        # JS-extracted paths.
+        for path in js_paths or []:
+            s = score_path_semantics(path)
+            cat = "chat" if is_inference_like_path(path) else "schema"
+            _add(path, cat, max(s, 4) + 4)
+
+        # HTML links.
+        for path in html_links or []:
+            s = score_path_semantics(path)
+            cat = "chat" if is_inference_like_path(path) else "schema"
+            _add(path, cat, max(s, 2) + 2)
+
+        # robots / sitemap.
+        for path in robots_paths or []:
+            s = score_path_semantics(path)
+            if s <= 0 and not self._is_ai_api_path(path):
+                continue
+            cat = "chat" if is_inference_like_path(path) else "schema"
+            _add(path, cat, max(s, 2) + 1)
+
+        # Semantic expansion from observed nouns (e.g. /assistant → /assistant/query).
+        observed = list(scored.keys()) + list(js_paths or []) + list(html_links or [])
+        for path in expand_semantic_candidates(observed, text_hints):
+            s = score_path_semantics(path)
+            _add(path, "chat" if is_inference_like_path(path) else "schema", s + 2)
+
+        # Brand-known framework paths (confirmation, not universal spray).
+        for fw in brand_frameworks or []:
+            for path, cat in FRAMEWORK_PROBE_PATHS.get(fw, []):
+                _add(path, cat, 5)
+
+        for path in extra_paths or []:
+            p = path if path.startswith("/") else "/" + str(path).lstrip("/")
+            cat = "chat" if is_inference_like_path(p) else "schema"
+            _add(p, cat, max(score_path_semantics(p), 2))
+
+        # Schema bootstrap always available (find OpenAPI / Gradio config).
+        for path, cat in SCHEMA_BOOTSTRAP:
+            _add(path, cat, 2)
+
+        ranked = [(p, c, s) for p, (c, s) in scored.items()]
+        ranked.sort(key=lambda x: (-x[2], x[0]))
+
+        # Last resort: protocol bootstrap only when discovery is empty of chat-like paths.
+        if not any(c == "chat" for _p, c, _s in ranked):
+            for path, cat in PROTOCOL_BOOTSTRAP:
+                _add(path, cat, 1)
+            ranked = [(p, c, s) for p, (c, s) in scored.items()]
+            ranked.sort(key=lambda x: (-x[2], x[0]))
+
+        return ranked[:60]
 
     async def _probe_openapi(self, base: str, verbose: bool) -> Dict:
         evidence:     List[EvidenceItem] = []
@@ -1276,33 +1550,40 @@ class AIFingerprintAgent:
                     "openapi_schema",
                     f"OpenAPI spec at {path} ({len(spec_paths)} paths)",
                     "openapi", endpoint=url))
-                for ep_path, methods in spec_paths.items():
-                    endpoints.append(base + ep_path)
-                    if any(x in ep_path.lower() for x in [
-                        "/chat", "/completions", "/generate", "/embed",
-                        "/predict", "/inference", "/model", "/messages",
-                    ]):
+
+                for ep_path, cat, score in rank_openapi_paths(spec):
+                    # Only promote high-confidence inference paths into ml_endpoints;
+                    # lower-ranked paths are still verified via the discovery probe queue.
+                    if cat == "chat" or score >= 10:
+                        endpoints.append(base + ep_path)
                         evidence.append(EvidenceItem.make(
                             "openapi_ai_endpoint",
-                            f"AI path in spec: {ep_path}",
+                            f"Ranked AI path in spec: {ep_path} (score={score})",
                             "openapi", endpoint=base + ep_path))
-                    if isinstance(methods, dict):
-                        for method_def in methods.values():
-                            if not isinstance(method_def, dict):
-                                continue
-                            props = ((method_def.get("requestBody", {}) or {})
-                                     .get("content", {})
-                                     .get("application/json", {})
-                                     .get("schema", {})
-                                     .get("properties", {}))
-                            if "tools" in props or "functions" in props:
-                                capabilities.append("tool_calling")
-                            if "messages" in props:
-                                capabilities.append("chat")
-                            if "input" in props and "model" in props:
-                                capabilities.append("embedding")
+                        evidence.append(EvidenceItem.make(
+                            "discovery_openapi_ranked",
+                            f"OpenAPI ranked {ep_path} as {cat}",
+                            "openapi", endpoint=base + ep_path))
+                    elif score >= 3:
+                        # Keep as discovered candidate path (absolute → path only later).
+                        endpoints.append(base + ep_path)
+
+                for _ep_path, methods in spec_paths.items():
+                    if not isinstance(methods, dict):
+                        continue
+                    for method_def in methods.values():
+                        if not isinstance(method_def, dict):
+                            continue
+                        props = _openapi_json_properties(method_def)
+                        if "tools" in props or "functions" in props:
+                            capabilities.append("tool_calling")
+                        if "messages" in props or "prompt" in props or "query" in props:
+                            capabilities.append("chat")
+                        if "input" in props and "model" in props:
+                            capabilities.append("embedding")
                 if verbose:
-                    print(f"    [openapi] {path}: {len(spec_paths)} paths")
+                    print(f"    [openapi] {path}: {len(spec_paths)} paths "
+                          f"({sum(1 for _, c, _ in rank_openapi_paths(spec) if c == 'chat')} inference-ranked)")
                 break
             except Exception as exc:
                 logger.debug(f"[OpenAPI] {url}: {exc}")
@@ -1442,9 +1723,10 @@ class AIFingerprintAgent:
         return {"evidence": evidence, "paths": list(dict.fromkeys(paths))}
 
     async def _probe_ranked_endpoints(
-        self, base: str, extra_paths: List[str], verbose: bool,
+        self, base: str, extra_paths, verbose: bool,
         spa_catch_all: bool = False,
     ) -> Dict:
+        """Verify discovery candidates. `extra_paths` may be str paths or (path, cat, score)."""
         evidence:    List[EvidenceItem] = []
         endpoints:   List[str]          = []
         frameworks:  List[str]          = []
@@ -1452,35 +1734,46 @@ class AIFingerprintAgent:
         loop = asyncio.get_event_loop()
         confirmed = 0
 
-        ordered = (
-            [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "schema"] +
-            [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "chat"] +
-            [(p, c) for p, c in SEED_ENDPOINT_RANKING if c in ("embedding", "ml", "graphql")]
-        )
-        # Prioritize extra/framework paths discovered from HTML/JS.
-        for p in extra_paths:
-            path = p if p.startswith("/") else "/" + p
+        ordered: List[Tuple[str, str]] = []
+        for item in extra_paths or []:
+            if isinstance(item, tuple) and len(item) >= 2:
+                path, cat = item[0], item[1]
+            else:
+                path = str(item)
+                cat = "chat" if is_inference_like_path(path) else "schema"
+            path = path if path.startswith("/") else "/" + path.lstrip("/")
             if not any(path == existing for existing, _ in ordered):
-                cat = "chat" if self._is_ai_api_path(path) else "schema"
                 ordered.append((path, cat))
+
+        # If caller passed nothing, only schema bootstrap (never spray inference catalog).
+        if not ordered:
+            ordered = list(SCHEMA_BOOTSTRAP)
 
         async def probe(path: str, category: str):
             url = base + path
             try:
-                status, resp_headers, body = await loop.run_in_executor(
-                    None, lambda: self._fetch(url))
-                ct = (resp_headers.get("Content-Type")
-                      or resp_headers.get("content-type") or "")
-                # SPA shells return HTML 200 for unknown routes — retry as API POST.
-                needs_post = (
-                    status in (404, 405)
-                    or (status == 200 and _looks_html_body(ct, body))
-                    or (spa_catch_all and status == 200 and category in (
-                        "chat", "embedding", "ml", "graphql"))
-                )
-                if needs_post and category in ("chat", "embedding", "ml", "graphql", "schema"):
+                # Inference-like paths: POST-first (custom APIs are often POST-only).
+                if category in ("chat", "embedding", "ml", "graphql") or is_inference_like_path(path):
                     status, resp_headers, body = await loop.run_in_executor(
                         None, lambda: self._fetch(url, data=b"{}", method="POST"))
+                    ct = (resp_headers.get("Content-Type")
+                          or resp_headers.get("content-type") or "")
+                    if status in (404, 405) or _looks_html_body(ct, body) or status == 0:
+                        status, resp_headers, body = await loop.run_in_executor(
+                            None, lambda: self._fetch(url))
+                else:
+                    status, resp_headers, body = await loop.run_in_executor(
+                        None, lambda: self._fetch(url))
+                    ct = (resp_headers.get("Content-Type")
+                          or resp_headers.get("content-type") or "")
+                    needs_post = (
+                        status in (404, 405)
+                        or (status == 200 and _looks_html_body(ct, body))
+                        or (spa_catch_all and status == 200)
+                    )
+                    if needs_post:
+                        status, resp_headers, body = await loop.run_in_executor(
+                            None, lambda: self._fetch(url, data=b"{}", method="POST"))
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
                     auth_signals, spa_catch_all=spa_catch_all)
@@ -1488,6 +1781,8 @@ class AIFingerprintAgent:
                 return None
 
         schema_paths = [(p, c) for p, c in ordered if c == "schema"]
+        other_paths = [(p, c) for p, c in ordered if c != "schema"]
+
         schema_results = await asyncio.gather(
             *[probe(p, c) for p, c in schema_paths[:20]], return_exceptions=True)
         for r in schema_results:
@@ -1497,11 +1792,9 @@ class AIFingerprintAgent:
                 frameworks.extend(r.get("frameworks", []))
                 confirmed += len(r.get("endpoints", []))
 
-        for path, category in ordered:
-            if confirmed >= 8:
+        for path, category in other_paths:
+            if confirmed >= 12:
                 break
-            if category == "schema":
-                continue
             r = await probe(path, category)
             if isinstance(r, dict) and r:
                 evidence.extend(r.get("evidence", []))
@@ -1645,8 +1938,8 @@ class AIFingerprintAgent:
                 endpoint=url, auth_type=auth_type,
                 status_code=status,
                 detail=f"Auth required ({auth_type}) at {path}"))
-            # Any AI-related category (including schema/model lists) counts.
-            if category in ("chat", "embedding", "ml", "graphql", "schema"):
+            # Any AI-related category, or inference-like custom path (e.g. /assistant/query).
+            if category in ("chat", "embedding", "ml", "graphql", "schema") or is_inference_like_path(path):
                 evidence.append(EvidenceItem.make(
                     "ml_endpoint_401_403",
                     f"Auth-gated {path} (HTTP {status}, {auth_type})",
@@ -1656,7 +1949,7 @@ class AIFingerprintAgent:
         # On SPA catch-alls, POST→405 is noise for almost every path — ignore it.
         # Only trust 405 on non-SPA targets, and only for real inference categories.
         if (status == 405 and not spa_catch_all
-                and category in ("chat", "embedding", "ml")):
+                and (category in ("chat", "embedding", "ml") or is_inference_like_path(path))):
             evidence.append(EvidenceItem.make(
                 "ml_endpoint_405",
                 f"Endpoint exists {path} (HTTP 405)",
@@ -1669,13 +1962,22 @@ class AIFingerprintAgent:
                 frameworks.append(fw)
                 if url not in endpoints:
                     endpoints.append(url)
-            elif category in ("chat", "embedding", "ml") and (
+            elif (category in ("chat", "embedding", "ml") or is_inference_like_path(path)) and (
                 "json" in ct or body.strip()[:1] in "{["
             ):
                 # Handler reached with validation error => real API surface.
+                # Includes custom paths like /assistant/query even if categorized schema.
                 evidence.append(EvidenceItem.make(
                     "error_generic_validation",
                     f"API validation response at {path} (HTTP {status})",
+                    "probe", endpoint=url))
+                endpoints.append(url)
+            elif any(f in body_l for f in (
+                "prompt", "messages", "query", "input", "question", "model",
+            )) and ("json" in ct or body.strip()[:1] in "{["):
+                evidence.append(EvidenceItem.make(
+                    "error_generic_validation",
+                    f"API validation (inference fields) at {path} (HTTP {status})",
                     "probe", endpoint=url))
                 endpoints.append(url)
 
@@ -2059,28 +2361,37 @@ class AIFingerprintAgent:
     ) -> Dict:
         evidence:    List[EvidenceItem] = []
         ml_endpoints: List[str]         = []
+        auth_signals: List[AuthSignal]  = []
         loop = asyncio.get_event_loop()
 
         for ep in (endpoints or []):
             url    = ep.get("url", "")
-            status = ep.get("status", 0)
-            if status == 200:
-                try:
-                    _, hdrs, body = await loop.run_in_executor(
+            if not url:
+                continue
+            method = str(ep.get("method") or "GET").upper()
+            path = urllib.parse.urlparse(url).path
+            try:
+                if method in ("POST", "PUT", "PATCH") or is_inference_like_path(path):
+                    status, hdrs, body = await loop.run_in_executor(
+                        None, lambda u=url: self._fetch(u, data=b"{}", method="POST"))
+                else:
+                    status, hdrs, body = await loop.run_in_executor(
                         None, lambda u=url: self._fetch(u))
-                    if "json" in hdrs.get("Content-Type", "").lower() and body:
-                        if any(re.search(p, body, re.I)
-                               for p in AI_RESPONSE_BODY_PATTERNS):
-                            ml_endpoints.append(url)
-                            path = urllib.parse.urlparse(url).path
-                            evidence.append(EvidenceItem.make(
-                                "ml_endpoint_200",
-                                f"AI body at discovered endpoint {path}",
-                                "probe", endpoint=url))
-                except Exception:
-                    pass
+                r = self._evaluate_probe_response(
+                    url, path,
+                    "chat" if is_inference_like_path(path) else "schema",
+                    status, hdrs, body, auth_signals)
+                if r:
+                    evidence.extend(r.get("evidence", []))
+                    ml_endpoints.extend(r.get("endpoints", []))
+            except Exception:
+                pass
 
-        return {"evidence": evidence, "endpoints": list(dict.fromkeys(ml_endpoints))}
+        return {
+            "evidence": evidence,
+            "endpoints": list(dict.fromkeys(ml_endpoints)),
+            "auth_signals": auth_signals,
+        }
 
     def _fetch(
         self,
