@@ -265,7 +265,23 @@ class AttackVerificationAgent:
             if not headers:
                 return findings
 
-            for h in [hdr for hdr in SECURITY_HEADERS if hdr not in headers]:
+            # HTTP header names are case-insensitive — normalize before compare.
+            headers_l = {str(k).lower(): str(v) for k, v in headers.items()}
+            skip_hsts = (
+                url.startswith("http://")
+                or "localhost" in url
+                or "127.0.0.1" in url
+            )
+            check_headers = [
+                h for h in SECURITY_HEADERS
+                if not (skip_hsts and h == "Strict-Transport-Security")
+            ]
+            for h in check_headers:
+                if h.lower() in headers_l:
+                    continue
+                remediation = f"Add the {h} header to all HTTP responses."
+                if h == "Content-Security-Policy":
+                    remediation += " Prefer CSP over legacy X-XSS-Protection."
                 findings.append(Finding(
                     vuln_type   = f"Missing Security Header: {h}",
                     severity    = "Medium" if h in (
@@ -275,7 +291,7 @@ class AttackVerificationAgent:
                     location    = url,
                     description = f"The response is missing the {h} header.",
                     impact      = self._header_impact(h),
-                    remediation = f"Add the {h} header to all HTTP responses.",
+                    remediation = remediation,
                     confidence  = Confidence.HIGH,
                     evidence    = Evidence(
                         request             = f"GET {url}",

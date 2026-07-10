@@ -396,13 +396,13 @@ def _build_section_4(potential_vulns):
         return "\n".join(lines)
     seen = set()
     for i, v in enumerate(potential_vulns, 1):
-        key = v.get("type", "")
+        key = (v.get("type", ""), v.get("location", ""))
         if key in seen:
             continue
         seen.add(key)
         ev      = v.get("evidence", {})
         method  = ev.get("confirmation_method", "code analysis")
-        snippet = ev.get("response_body_snippet", "")
+        snippet = ev.get("response_body_snippet", "") or ev.get("response_snippet", "")
         lines += [
             "",
             f" [{i}] {v.get('type','?')}",
@@ -1264,14 +1264,8 @@ Answer:"""
                 elif v.get("status") == "Potential":
                     potential_vulns.append(v)
 
-            seen_types: set = set()
-            deduped_pot     = []
-            for v in potential_vulns:
-                t = v.get("type", "")
-                if t not in seen_types:
-                    seen_types.add(t)
-                    deduped_pot.append(v)
-            potential_vulns = deduped_pot
+            # Keep one entry per (type, location) — same key as confirmed path.
+            # Deduping by type alone collapsed distinct auth-gated AI endpoints.
 
         interesting_endpoints = [e for e in endpoints if e.get("interesting")]
 
@@ -1365,8 +1359,17 @@ Answer:"""
         _sanitize_report(raw_report)
 
         stride_threats = (scan_results or {}).get("stride_threats", [])
-        action_agent   = ActionAgent()
-        action_results = action_agent.process_all(confirmed_vulns, target_url, stack)
+        # Prefer ActionAgent output already produced during the scan (with
+        # response_headers threaded through). Regenerating here without headers
+        # caused "Confirmed" findings to show "NO EVIDENCE CAPTURED" in §3b.
+        action_results = (scan_results or {}).get("action_results") or []
+        if not action_results and confirmed_vulns:
+            action_agent   = ActionAgent()
+            shared_headers = (scan_results or {}).get("response_headers") or {}
+            action_results = action_agent.process_all(
+                confirmed_vulns, target_url, stack,
+                response_headers=shared_headers,
+            )
 
         section_1   = _build_section_1(confirmed_vulns, potential_vulns, target_url or "", scan_results) or ""
         section_2   = _build_section_2(stack, (scan_results or {}).get("endpoints_discovered", []), cves) or ""

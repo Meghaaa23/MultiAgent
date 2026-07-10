@@ -325,6 +325,29 @@ class WebScannerAgent:
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
+                # Merge AI framework / brand into the reported tech stack so
+                # section 2 is not just "Uvicorn" when Open WebUI (etc.) is known.
+                fw = (ai_fingerprint.get("framework") or "").strip()
+                if fw:
+                    stack["ai_framework"] = fw
+                    techs = list(stack.get("technologies") or [])
+                    names_lower = set()
+                    for t in techs:
+                        if isinstance(t, dict):
+                            names_lower.add(str(t.get("name", "")).lower())
+                        else:
+                            names_lower.add(str(t).split("/")[0].lower())
+                    if fw.lower() not in names_lower:
+                        techs.insert(0, {"name": fw, "version": "", "confidence": "high"})
+                        stack["technologies"] = techs
+                    summary = stack.get("stack_summary") or ""
+                    if fw.lower() not in summary.lower():
+                        stack["stack_summary"] = (
+                            f"{fw} · {summary}" if summary and summary != "Unknown" else fw
+                        )
+                    if not stack.get("app_identity_name"):
+                        stack["app_identity_name"] = fw
+
                 if verbose:
                     print("  Querying AVID database for AI vulnerabilities...")
                 ml_stack = (
@@ -651,6 +674,7 @@ class WebScannerAgent:
                 if ai_infra_result else None
             ),
             "action_results": action_results,
+            "response_headers": initial_headers,
             "headers_capture_failed": headers_capture_failed,
         }
 
