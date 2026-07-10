@@ -478,17 +478,20 @@ class AuthSignal:
 
 
 ENDPOINT_TYPE_RULES: List[Tuple[re.Pattern, str, str]] = [
-    (re.compile(r"/(chat|completions|generate|messages|ask|conversation)", re.I), "inference",  "critical"),
-    (re.compile(r"/(embed|embedding)", re.I),                                      "embedding",  "high"),
-    (re.compile(r"/(pull|push|delete|copy|create|import)", re.I),                  "management", "critical"),
-    (re.compile(r"/(model|models|tags|version|health|info|config)", re.I),         "metadata",   "medium"),
-    (re.compile(r"/(tool|function|plugin|action|execute|run)", re.I),              "tool",       "high"),
-    (re.compile(r"/(memory|store|recall|history)", re.I),                          "memory",     "high"),
-    (re.compile(r"/(search|retrieve|vector|rag)", re.I),                           "retrieval",  "high"),
-    (re.compile(r"/(agent|orchestrat|workflow|plan)", re.I),                       "agentic",    "high"),
-    (re.compile(r"/(upload|file|image|audio|vision)", re.I),                       "multimodal", "medium"),
-    (re.compile(r"/(graphql|query)", re.I),                                        "graphql",    "high"),
-    (re.compile(r"/(openapi|swagger|docs|schema)", re.I),                          "schema",     "low"),
+    # Segment-aware: /chat matches /chat or /chat/... but NOT /chatflows.
+    (re.compile(r"/(?:chat|completions|generate|messages|ask|conversation|prediction|predict)(?:/|$)", re.I),
+     "inference",  "critical"),
+    (re.compile(r"/(?:embed|embeddings?)(?:/|$)", re.I),                           "embedding",  "high"),
+    (re.compile(r"/(?:pull|push|delete|copy|create|import)(?:/|$)", re.I),         "management", "critical"),
+    (re.compile(r"/(?:models?|tags|version|health|info|config)(?:/|$)", re.I),     "metadata",   "medium"),
+    (re.compile(r"/(?:tool|function|plugin|action|execute|run)(?:/|$)", re.I),     "tool",       "high"),
+    (re.compile(r"/(?:memory|store|recall|history)(?:/|$)", re.I),                 "memory",     "high"),
+    (re.compile(r"/(?:search|retrieve|vector|rag)(?:/|$)", re.I),                  "retrieval",  "high"),
+    (re.compile(r"/(?:agents?|orchestrat|workflow|plan)(?:/|$)", re.I),            "agentic",    "high"),
+    (re.compile(r"/(?:upload|file|image|audio|vision)(?:/|$)", re.I),              "multimodal", "medium"),
+    (re.compile(r"/(?:graphql|query)(?:/|$)", re.I),                               "graphql",    "high"),
+    (re.compile(r"/(?:chatflows|flows|components|nodes|openapi|swagger|docs|schema)(?:/|$)", re.I),
+     "schema",     "low"),
 ]
 
 
@@ -688,11 +691,16 @@ class AIFingerprintAgent:
         base = target_url.rstrip("/")
 
         if not page_html:
-            _, page_headers, page_html = self._fetch(base)
+            # Gradio/Langflow shells can exceed 8 KiB before useful markers appear.
+            status, page_headers, page_html = self._fetch(base, max_bytes=200_000)
             if not response_headers:
                 response_headers = page_headers
             if not page_html:
-                logger.warning("[fingerprint] empty root page body from %s", base)
+                logger.warning(
+                    "[fingerprint] empty root page body from %s (HTTP %s) — "
+                    "host unreachable or returned no content",
+                    base, status)
+                # Still probe Gradio/Langflow config even when the root shell is empty.
 
         spa_catch_all = await self._detect_spa_catch_all(base)
         if spa_catch_all and verbose:
@@ -2081,12 +2089,12 @@ class AIFingerprintAgent:
         method: str = "GET",
         data: Optional[bytes] = None,
     ) -> Tuple[int, Dict, str]:
-        try:
+        def _once(target: str) -> Tuple[int, Dict, str]:
             req = urllib.request.Request(
-                url, data=data,
+                target, data=data,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (SecurityScanner)",
-                    "Accept":     "application/json, text/html, */*",
+                    "User-Agent": "Mozilla/5.0 (compatible; AISecurityScanner/1.0)",
+                    "Accept":     "text/html,application/json,application/xhtml+xml,*/*;q=0.8",
                     **({"Content-Type": "application/json"} if data else {}),
                 },
                 method=method,
@@ -2094,11 +2102,34 @@ class AIFingerprintAgent:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read(max_bytes).decode("utf-8", errors="replace")
                 return resp.status, dict(resp.headers), body
+
+        try:
+            return _once(url)
         except urllib.error.HTTPError as exc:
             try:
-                body = exc.read(2048).decode("utf-8", errors="replace")
+                body = exc.read(max(2048, max_bytes)).decode("utf-8", errors="replace")
             except Exception:
                 body = ""
             return exc.code, dict(exc.headers) if exc.headers else {}, body
-        except Exception:
+        except Exception as exc:
+            # localhost often resolves to ::1 first; retry 127.0.0.1 for dual-stack hosts.
+            alt = None
+            if "://localhost" in url.lower() or "://[::1]" in url.lower():
+                alt = (url.replace("://localhost", "://127.0.0.1")
+                          .replace("://Localhost", "://127.0.0.1")
+                          .replace("://[::1]", "://127.0.0.1"))
+            if alt and alt != url:
+                try:
+                    return _once(alt)
+                except urllib.error.HTTPError as exc2:
+                    try:
+                        body = exc2.read(max(2048, max_bytes)).decode("utf-8", errors="replace")
+                    except Exception:
+                        body = ""
+                    return exc2.code, dict(exc2.headers) if exc2.headers else {}, body
+                except Exception as exc2:
+                    logger.warning("[fingerprint] fetch failed %s (%s); retry %s also failed (%s)",
+                                   url, exc, alt, exc2)
+                    return 0, {}, ""
+            logger.warning("[fingerprint] fetch failed %s: %s", url, exc)
             return 0, {}, ""

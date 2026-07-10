@@ -15,6 +15,7 @@ from multiagent.agents.ai_agents.ai_fingerprint import (
     FRAMEWORK_PROBE_PATHS,
     FRAMEWORK_SIGNATURES,
     _looks_html_body,
+    classify_endpoint,
 )
 from multiagent.agents.ai_agents.Ai_Infra_agent import (
     AIInfraAgent,
@@ -235,6 +236,22 @@ def test_injection_capable_requires_inference_segment():
     assert not t._is_injection_capable("http://x/api/v1/chatflows")
     assert not t._is_injection_capable("http://x/openapi.json")
     assert not t._is_injection_capable("http://x/api/models")
+
+
+def test_classify_endpoint_segment_boundaries():
+    chatflows = classify_endpoint("http://x/api/v1/chatflows")
+    assert chatflows.endpoint_type == "schema"
+    assert chatflows.risk == "low"
+
+    chat = classify_endpoint("http://x/api/chat")
+    assert chat.endpoint_type == "inference"
+    assert chat.risk == "critical"
+
+    prediction = classify_endpoint("http://x/api/v1/prediction")
+    assert prediction.endpoint_type == "inference"
+
+    agents = classify_endpoint("http://x/api/agents")
+    assert agents.endpoint_type == "agentic"
 
 
 def test_framework_probe_paths_cover_target_apps():
