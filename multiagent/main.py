@@ -1132,7 +1132,13 @@ async def threat_modeling_query(request: Request):
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
         if not threat_modeling_agent:
-            raise HTTPException(status_code=503, detail="Agent not available")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Agent not available — ThreatModelingAgent failed to start: "
+                    f"{_threat_modeling_init_error or 'unknown error'}"
+                ),
+            )
 
         if not threat_modeling_agent.is_security_query(question):
             return JSONResponse({
