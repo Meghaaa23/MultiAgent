@@ -217,6 +217,9 @@ async def web_search_wrapper(query: str) -> List[Dict]:
 # THREAT MODELING AGENT
 # ============================================================================
 
+threat_modeling_agent = None
+_threat_modeling_init_error = None
+
 try:
     active_client, _ = get_active_client()
     threat_modeling_agent = ThreatModelingAgent(
@@ -227,7 +230,12 @@ try:
     )
     logger.info("✓ Threat Modeling Agent initialized")
 except Exception as e:
-    logger.warning(f"Threat Modeling Agent init failed: {e}")
+    _threat_modeling_init_error = f"{type(e).__name__}: {e}"
+    logger.warning(
+        "Threat Modeling Agent init failed: %s\n%s",
+        _threat_modeling_init_error,
+        traceback.format_exc(),
+    )
     threat_modeling_agent = None
 
 logger.info("✓ All agents initialized")
@@ -463,9 +471,10 @@ async def health_check():
         "agents":          "ready",
         "autogen":         "enabled",
         "threat_modeling": "available" if threat_modeling_agent else "not initialized",
-        "web_scanning":    "enabled",
-        "ai_backdoor":     "enabled",   # ← new
-        "avid_lookup":     "enabled",   # ← new
+        "threat_modeling_error": _threat_modeling_init_error,
+        "web_scanning":    "enabled" if threat_modeling_agent else "disabled (agent init failed)",
+        "ai_backdoor":     "enabled" if threat_modeling_agent else "disabled (agent init failed)",
+        "avid_lookup":     "enabled" if threat_modeling_agent else "disabled (agent init failed)",
         "active_sessions": len(session_teams),
     }
 
@@ -819,7 +828,14 @@ async def query_stream(request: StreamQueryRequest):
             await asyncio.sleep(0)
 
             if not threat_modeling_agent:
-                yield _format_sse("error", {"message": "Agent not initialized"})
+                detail = _threat_modeling_init_error or "unknown startup failure"
+                yield _format_sse("error", {
+                    "message": (
+                        "Agent not initialized. "
+                        f"Backend ThreatModelingAgent failed to start: {detail}. "
+                        "Check server logs, pull latest branch, and restart the API."
+                    ),
+                })
                 return
 
             is_security = threat_modeling_agent.is_security_query(question)
@@ -1059,7 +1075,13 @@ async def scan_web_application(request: Request):
         if not target_url:
             raise HTTPException(status_code=400, detail="Missing target_url")
         if not threat_modeling_agent:
-            raise HTTPException(status_code=503, detail="Scanner not available")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Scanner not available — ThreatModelingAgent failed to start: "
+                    f"{_threat_modeling_init_error or 'unknown error'}"
+                ),
+            )
 
         logger.info(f"SCAN: {target_url}")
 

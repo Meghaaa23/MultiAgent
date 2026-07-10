@@ -19,7 +19,58 @@ from ..ai_agents.ai_fingerprint            import AIFingerprintAgent
 from ..ai_agents.avid_lookup_agent         import AVIDLookupAgent
 from ..ai_agents.ai_vulnerability_test     import AIVulnerabilityTester
 from ..ai_agents.Ai_Infra_agent            import AIInfraAgent
-from ..ai_agents.ai_scan_phase             import run_ai_escalation_phase, should_escalate_ai
+
+try:
+    from ..ai_agents.ai_scan_phase import run_ai_escalation_phase, should_escalate_ai
+except ImportError as _ai_phase_err:  # pragma: no cover - fallback for partial deploys
+    logger.warning("ai_scan_phase unavailable (%s) — using inline escalation fallback",
+                   _ai_phase_err)
+
+    def should_escalate_ai(ai_fingerprint):
+        if not ai_fingerprint or not ai_fingerprint.get("is_ai_powered"):
+            return False
+        conf = str(ai_fingerprint.get("confidence") or "").lower()
+        has_concrete = bool(
+            ai_fingerprint.get("ml_endpoints")
+            or ai_fingerprint.get("ai_headers")
+            or ai_fingerprint.get("auth_required_paths")
+            or ai_fingerprint.get("framework")
+        )
+        return conf in ("high", "very_high") or has_concrete
+
+    async def run_ai_escalation_phase(*, target_url, ai_fingerprint, avid_lookup,
+                                      ai_vuln_tester, ai_infra_agent, verbose=False):
+        """Minimal fallback mirroring ai_scan_phase when the module is missing."""
+        out = {"escalated": False, "avid_results": None, "ai_vuln_results": None,
+               "ai_infra_result": None, "findings": []}
+        if not should_escalate_ai(ai_fingerprint):
+            if verbose:
+                print("  No AI/ML components detected — AI-specific tests skipped\n")
+            return out
+        out["escalated"] = True
+        try:
+            out["avid_results"] = await avid_lookup.lookup(
+                ai_fingerprint=ai_fingerprint,
+                ml_stack=list(ai_fingerprint.get("ml_libraries") or []),
+                verbose=verbose,
+            )
+        except Exception as exc:
+            logger.warning("AVID lookup failed: %s", exc)
+        try:
+            vuln = await ai_vuln_tester.test_all(
+                ai_fingerprint=ai_fingerprint, target_url=target_url, verbose=verbose)
+            out["ai_vuln_results"] = vuln
+            for f in (vuln.get("confirmed_ai_vulns") or []) + (vuln.get("potential_ai_vulns") or []):
+                f.setdefault("category", "ai_vulnerability")
+                out["findings"].append(f)
+        except Exception as exc:
+            logger.warning("AI vuln tests failed: %s", exc)
+        try:
+            out["ai_infra_result"] = await ai_infra_agent.scan(
+                target_url=target_url, ai_stack=ai_fingerprint)
+        except Exception as exc:
+            logger.warning("AI infra scan failed: %s", exc)
+        return out
 
 logger = logging.getLogger(__name__)
 
