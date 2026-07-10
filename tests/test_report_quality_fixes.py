@@ -20,6 +20,26 @@ from multiagent.agents.webappscanner.action_agent import ActionAgent
 from multiagent.agents.ai_agents.ai_vulnerability_test import AIVulnerabilityTester
 
 
+def test_format_tech_confidence_accepts_string_and_float():
+    """Mirror threat_modeling_agent._format_tech_confidence without heavy imports."""
+    def _format_tech_confidence(conf) -> str:
+        if conf is None or conf == "":
+            return "unknown"
+        if isinstance(conf, (int, float)):
+            if 0 <= float(conf) <= 1:
+                return f"{float(conf):.0%}"
+            return f"{float(conf):.2f}"
+        return str(conf)
+
+    assert _format_tech_confidence("high") == "high"
+    assert _format_tech_confidence(0.85) == "85%"
+    assert _format_tech_confidence(None) == "unknown"
+    # Regression: f"{conf:.2f}" must not be used on string confidence
+    conf = "high"
+    display = f"Open WebUI [conf={_format_tech_confidence(conf)}]"
+    assert display == "Open WebUI [conf=high]"
+
+
 def test_looks_html_body_endpoint_discovery():
     assert _looks_html_body("text/html", "<html></html>")
     assert _looks_html_body("", "<!DOCTYPE html><html>")

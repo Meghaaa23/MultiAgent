@@ -79,6 +79,18 @@ def _sanitize_report(report_text: str) -> str:
     return "\n".join(final_lines)
 
 
+def _format_tech_confidence(conf) -> str:
+    """Format technology confidence whether it is a float (0-1) or a label."""
+    if conf is None or conf == "":
+        return "unknown"
+    if isinstance(conf, (int, float)):
+        # Wappalyzer-style 0..1 scores
+        if 0 <= float(conf) <= 1:
+            return f"{float(conf):.0%}"
+        return f"{float(conf):.2f}"
+    return str(conf)
+
+
 def _format_confirmed_stack(stack: Dict) -> str:
     confirmed  = stack.get("technologies", [])
     unverified = stack.get("unverified_hints", [])
@@ -97,7 +109,7 @@ def _format_confirmed_stack(stack: Dict) -> str:
             ver     = t.get("version", "")
             conf    = t.get("confidence", 0)
             display = f"{name} {ver}".strip() if ver else name
-            parts.append(f"{display} [conf={conf:.2f}]")
+            parts.append(f"{display} [conf={_format_tech_confidence(conf)}]")
         else:
             parts.append(f"{t} [{evidence_map.get(t, 'confirmed')}]")
 
@@ -224,7 +236,9 @@ def _build_section_2(stack, endpoints, cves):
                 ver     = dt.get("version", "")
                 conf    = dt.get("confidence", 0)
                 display = f"{name} {ver}".strip() if ver else name
-                lines.append(f"- {display}  [{cat}, {conf:.0%} confidence]")
+                lines.append(
+                    f"- {display}  [{cat}, {_format_tech_confidence(conf)} confidence]"
+                )
 
                 tech_cves = _cves_for_tech(name, cves)
                 if tech_cves:
