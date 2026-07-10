@@ -57,6 +57,9 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
     "csp_ai_domain":             6,
     "meta_ai_tag":               4,
     "favicon_known_framework":   5,
+    "page_title_ai":             8,
+    "html_brand_signal":        12,
+    "spa_catch_all":             2,
 
     "dom_assistant_role":        3,
     "html_ai_form":              3,
@@ -81,44 +84,64 @@ def score_to_confidence(score: int) -> str:
 FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
     "Open WebUI": {
         "headers":     {"x-open-webui": None},
-        "paths":       ["/api/chat", "/api/models", "/api/chat/completions"],
-        "js_strings":  ["open-webui", "OpenWebUI", "webui-logo"],
+        "paths":       ["/api/chat", "/api/models", "/api/chat/completions",
+                        "/api/v1/models", "/ollama/api/tags", "/api/v1/auths"],
+        "js_strings":  ["open-webui", "OpenWebUI", "open webui", "webui-logo",
+                        "Open WebUI"],
         "js_globals":  ["WEBUI_NAME", "WEBUI_URL"],
-        "cookie_names":["webui-session"],
+        "cookie_names":["webui-session", "token"],
+        "title_hints": ["open webui", "openwebui"],
         "capabilities": ["chat", "rag", "tool_calling", "image_generation", "web_search"],
     },
     "Flowise": {
-        "paths":       ["/api/v1/prediction", "/api/v1/chatflows", "/api/v1/nodes"],
+        "paths":       ["/api/v1/prediction", "/api/v1/chatflows", "/api/v1/nodes",
+                        "/api/v1/ping", "/api/v1/chatflows-streaming"],
         "js_strings":  ["flowise", "Flowise", "FlowiseAI"],
         "js_globals":  ["FLOWISE_URL"],
+        "title_hints": ["flowise"],
         "capabilities": ["chat", "rag", "tool_calling", "workflow"],
     },
     "Langflow": {
-        "paths":       ["/api/v1/flows", "/api/v1/run", "/api/v1/components"],
+        "paths":       ["/api/v1/flows", "/api/v1/run", "/api/v1/components",
+                        "/api/v1/all", "/api/v1/build", "/health"],
         "js_strings":  ["langflow", "Langflow"],
         "js_globals":  ["LANGFLOW_AUTO_LOGIN"],
+        "title_hints": ["langflow"],
         "capabilities": ["chat", "rag", "tool_calling", "workflow", "multi_agent"],
+    },
+    "Gradio": {
+        "paths":       ["/config", "/info", "/queue/join", "/run/predict",
+                        "/call/predict", "/gradio_api/info"],
+        "js_strings":  ["gradio", "Gradio", "__gradio_mode__"],
+        "title_hints": ["gradio"],
+        "capabilities": ["chat", "image_generation"],
     },
     "Dify": {
         "paths":       ["/api/chat-messages", "/api/workflows/run", "/api/apps"],
         "js_strings":  ["dify.ai", "Dify", "difyChatbot"],
         "cookie_names":["dify_session"],
+        "title_hints": ["dify"],
         "capabilities": ["chat", "rag", "tool_calling", "workflow", "image_generation"],
     },
     "AnythingLLM": {
-        "paths":       ["/api/workspace", "/api/chat", "/api/system/env"],
-        "js_strings":  ["anythingllm", "AnythingLLM", "mintplex"],
+        "paths":       ["/api/workspace", "/api/chat", "/api/system/env",
+                        "/api/v1/openai/chat/completions", "/api/embed"],
+        "js_strings":  ["anythingllm", "AnythingLLM", "mintplex", "anything-llm"],
+        "title_hints": ["anythingllm", "anything llm"],
         "capabilities": ["chat", "rag", "memory"],
     },
     "LibreChat": {
-        "paths":       ["/api/messages", "/api/ask", "/api/convos"],
+        "paths":       ["/api/messages", "/api/ask", "/api/convos",
+                        "/api/agents", "/api/models", "/api/endpoints"],
         "js_strings":  ["librechat", "LibreChat"],
         "cookie_names":["refreshToken"],
+        "title_hints": ["librechat"],
         "capabilities": ["chat", "tool_calling", "image_generation", "web_search"],
     },
     "LobeChat": {
         "paths":       ["/api/chat", "/api/openai"],
         "js_strings":  ["lobe-chat", "LobeChat", "@lobehub"],
+        "title_hints": ["lobechat", "lobe chat"],
         "capabilities": ["chat", "tool_calling", "image_generation"],
     },
     "OpenHands": {
@@ -294,6 +317,7 @@ SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
     ("/api/tags",             "schema"),
     ("/v1/models",            "schema"),
     ("/api/models",           "schema"),
+    ("/api/v1/models",        "schema"),
     ("/v2/health/ready",      "schema"),
     ("/v2/models",            "schema"),
     ("/api/predict",          "ml"),
@@ -302,7 +326,101 @@ SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
     ("/predictions",          "ml"),
     ("/runs",                 "chat"),
     ("/threads",              "chat"),
+    # Framework-specific seeds (SPA UIs often hide these behind auth)
+    ("/api/v1/chatflows",     "schema"),
+    ("/api/v1/flows",         "schema"),
+    ("/api/v1/run",           "chat"),
+    ("/api/v1/components",    "schema"),
+    ("/api/v1/nodes",         "schema"),
+    ("/api/v1/ping",          "schema"),
+    ("/api/ask",              "chat"),
+    ("/api/messages",         "chat"),
+    ("/api/convos",           "schema"),
+    ("/api/endpoints",        "schema"),
+    ("/api/workspace",        "schema"),
+    ("/api/system/env",       "schema"),
+    ("/api/v1/openai/chat/completions", "chat"),
+    ("/ollama/api/tags",      "schema"),
+    ("/config",               "schema"),
+    ("/info",                 "schema"),
+    ("/queue/join",           "chat"),
+    ("/run/predict",          "chat"),
+    ("/gradio_api/info",      "schema"),
+    ("/api/chat-messages",    "chat"),
 ]
+
+# Extra paths probed once a framework is identified from HTML/JS brand signals.
+FRAMEWORK_PROBE_PATHS: Dict[str, List[Tuple[str, str]]] = {
+    "Open WebUI": [
+        ("/api/models", "schema"),
+        ("/api/v1/models", "schema"),
+        ("/api/chat", "chat"),
+        ("/api/chat/completions", "chat"),
+        ("/api/v1/chat/completions", "chat"),
+        ("/ollama/api/tags", "schema"),
+        ("/api/v1/auths", "schema"),
+    ],
+    "Flowise": [
+        ("/api/v1/prediction", "chat"),
+        ("/api/v1/chatflows", "schema"),
+        ("/api/v1/nodes", "schema"),
+        ("/api/v1/ping", "schema"),
+    ],
+    "Langflow": [
+        ("/api/v1/flows", "schema"),
+        ("/api/v1/run", "chat"),
+        ("/api/v1/components", "schema"),
+        ("/api/v1/all", "schema"),
+        ("/health", "schema"),
+    ],
+    "Gradio": [
+        ("/config", "schema"),
+        ("/info", "schema"),
+        ("/queue/join", "chat"),
+        ("/run/predict", "chat"),
+        ("/gradio_api/info", "schema"),
+    ],
+    "AnythingLLM": [
+        ("/api/workspace", "schema"),
+        ("/api/chat", "chat"),
+        ("/api/system/env", "schema"),
+        ("/api/v1/openai/chat/completions", "chat"),
+    ],
+    "LibreChat": [
+        ("/api/ask", "chat"),
+        ("/api/messages", "chat"),
+        ("/api/convos", "schema"),
+        ("/api/models", "schema"),
+        ("/api/endpoints", "schema"),
+        ("/api/agents", "chat"),
+    ],
+    "Dify": [
+        ("/api/chat-messages", "chat"),
+        ("/api/workflows/run", "chat"),
+        ("/api/apps", "schema"),
+    ],
+    "Ollama": [
+        ("/api/tags", "schema"),
+        ("/api/chat", "chat"),
+        ("/api/generate", "chat"),
+        ("/v1/chat/completions", "chat"),
+        ("/v1/models", "schema"),
+    ],
+}
+
+SPA_CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
+
+AI_TITLE_KEYWORDS = [
+    "ai", "llm", "gpt", "chat", "assistant", "bot", "openai", "claude",
+    "ollama", "webui", "flowise", "langflow", "librechat", "gradio",
+    "dify", "anythingllm", "lobe", "huggingface", "inference",
+]
+
+
+def _looks_html_body(ct: str, body: str) -> bool:
+    b = (body or "").strip().lower()
+    return "html" in (ct or "").lower() or b.startswith(("<!doctype", "<html"))
+
 
 OPENAPI_SPEC_PATHS = [
     "/openapi.json", "/openapi.yaml",
@@ -441,6 +559,9 @@ class FingerprintReport:
 
     evidence_items:   List[EvidenceItem] = field(default_factory=list)
     atlas_techniques: List[str]          = field(default_factory=list)
+    page_title:       str                = ""
+    spa_catch_all:    bool               = False
+    app_description:  str                = ""
 
     def to_dict(self) -> Dict:
         return {
@@ -473,10 +594,11 @@ class FingerprintReport:
             "openapi_schema":      self.openapi_schema,
             "graphql_types":       self.graphql_types,
             "deployment_signals":  self.deployment_signals,
-            "page_title":          "",
+            "page_title":          self.page_title,
+            "spa_catch_all":       self.spa_catch_all,
             "technologies":        self.technologies,
             "api_schema":          {"tools": [], "openapi": self.openapi_schema},
-            "app_description":     "",
+            "app_description":     self.app_description,
             "response_headers":    {},
             "chat_components":     [],
             "atlas_techniques":    self.atlas_techniques,
@@ -569,8 +691,24 @@ class AIFingerprintAgent:
             if not response_headers:
                 response_headers = page_headers
 
-        js_urls, html_evidence, extracted_links = self._analyse_html(
-            page_html, base, response_headers)
+        spa_catch_all = await self._detect_spa_catch_all(base)
+        if spa_catch_all and verbose:
+            print("    [spa] catch-all/SPA fallback detected — using content-based probes")
+
+        js_urls, html_evidence, extracted_links, page_title, brand_frameworks = (
+            self._analyse_html(page_html, base, response_headers)
+        )
+        if spa_catch_all:
+            html_evidence.append(EvidenceItem.make(
+                "spa_catch_all",
+                "SPA/catch-all routing detected (canary path returned app shell)",
+                "passive"))
+
+        # Prefer framework-specific seeds when brand is already visible in HTML.
+        extra_seed_paths = list(extracted_links)
+        for fw in brand_frameworks:
+            for path, _cat in FRAMEWORK_PROBE_PATHS.get(fw, []):
+                extra_seed_paths.append(path)
 
         parallel = await asyncio.gather(
             self._fetch_and_analyse_js(js_urls, base, verbose),
@@ -578,7 +716,7 @@ class AIFingerprintAgent:
             self._probe_graphql(base, verbose),
             self._fetch_robots_sitemap(base, verbose),
             self._probe_ranked_endpoints(
-                base, extracted_links, verbose),
+                base, extra_seed_paths, verbose, spa_catch_all=spa_catch_all),
             self._analyse_headers_cookies(response_headers, verbose),
             return_exceptions=True,
         )
@@ -587,7 +725,7 @@ class AIFingerprintAgent:
         all_evidence: List[EvidenceItem] = list(html_evidence)
         ml_endpoints:    List[str]  = []
         discovered_paths: List[str] = []
-        all_frameworks:  List[str]  = []
+        all_frameworks:  List[str]  = list(brand_frameworks)
         auth_signals:    List[AuthSignal] = []
         openapi_schema:  Dict       = {}
         graphql_types:   List[str]  = []
@@ -605,6 +743,10 @@ class AIFingerprintAgent:
             js_api_paths = js_r.get("api_paths", [])
             raw_html_js  = js_r.get("raw_js", "")
             discovered_paths.extend(js_api_paths)
+            # JS may reveal a framework brand we missed in HTML.
+            for fw in js_r.get("frameworks", []):
+                if fw in FRAMEWORK_SIGNATURES and fw not in brand_frameworks:
+                    brand_frameworks.append(fw)
 
         if isinstance(openapi_r, dict) and openapi_r.get("found"):
             openapi_schema = openapi_r.get("schema", {})
@@ -615,19 +757,45 @@ class AIFingerprintAgent:
         if isinstance(passive_r, dict):
             discovered_paths.extend(passive_r.get("paths", []))
 
+        # Second-pass: probe framework-specific paths once JS/HTML brands are known.
+        fw_hint = brand_frameworks[:]
+        for fw in all_frameworks:
+            if fw in FRAMEWORK_PROBE_PATHS and fw not in fw_hint:
+                fw_hint.append(fw)
+        if fw_hint:
+            fw_probe = await self._probe_framework_paths(
+                base, fw_hint, verbose, spa_catch_all=spa_catch_all)
+            if isinstance(fw_probe, dict):
+                all_evidence.extend(fw_probe.get("evidence", []))
+                ml_endpoints.extend(fw_probe.get("endpoints", []))
+                all_frameworks.extend(fw_probe.get("frameworks", []))
+                auth_signals.extend(fw_probe.get("auth_signals", []))
+
+        # Auth-gated AI endpoints are still AI surfaces — track them as endpoints.
+        for sig in auth_signals:
+            if sig.endpoint and sig.endpoint not in ml_endpoints:
+                ml_endpoints.append(sig.endpoint)
+
         behav_r = None
-        probe_targets = (ml_endpoints or [base + p for p, _ in SEED_ENDPOINT_RANKING
-                                          if "chat" in _ or _ == "ml"])
+        # Prefer unauthenticated chat endpoints for behavioral probes.
+        auth_urls = {a.endpoint for a in auth_signals}
+        open_targets = [e for e in ml_endpoints if e not in auth_urls]
+        probe_targets = open_targets or [
+            base + p for p, cat in SEED_ENDPOINT_RANKING
+            if cat in ("chat", "ml")
+        ]
         if self.run_behavioral_probes and probe_targets:
             behav_r = await self._behavioral_probes(probe_targets[:2], verbose)
             if isinstance(behav_r, dict):
                 all_evidence.extend(behav_r.get("evidence", []))
 
         if js_api_paths:
-            extra = await self._confirm_js_paths(base, js_api_paths, verbose)
+            extra = await self._confirm_js_paths(
+                base, js_api_paths, verbose, spa_catch_all=spa_catch_all)
             if isinstance(extra, dict):
                 all_evidence.extend(extra.get("evidence", []))
                 ml_endpoints.extend(extra.get("endpoints", []))
+                auth_signals.extend(extra.get("auth_signals", []))
 
         if discovered_endpoints:
             disc_r = await self._check_discovered_endpoints(discovered_endpoints)
@@ -639,6 +807,16 @@ class AIFingerprintAgent:
         discovered_paths = list(dict.fromkeys(discovered_paths))
         all_frameworks   = list(dict.fromkeys(all_frameworks))
 
+        # Deduplicate auth signals by endpoint.
+        seen_auth: Set[str] = set()
+        deduped_auth: List[AuthSignal] = []
+        for sig in auth_signals:
+            if sig.endpoint in seen_auth:
+                continue
+            seen_auth.add(sig.endpoint)
+            deduped_auth.append(sig)
+        auth_signals = deduped_auth
+
         framework_result = self._identify_framework(
             page_html, raw_html_js, response_headers,
             ml_endpoints + discovered_paths, all_evidence)
@@ -646,6 +824,8 @@ class AIFingerprintAgent:
         detected_framework   = framework_result.get("framework", "")
         detected_protocol    = framework_result.get("protocol", "")
         detected_infra       = framework_result.get("inference_server", "")
+        if not detected_framework and brand_frameworks:
+            detected_framework = brand_frameworks[0]
         if detected_framework and detected_framework not in all_frameworks:
             all_frameworks.insert(0, detected_framework)
         if detected_protocol and detected_protocol not in all_frameworks:
@@ -655,14 +835,26 @@ class AIFingerprintAgent:
             detected_framework, all_frameworks, openapi_schema,
             ml_endpoints, graphql_types)
 
+        # Deduplicate evidence by (key, detail) to avoid meta-tag spam.
+        seen_ev: Set[Tuple[str, str]] = set()
+        deduped_evidence: List[EvidenceItem] = []
+        for ev in all_evidence:
+            k = (ev.key, ev.detail)
+            if k in seen_ev:
+                continue
+            seen_ev.add(k)
+            deduped_evidence.append(ev)
+        all_evidence = deduped_evidence
+
         total_score = sum(ev.weight for ev in all_evidence)
         confidence  = score_to_confidence(total_score)
-        is_ai       = total_score >= 26
+        is_ai       = total_score >= 20 or bool(detected_framework and total_score >= 12)
 
         atlas: List[str] = []
         for ep in ml_endpoints:
             path = urllib.parse.urlparse(ep).path.lower()
-            if any(x in path for x in ["/chat", "/completions", "/generate", "/messages"]):
+            if any(x in path for x in ["/chat", "/completions", "/generate", "/messages",
+                                       "/ask", "/prediction", "/run"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["chat"])
             elif any(x in path for x in ["/embed", "/embedding"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["embedding"])
@@ -689,6 +881,8 @@ class AIFingerprintAgent:
                 deployment["server_header"] = ev.detail
             if "docker" in ev.detail.lower() or "container" in ev.detail.lower():
                 deployment["containerized"] = True
+        if spa_catch_all:
+            deployment["spa_catch_all"] = True
         if auth_signals:
             deployment["authentication"] = list({a.auth_type for a in auth_signals})
         else:
@@ -698,6 +892,17 @@ class AIFingerprintAgent:
                             "Triton", "TorchServe", "SageMaker"}
         infra_layer = detected_framework if detected_framework in INFRA_FRAMEWORKS else detected_infra
         app_layer   = detected_framework if detected_framework not in INFRA_FRAMEWORKS else ""
+
+        meta_desc = ""
+        m_desc = re.search(
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+            page_html or "", re.I)
+        if not m_desc:
+            m_desc = re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']',
+                page_html or "", re.I)
+        if m_desc:
+            meta_desc = m_desc.group(1)[:240]
 
         return FingerprintReport(
             is_ai_powered         = is_ai,
@@ -723,17 +928,53 @@ class AIFingerprintAgent:
             deployment_signals    = deployment,
             evidence_items        = all_evidence,
             atlas_techniques      = atlas,
+            page_title            = page_title,
+            spa_catch_all         = spa_catch_all,
+            app_description       = meta_desc,
         )
 
     def _analyse_html(
         self, html: str, base: str, headers: Dict
-    ) -> Tuple[List[str], List[EvidenceItem], List[str]]:
+    ) -> Tuple[List[str], List[EvidenceItem], List[str], str, List[str]]:
+        """Return (js_urls, evidence, links, page_title, brand_frameworks)."""
         evidence: List[EvidenceItem] = []
         js_urls:  List[str]          = []
         links:    List[str]          = []
+        brands:   List[str]          = []
+        page_title = ""
 
         if not html:
-            return js_urls, evidence, links
+            return js_urls, evidence, links, page_title, brands
+
+        m_title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        if m_title:
+            page_title = re.sub(r"\s+", " ", m_title.group(1)).strip()
+            title_low = page_title.lower()
+            if any(kw in title_low for kw in AI_TITLE_KEYWORDS):
+                evidence.append(EvidenceItem.make(
+                    "page_title_ai", f"AI page title: {page_title[:80]}", "html"))
+        else:
+            title_low = ""
+
+        # Brand / product name signals in title + early HTML (before JS fetch).
+        html_low = html[:80_000].lower()
+        for fw_name, sig in FRAMEWORK_SIGNATURES.items():
+            hit = False
+            for hint in sig.get("title_hints", []):
+                if hint and hint in title_low:
+                    hit = True
+                    break
+            if not hit:
+                for s in sig.get("js_strings", []):
+                    if s.lower() in html_low:
+                        hit = True
+                        break
+            if hit:
+                brands.append(fw_name)
+                evidence.append(EvidenceItem.make(
+                    "html_brand_signal",
+                    f"Brand/product signal for {fw_name}",
+                    "html", framework=fw_name))
 
         for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I):
             src = m.group(1)
@@ -742,11 +983,22 @@ class AIFingerprintAgent:
             if any(x in src for x in [
                 "/assets/", "/static/", "/dist/", "/js/", "/build/",
                 "/_next/", ".bundle.", "chunk", "main.", "app.", "index.",
+                "/gradio_api/",
             ]):
                 js_urls.append(src)
+            # Also keep any same-origin script that looks like an app bundle.
+            elif src.endswith(".js") and (
+                urllib.parse.urlparse(src).netloc == ""
+                or urllib.parse.urlparse(src).netloc == urllib.parse.urlparse(base).netloc
+            ):
+                js_urls.append(src)
 
-        for m in re.finditer(r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant)[^"\']*)["\']',
-                             html, re.I):
+        for m in re.finditer(
+            r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant|'
+            r'flowise|langflow|librechat|open.?webui|ollama|gradio|dify|'
+            r'anythingllm|langchain)[^"\']*)["\']',
+            html, re.I,
+        ):
             evidence.append(EvidenceItem.make(
                 "meta_ai_tag", f"AI meta tag: {m.group(1)[:60]}", "html"))
 
@@ -761,7 +1013,7 @@ class AIFingerprintAgent:
             if href.startswith("/") and any(
                 x in href.lower() for x in [
                     "/chat", "/api", "/playground", "/workspace",
-                    "/dashboard", "/app", "/assistant",
+                    "/dashboard", "/app", "/assistant", "/flow",
                 ]
             ):
                 links.append(href)
@@ -779,7 +1031,33 @@ class AIFingerprintAgent:
                         "csp_ai_domain",
                         f"CSP connect-src includes {domain}", "passive"))
 
-        return list(dict.fromkeys(js_urls)), evidence, list(dict.fromkeys(links))
+        return (
+            list(dict.fromkeys(js_urls)),
+            evidence,
+            list(dict.fromkeys(links)),
+            page_title,
+            list(dict.fromkeys(brands)),
+        )
+
+    async def _detect_spa_catch_all(self, base: str) -> bool:
+        loop = asyncio.get_event_loop()
+        try:
+            status, headers, body = await loop.run_in_executor(
+                None, lambda: self._fetch(base + SPA_CANARY_PATH))
+            if status == 200 and _looks_html_body(
+                headers.get("Content-Type", "") or headers.get("content-type", ""),
+                body,
+            ):
+                return True
+            # Some SPAs return 200 with the same shell even for JSON Accept.
+            if status == 200 and body and len(body) > 200:
+                root_status, _, root_body = await loop.run_in_executor(
+                    None, lambda: self._fetch(base))
+                if root_status == 200 and root_body and body[:500] == root_body[:500]:
+                    return True
+        except Exception:
+            pass
+        return False
 
     async def _fetch_and_analyse_js(
         self, js_urls: List[str], base: str, verbose: bool
@@ -1090,7 +1368,8 @@ class AIFingerprintAgent:
         return {"evidence": evidence, "paths": list(dict.fromkeys(paths))}
 
     async def _probe_ranked_endpoints(
-        self, base: str, extra_paths: List[str], verbose: bool
+        self, base: str, extra_paths: List[str], verbose: bool,
+        spa_catch_all: bool = False,
     ) -> Dict:
         evidence:    List[EvidenceItem] = []
         endpoints:   List[str]          = []
@@ -1104,13 +1383,28 @@ class AIFingerprintAgent:
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "chat"] +
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c in ("embedding", "ml", "graphql")]
         )
+        # Prioritize extra/framework paths discovered from HTML/JS.
+        for p in extra_paths:
+            path = p if p.startswith("/") else "/" + p
+            if not any(path == existing for existing, _ in ordered):
+                cat = "chat" if self._is_ai_api_path(path) else "schema"
+                ordered.append((path, cat))
 
         async def probe(path: str, category: str):
             url = base + path
             try:
                 status, resp_headers, body = await loop.run_in_executor(
                     None, lambda: self._fetch(url))
-                if status in (404, 405) and category in ("chat", "embedding", "ml", "graphql"):
+                ct = (resp_headers.get("Content-Type")
+                      or resp_headers.get("content-type") or "")
+                # SPA shells return HTML 200 for unknown routes — retry as API POST.
+                needs_post = (
+                    status in (404, 405)
+                    or (status == 200 and _looks_html_body(ct, body))
+                    or (spa_catch_all and status == 200 and category in (
+                        "chat", "embedding", "ml", "graphql"))
+                )
+                if needs_post and category in ("chat", "embedding", "ml", "graphql", "schema"):
                     status, resp_headers, body = await loop.run_in_executor(
                         None, lambda: self._fetch(url, data=b"{}", method="POST"))
                 return self._evaluate_probe_response(
@@ -1121,7 +1415,7 @@ class AIFingerprintAgent:
 
         schema_paths = [(p, c) for p, c in ordered if c == "schema"]
         schema_results = await asyncio.gather(
-            *[probe(p, c) for p, c in schema_paths], return_exceptions=True)
+            *[probe(p, c) for p, c in schema_paths[:20]], return_exceptions=True)
         for r in schema_results:
             if isinstance(r, dict) and r:
                 evidence.extend(r.get("evidence", []))
@@ -1130,7 +1424,7 @@ class AIFingerprintAgent:
                 confirmed += len(r.get("endpoints", []))
 
         for path, category in ordered:
-            if confirmed >= 6:
+            if confirmed >= 8:
                 break
             if category == "schema":
                 continue
@@ -1147,6 +1441,61 @@ class AIFingerprintAgent:
             "evidence":    evidence,
             "endpoints":   list(dict.fromkeys(endpoints)),
             "frameworks":  list(dict.fromkeys(frameworks)),
+            "auth_signals": auth_signals,
+        }
+
+    async def _probe_framework_paths(
+        self,
+        base: str,
+        frameworks: List[str],
+        verbose: bool,
+        spa_catch_all: bool = False,
+    ) -> Dict:
+        evidence: List[EvidenceItem] = []
+        endpoints: List[str] = []
+        fw_hits: List[str] = []
+        auth_signals: List[AuthSignal] = []
+        loop = asyncio.get_event_loop()
+        seen_paths: Set[str] = set()
+
+        async def probe(path: str, category: str):
+            if path in seen_paths:
+                return None
+            seen_paths.add(path)
+            url = base + path
+            try:
+                status, resp_headers, body = await loop.run_in_executor(
+                    None, lambda: self._fetch(url))
+                ct = (resp_headers.get("Content-Type")
+                      or resp_headers.get("content-type") or "")
+                if (status in (404, 405)
+                        or (status == 200 and _looks_html_body(ct, body))
+                        or spa_catch_all):
+                    status, resp_headers, body = await loop.run_in_executor(
+                        None, lambda: self._fetch(url, data=b"{}", method="POST"))
+                return self._evaluate_probe_response(
+                    url, path, category, status, resp_headers, body, auth_signals)
+            except Exception:
+                return None
+
+        tasks = []
+        for fw in frameworks:
+            for path, cat in FRAMEWORK_PROBE_PATHS.get(fw, []):
+                tasks.append(probe(path, cat))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, dict) and r:
+                evidence.extend(r.get("evidence", []))
+                endpoints.extend(r.get("endpoints", []))
+                fw_hits.extend(r.get("frameworks", []))
+
+        if verbose and endpoints:
+            print(f"    [framework-probe] confirmed {len(endpoints)} path(s)")
+
+        return {
+            "evidence": evidence,
+            "endpoints": list(dict.fromkeys(endpoints)),
+            "frameworks": list(dict.fromkeys(fw_hits)),
             "auth_signals": auth_signals,
         }
 
@@ -1171,9 +1520,14 @@ class AIFingerprintAgent:
         ct = headers_low.get("content-type", "")
         body_l = (body or "").lower()
 
+        # SPA HTML responses are not API evidence.
+        if _looks_html_body(ct, body):
+            return {}
+
         if status == 200 and body:
-            if "json" in ct and any(re.search(p, body, re.I)
-                                    for p in AI_RESPONSE_BODY_PATTERNS):
+            if ("json" in ct or body.strip()[:1] in "{[") and any(
+                re.search(p, body, re.I) for p in AI_RESPONSE_BODY_PATTERNS
+            ):
                 ev_key = ("chat_endpoint_200" if category == "chat" else
                           "embedding_endpoint_200" if category == "embedding" else
                           "ml_endpoint_200")
@@ -1193,23 +1547,38 @@ class AIFingerprintAgent:
                     "sse_chunked_transfer",
                     f"Chunked transfer at {path}", "probe", endpoint=url))
 
+            # Gradio /config and similar schema endpoints.
+            if category == "schema" and ("json" in ct or body.strip()[:1] in "{["):
+                if any(k in body_l for k in (
+                    "gradio", "components", "dependencies", "models",
+                    "chatflows", "flows", "ollama", "openai",
+                )):
+                    evidence.append(EvidenceItem.make(
+                        "ml_endpoint_200",
+                        f"AI schema/config at {path} (HTTP 200)",
+                        "probe", endpoint=url))
+                    endpoints.append(url)
+
         if status in (401, 403):
             auth_type = self._detect_auth_type(headers_low, body_l)
             auth_signals.append(AuthSignal(
                 endpoint=url, auth_type=auth_type,
                 status_code=status,
                 detail=f"Auth required ({auth_type}) at {path}"))
-            if category in ("chat", "embedding", "ml", "graphql"):
+            # Any AI-related category (including schema/model lists) counts.
+            if category in ("chat", "embedding", "ml", "graphql", "schema"):
                 evidence.append(EvidenceItem.make(
                     "ml_endpoint_401_403",
                     f"Auth-gated {path} (HTTP {status}, {auth_type})",
                     "probe", endpoint=url))
+                endpoints.append(url)
 
-        if status == 405 and category in ("chat", "embedding", "ml"):
+        if status == 405 and category in ("chat", "embedding", "ml", "schema"):
             evidence.append(EvidenceItem.make(
                 "ml_endpoint_405",
                 f"Endpoint exists {path} (HTTP 405)",
                 "probe", endpoint=url))
+            endpoints.append(url)
 
         if status in (400, 422) and body:
             fw = self._fingerprint_error_body(body, url, evidence)
@@ -1217,6 +1586,15 @@ class AIFingerprintAgent:
                 frameworks.append(fw)
                 if url not in endpoints:
                     endpoints.append(url)
+            elif category in ("chat", "embedding", "ml") and (
+                "json" in ct or body.strip()[:1] in "{["
+            ):
+                # Handler reached with validation error => real API surface.
+                evidence.append(EvidenceItem.make(
+                    "error_generic_validation",
+                    f"API validation response at {path} (HTTP {status})",
+                    "probe", endpoint=url))
+                endpoints.append(url)
 
         for h in AI_RESPONSE_HEADERS:
             if h in headers_low:
@@ -1405,6 +1783,12 @@ class AIFingerprintAgent:
                     score += 2
                     signals.append(f"js:{s}")
 
+            for hint in sig.get("title_hints", []):
+                if hint and hint in combined_text:
+                    score += 4
+                    signals.append(f"title:{hint}")
+                    break
+
             for k, v in (sig.get("headers") or {}).items():
                 if k in headers_low:
                     if v is None or v.lower() in headers_low[k].lower():
@@ -1551,23 +1935,28 @@ class AIFingerprintAgent:
         return await self._confirm_js_paths(base, paths, verbose)
 
     async def _confirm_js_paths(
-        self, base: str, paths: List[str], verbose: bool
+        self, base: str, paths: List[str], verbose: bool,
+        spa_catch_all: bool = False,
     ) -> Dict:
         evidence:  List[EvidenceItem] = []
         endpoints: List[str]          = []
+        auth_signals: List[AuthSignal] = []
         loop = asyncio.get_event_loop()
 
         async def probe(path: str):
+            if not path.startswith("/"):
+                path = "/" + path.lstrip("/")
             url = base + path
             try:
                 status, hdrs, body = await loop.run_in_executor(
                     None, lambda: self._fetch(
                         url, data=b"{}", method="POST"))
-                if status == 0:
+                ct = hdrs.get("Content-Type") or hdrs.get("content-type") or ""
+                if status == 0 or _looks_html_body(ct, body):
                     status, hdrs, body = await loop.run_in_executor(
                         None, lambda: self._fetch(url))
                 r = self._evaluate_probe_response(
-                    url, path, "chat", status, hdrs, body, [])
+                    url, path, "chat", status, hdrs, body, auth_signals)
                 if r:
                     evidence.extend(r.get("evidence", []))
                     endpoints.extend(r.get("endpoints", []))
@@ -1575,7 +1964,11 @@ class AIFingerprintAgent:
                 pass
 
         await asyncio.gather(*[probe(p) for p in paths[:8]], return_exceptions=True)
-        return {"evidence": evidence, "endpoints": list(dict.fromkeys(endpoints))}
+        return {
+            "evidence": evidence,
+            "endpoints": list(dict.fromkeys(endpoints)),
+            "auth_signals": auth_signals,
+        }
 
     async def _check_discovered_endpoints(
         self, endpoints: List[Dict]
