@@ -68,6 +68,14 @@ XSS_PAYLOADS = [
     'javascript:alert(1)',
 ]
 
+# Unique canary — never confirm XSS on generic <script> that already exists in HTML.
+_XSS_CANARY = "yuraxss7f3a9c"
+XSS_PAYLOADS_CANARY = [
+    f'<script>document.title="{_XSS_CANARY}"</script>',
+    f'"><img src=x onerror="document.title=\'{_XSS_CANARY}\'">',
+    f"'><svg onload=\"document.title='{_XSS_CANARY}'\">",
+]
+
 SQLI_PAYLOADS = [
     "' OR '1'='1",
     "' OR 1=1--",
@@ -77,9 +85,9 @@ SQLI_PAYLOADS = [
 ]
 
 OPEN_REDIRECT_PAYLOADS = [
-    "https://evil.com",
-    "//evil.com",
-    "/\\evil.com",
+    "https://evil-test-redirect.example.com",
+    "//evil-test-redirect.example.com",
+    "/\\evil-test-redirect.example.com",
 ]
 
 PATH_TRAVERSAL_PAYLOADS = [
@@ -473,12 +481,16 @@ class AttackVerificationAgent:
 
     async def _test_reflected_xss(self, url: str, param: str,
                                    parsed) -> Optional[Finding]:
-        for payload in XSS_PAYLOADS[:3]:
+        for payload in XSS_PAYLOADS_CANARY[:3]:
             try:
                 test_url             = self._inject_param(parsed, param, payload)
                 status, headers, body = await self._get_full_response(test_url)
 
-                if body and payload in body:
+                # Require unique canary in body — not a generic <script> already on page.
+                if body and _XSS_CANARY in body:
+                    snippet = self._extract_context(body, _XSS_CANARY)
+                    if not snippet:
+                        continue
                     return Finding(
                         vuln_type   = "Reflected XSS",
                         severity    = "High",
@@ -493,7 +505,7 @@ class AttackVerificationAgent:
                         evidence    = Evidence(
                             request               = f"GET {test_url}",
                             response_status       = status,
-                            response_body_snippet = self._extract_context(body, payload),
+                            response_body_snippet = snippet,
                             payload_reflected     = True,
                             verified              = True,
                             confidence            = Confidence.HIGH,
@@ -508,14 +520,15 @@ class AttackVerificationAgent:
 
     async def _test_open_redirect(self, url: str, param: str,
                                    parsed) -> Optional[Finding]:
+        from .vulnerability_tester import _open_redirect_to_attacker
         for payload in OPEN_REDIRECT_PAYLOADS[:2]:
             try:
                 test_url              = self._inject_param(parsed, param, payload)
                 status, headers, body = await self._get_full_response(test_url, follow_redirects=False)
                 location              = headers.get("Location", headers.get("location", ""))
 
-                if status in (301, 302, 303, 307, 308) and (
-                    "evil.com" in location or payload in location
+                if status in (301, 302, 303, 307, 308) and _open_redirect_to_attacker(
+                    location, payload
                 ):
                     return Finding(
                         vuln_type   = "Open Redirect",

@@ -33,17 +33,16 @@ def test_build_endpoint_list_skips_unverified_discovered_paths():
             "/api/chat/completions",
             "/o/ask",
         ],
-        "spa_catch_all": True,  # marketing SPA — no active spray
+        "spa_catch_all": True,
         "chat_components": [],
     }
     eps = tester._build_endpoint_list([], [], "https://openwebui.com/", fp)
     assert eps == []
-    # Without spa_catch_all, framework fallback is OK but not invented agents paths.
     fp2 = dict(fp)
     fp2["spa_catch_all"] = False
     eps2 = tester._build_endpoint_list([], [], "https://openwebui.com/", fp2)
-    assert eps2  # Open WebUI framework fallbacks
-    assert not any("/api/agents/" in e for e in eps2)
+    assert eps2 == []  # no framework fallback spray
+
 
 
 def test_build_endpoint_list_uses_verified_ml_endpoints():

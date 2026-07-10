@@ -312,14 +312,27 @@ def test_infra_select_paths_spa_avoids_k8s():
 
 def test_vuln_framework_endpoint_fallback():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    # Zero-FP: framework name alone must NOT spray unverified paths.
     flowise = t._build_endpoint_list([], [], "http://localhost:3100",
                                      {"framework": "Flowise"})
-    assert flowise == ["http://localhost:3100/api/v1/prediction"]
+    assert flowise == []
     openwebui = t._build_endpoint_list([], [], "http://localhost:3001",
                                        {"framework": "Open WebUI"})
-    assert any("/api/chat" in e for e in openwebui)
-    langflow = t._build_endpoint_list([], [], "http://localhost:7860",
-                                      {"framework": "Langflow"})
+    assert openwebui == []
+    # Verified ml_endpoints still work.
+    verified = t._build_endpoint_list(
+        ["http://localhost:3100/api/v1/prediction"],
+        [],
+        "http://localhost:3100",
+        {"framework": "Flowise"},
+    )
+    assert verified == ["http://localhost:3100/api/v1/prediction"]
+    langflow = t._build_endpoint_list(
+        ["http://localhost:7860/api/v1/run"],
+        [],
+        "http://localhost:7860",
+        {"framework": "Langflow"},
+    )
     assert langflow == ["http://localhost:7860/api/v1/run"]
 
 
@@ -463,13 +476,12 @@ def test_vuln_uses_discovered_paths_not_generic_spray():
         {"discovered_paths": ["/assistant/query", "/api/agents/ask"]},
     )
     assert found == []
-    # Framework fallback is allowed when a known product is identified.
+    # Framework alone also must not spray.
     flowise = t._build_endpoint_list(
         [], [], "http://localhost:9",
         {"framework": "Flowise", "discovered_paths": ["/api/agents/ask"]},
     )
-    assert flowise == ["http://localhost:9/api/v1/prediction"]
-    assert not any("agents/ask" in e for e in flowise)
+    assert flowise == []
 
 
 def test_vuln_prefers_verified_over_unverified_discovered():
