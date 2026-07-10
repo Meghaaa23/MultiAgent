@@ -457,12 +457,45 @@ def test_vuln_uses_discovered_paths_not_generic_spray():
     # No framework, no ml_endpoints — must NOT invent /v1/chat/completions.
     empty = t._build_endpoint_list([], [], "http://localhost:9", {})
     assert empty == []
-    # Discovered custom path should be selected.
+    # Discovered custom path should be selected when nothing verified.
     found = t._build_endpoint_list(
         [], [], "http://localhost:9",
         {"discovered_paths": ["/assistant/query"]},
     )
     assert found == ["http://localhost:9/assistant/query"]
+
+
+def test_vuln_prefers_verified_over_unverified_discovered():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    # Verified auth-gated completions exist — do not queue unverified /api/chat.
+    eps = t._build_endpoint_list(
+        ["http://localhost:3001/api/chat/completions",
+         "http://localhost:3001/api/models"],
+        [],
+        "http://localhost:3001",
+        {"discovered_paths": ["/api/chat", "/_app/immutable/entry/app.js"]},
+    )
+    assert eps == ["http://localhost:3001/api/chat/completions"]
+    assert not any(e.endswith("/api/chat") for e in eps)
+
+
+def test_static_assets_not_discovery_candidates():
+    from multiagent.agents.ai_agents.ai_fingerprint import is_static_asset_path
+    assert is_static_asset_path("/_app/immutable/entry/app.DEoG78Ms.js")
+    assert is_static_asset_path("/static/apple-touch-icon.png")
+    assert not is_static_asset_path("/assistant/query")
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    cands = agent._build_discovery_candidates(
+        html_links=["/_app/immutable/entry/app.js", "/assistant"],
+        js_paths=[],
+        openapi_schema={},
+        robots_paths=[],
+        brand_frameworks=[],
+        text_hints=["Acme Assistant"],
+    )
+    paths = [p for p, _c, _s in cands]
+    assert not any(p.endswith(".js") for p in paths)
+    assert "/assistant/query" in paths
 
 
 class CustomAssistantHandler(BaseHTTPRequestHandler):

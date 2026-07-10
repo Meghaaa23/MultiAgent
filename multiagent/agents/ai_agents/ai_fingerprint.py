@@ -361,6 +361,23 @@ PROTOCOL_BOOTSTRAP: List[Tuple[str, str]] = [
 SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = SCHEMA_BOOTSTRAP + PROTOCOL_BOOTSTRAP
 
 
+STATIC_ASSET_RE = re.compile(
+    r"\.(?:js|css|map|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|webp|avif)(?:$|\?)",
+    re.I,
+)
+
+
+def is_static_asset_path(path: str) -> bool:
+    p = (path or "").split("?")[0].lower()
+    if STATIC_ASSET_RE.search(p):
+        return True
+    # Bundler / frontend asset directories — never API surfaces.
+    return any(seg in p for seg in (
+        "/_app/", "/assets/", "/static/", "/dist/", "/build/",
+        "/_next/", "/immutable/", "/node_modules/",
+    ))
+
+
 def _path_segments(path: str) -> List[str]:
     return [s for s in (path or "").lower().split("/") if s and s != "api"
             and not re.fullmatch(r"v\d+", s)]
@@ -1197,13 +1214,19 @@ class AIFingerprintAgent:
 
         for m in re.finditer(r'href=["\']([^"\'#?]+)["\']', html, re.I):
             href = m.group(1)
-            if href.startswith("/") and (
+            if not href.startswith("/") or is_static_asset_path(href):
+                continue
+            low = href.lower()
+            # Segment-aware: "/app" must not match "/_app/..." asset paths.
+            segs = set(_path_segments(href))
+            if (
                 score_path_semantics(href) > 0
-                or any(x in href.lower() for x in [
-                    "/chat", "/api", "/playground", "/workspace",
-                    "/dashboard", "/app", "/assistant", "/agent",
-                    "/copilot", "/flow", "/query", "/ask",
-                ])
+                or segs & {"chat", "api", "playground", "workspace", "dashboard",
+                           "app", "assistant", "agent", "copilot", "flow",
+                           "query", "ask"}
+                or any(low.startswith(p) for p in (
+                    "/api/", "/chat/", "/assistant/", "/agent/", "/copilot/",
+                ))
             ):
                 links.append(href)
 
@@ -1417,7 +1440,7 @@ class AIFingerprintAgent:
                 if len(raw) > 120 or " " in raw:
                     continue
                 # Static assets are not API surfaces.
-                if re.search(r"\.(js|css|png|jpg|svg|woff2?|map)(?:$|\?)", raw, re.I):
+                if is_static_asset_path(raw):
                     continue
                 if score_path_semantics(raw) > 0 or self._is_ai_api_path(raw):
                     found.add(raw)
@@ -1453,8 +1476,10 @@ class AIFingerprintAgent:
             if not path:
                 return
             path = path if path.startswith("/") else "/" + path.lstrip("/")
-            # Drop obvious non-API pages.
+            # Drop obvious non-API pages / static assets.
             if path in ("/", "/favicon.ico", "/robots.txt", "/sitemap.xml"):
+                return
+            if is_static_asset_path(path):
                 return
             prev = scored.get(path)
             if prev is None or score > prev[1]:
