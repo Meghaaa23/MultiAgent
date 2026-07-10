@@ -20,58 +20,6 @@ from ..ai_agents.avid_lookup_agent         import AVIDLookupAgent
 from ..ai_agents.ai_vulnerability_test     import AIVulnerabilityTester
 from ..ai_agents.Ai_Infra_agent            import AIInfraAgent
 
-try:
-    from ..ai_agents.ai_scan_phase import run_ai_escalation_phase, should_escalate_ai
-except ImportError as _ai_phase_err:  # pragma: no cover - fallback for partial deploys
-    logger.warning("ai_scan_phase unavailable (%s) — using inline escalation fallback",
-                   _ai_phase_err)
-
-    def should_escalate_ai(ai_fingerprint):
-        if not ai_fingerprint or not ai_fingerprint.get("is_ai_powered"):
-            return False
-        conf = str(ai_fingerprint.get("confidence") or "").lower()
-        has_concrete = bool(
-            ai_fingerprint.get("ml_endpoints")
-            or ai_fingerprint.get("ai_headers")
-            or ai_fingerprint.get("auth_required_paths")
-            or ai_fingerprint.get("framework")
-        )
-        return conf in ("high", "very_high") or has_concrete
-
-    async def run_ai_escalation_phase(*, target_url, ai_fingerprint, avid_lookup,
-                                      ai_vuln_tester, ai_infra_agent, verbose=False):
-        """Minimal fallback mirroring ai_scan_phase when the module is missing."""
-        out = {"escalated": False, "avid_results": None, "ai_vuln_results": None,
-               "ai_infra_result": None, "findings": []}
-        if not should_escalate_ai(ai_fingerprint):
-            if verbose:
-                print("  No AI/ML components detected — AI-specific tests skipped\n")
-            return out
-        out["escalated"] = True
-        try:
-            out["avid_results"] = await avid_lookup.lookup(
-                ai_fingerprint=ai_fingerprint,
-                ml_stack=list(ai_fingerprint.get("ml_libraries") or []),
-                verbose=verbose,
-            )
-        except Exception as exc:
-            logger.warning("AVID lookup failed: %s", exc)
-        try:
-            vuln = await ai_vuln_tester.test_all(
-                ai_fingerprint=ai_fingerprint, target_url=target_url, verbose=verbose)
-            out["ai_vuln_results"] = vuln
-            for f in (vuln.get("confirmed_ai_vulns") or []) + (vuln.get("potential_ai_vulns") or []):
-                f.setdefault("category", "ai_vulnerability")
-                out["findings"].append(f)
-        except Exception as exc:
-            logger.warning("AI vuln tests failed: %s", exc)
-        try:
-            out["ai_infra_result"] = await ai_infra_agent.scan(
-                target_url=target_url, ai_stack=ai_fingerprint)
-        except Exception as exc:
-            logger.warning("AI infra scan failed: %s", exc)
-        return out
-
 logger = logging.getLogger(__name__)
 
 try:
@@ -340,20 +288,12 @@ class WebScannerAgent:
                   f"({interesting} interesting, {protected} access-controlled)"
                   + (" [soft-404 filter active]" if soft_mode else "") + "\n")
 
-        # ------------------------------------------------------------------
-        # Single AI detection + escalation phase
-        #   ALWAYS: fingerprint (cheap)
-        #   IF AI detected: AVID + AI vuln + AI infra
-        #   ELSE: skip AI agents; traditional web scan continues below
-        # ------------------------------------------------------------------
         if verbose:
             print("AI/ML Component Detection...")
 
         ai_fingerprint  = None
         avid_results    = None
         ai_vuln_results = None
-        ai_infra_result = None
-        ai_phase_findings: List[Dict] = []
         is_ai_powered   = False
 
         try:
@@ -364,24 +304,74 @@ class WebScannerAgent:
                 response_headers     = initial_headers,
                 verbose              = verbose,
             )
-            is_ai_powered = should_escalate_ai(ai_fingerprint)
 
-            ai_phase = await run_ai_escalation_phase(
-                target_url=target_url,
-                ai_fingerprint=ai_fingerprint or {},
-                avid_lookup=self.avid_lookup,
-                ai_vuln_tester=self.ai_vuln_tester,
-                ai_infra_agent=self.ai_infra_agent,
-                verbose=verbose,
+            raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
+            confidence   = str(ai_fingerprint.get("confidence", "low")).lower()
+            has_concrete = bool(
+                ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("ai_headers")
+                or ai_fingerprint.get("auth_required_paths")
+                or ai_fingerprint.get("framework")
             )
-            is_ai_powered = bool(ai_phase.get("escalated"))
-            avid_results = ai_phase.get("avid_results")
-            ai_vuln_results = ai_phase.get("ai_vuln_results")
-            ai_infra_result = ai_phase.get("ai_infra_result")
-            ai_phase_findings = list(ai_phase.get("findings") or [])
+            # Escalate only on clear AI detection (same policy as before).
+            is_ai_powered = raw_is_ai and (
+                confidence in ("high", "very_high") or has_concrete
+            )
+
+            if is_ai_powered:
+                if verbose:
+                    print(f"  AI-powered app detected [{confidence} confidence]")
+                    print(f"     Framework   : {ai_fingerprint.get('framework') or '(unknown)'}")
+                    print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
+                    print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
+
+                if verbose:
+                    print("  Querying AVID database for AI vulnerabilities...")
+                ml_stack = (
+                    ai_fingerprint.get("ml_libraries", []) +
+                    [ep.split("/")[-1] for ep in ai_fingerprint.get("ml_endpoints", [])[:3]]
+                )
+                avid_results = await self.avid_lookup.lookup(
+                    ai_fingerprint=ai_fingerprint, ml_stack=ml_stack, verbose=verbose,
+                )
+                if verbose:
+                    print(f"   AVID: {avid_results.get('total_found',0)} findings "
+                          f"({len(avid_results.get('backdoor_relevant',[]))} backdoor-relevant)\n")
+
+                if verbose:
+                    print("  Running AI-specific vulnerability tests...")
+                ai_vuln_results = await self.ai_vuln_tester.test_all(
+                    ai_fingerprint=ai_fingerprint, target_url=target_url, verbose=verbose,
+                )
+                if verbose:
+                    c = len(ai_vuln_results.get("confirmed_ai_vulns", []))
+                    p = len(ai_vuln_results.get("potential_ai_vulns", []))
+                    s = len(ai_vuln_results.get("strategic_recommendations", []))
+                    print(f"   AI vulns: {c} confirmed, {p} potential")
+                    print(f"   Strategic recommendations: {s} ATLAS-based\n")
+            else:
+                if verbose:
+                    if raw_is_ai and not has_concrete:
+                        print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
+                    else:
+                        print(f"  No AI/ML components detected — AI-specific tests skipped\n")
 
         except Exception as e:
-            logger.warning(f"AI detection / escalation failed: {e}")
+            logger.warning(f"AI detection failed: {e}")
+
+        # AI infra uses the same escalation gate as AVID / AI vuln.
+        ai_infra_result = None
+        try:
+            if is_ai_powered and ai_fingerprint:
+                if verbose:
+                    print("  AI Infrastructure Build Attack Analysis...")
+                ai_infra_result = await self.ai_infra_agent.scan(
+                    target_url=target_url, ai_stack=ai_fingerprint,
+                )
+                if verbose:
+                    print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
+        except Exception as e:
+            logger.warning(f"AIInfraAgent failed: {e}")
 
         # Traditional web vulnerability scanning continues regardless of AI.
         if verbose:
@@ -575,15 +565,7 @@ class WebScannerAgent:
                 seen.add(key)
                 all_findings.append(f)
 
-        if ai_phase_findings:
-            for f in ai_phase_findings:
-                f.setdefault("category", "ai_vulnerability")
-                key = (f.get("type", "").lower(), f.get("location", ""))
-                if key not in seen:
-                    seen.add(key)
-                    all_findings.append(f)
-        elif ai_vuln_results:
-            # Backward-compatible path if phase findings were empty but vuln dict set.
+        if ai_vuln_results:
             for f in ai_vuln_results.get("confirmed_ai_vulns", []):
                 f.setdefault("category", "ai_vulnerability")
                 key = (f.get("type", "").lower(), f.get("location", ""))
