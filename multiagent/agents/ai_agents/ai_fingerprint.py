@@ -417,18 +417,28 @@ def is_inference_like_path(path: str) -> bool:
 
 def expand_semantic_candidates(observed_paths: List[str],
                                text_hints: List[str] = None) -> List[str]:
-    """Generate candidate paths from nouns seen in links/JS/title — not a fixed catalog."""
+    """Generate candidate paths from nouns seen in observed app/API paths.
+
+    Marketing/community URLs (e.g. /o/agents on openwebui.com) must NOT invent
+    /api/agents/ask. Text hints alone are also too weak to invent surfaces.
+    """
+    _MARKETING = re.compile(
+        r"^/(?:o|u|c|blog|docs|changelog|terms|privacy|pricing|about)(?:/|$)",
+        re.I,
+    )
     nouns: Set[str] = set()
     for p in observed_paths or []:
-        for seg in _path_segments(p):
+        path = p if isinstance(p, str) else ""
+        if path.startswith("http"):
+            path = urllib.parse.urlparse(path).path or ""
+        if not path.startswith("/"):
+            path = "/" + path
+        if _MARKETING.search(path):
+            continue
+        for seg in _path_segments(path):
             if seg in AI_PATH_NOUNS:
                 nouns.add(seg)
-    for hint in text_hints or []:
-        low = (hint or "").lower()
-        for noun in AI_PATH_NOUNS:
-            if re.search(rf"\b{re.escape(noun)}\b", low):
-                nouns.add(noun)
-    # Prefer product-ish nouns for expansion.
+    # Prefer product-ish nouns for expansion (from real observed paths only).
     expand_nouns = [n for n in nouns if n in (
         "assistant", "assistants", "agent", "agents", "copilot", "llm",
         "bot", "bots", "chat", "ai", "rag", "workflow", "workflows",
@@ -441,7 +451,6 @@ def expand_semantic_candidates(observed_paths: List[str],
             out.append(f"/{noun}/{action}")
             out.append(f"/api/{noun}/{action}")
             out.append(f"/api/v1/{noun}/{action}")
-    # Dedupe, cap.
     return list(dict.fromkeys(out))[:48]
 
 
@@ -938,7 +947,10 @@ class AIFingerprintAgent:
             text_hints=text_hints,
             extra_paths=extra_seed_paths,
         )
-        discovered_paths.extend(p for p, _c, _s in candidates)
+        # Do NOT dump unverified invented candidates into discovered_paths —
+        # that caused AI vuln tester to spray /api/agents/* on marketing SPAs.
+        # Keep only observed (JS/HTML/robots/openapi) paths here; verified
+        # surfaces land in ml_endpoints after probing.
 
         if verbose and candidates:
             top = ", ".join(f"{p}({s})" for p, _c, s in candidates[:8])
@@ -1001,10 +1013,19 @@ class AIFingerprintAgent:
                 auth_signals.extend(extra.get("auth_signals", []))
 
         if discovered_endpoints:
-            disc_r = await self._check_discovered_endpoints(discovered_endpoints)
-            if isinstance(disc_r, dict):
-                all_evidence.extend(disc_r.get("evidence", []))
-                ml_endpoints.extend(disc_r.get("endpoints", []))
+            # Only re-check a small set of already-interesting, status-known
+            # endpoints. Marketing sitemaps can yield thousands of URLs.
+            filtered = [
+                ep for ep in discovered_endpoints
+                if ep.get("interesting")
+                and not ep.get("spa_fallback")
+                and ep.get("status") is not None
+            ][:30]
+            if filtered:
+                disc_r = await self._check_discovered_endpoints(filtered)
+                if isinstance(disc_r, dict):
+                    all_evidence.extend(disc_r.get("evidence", []))
+                    ml_endpoints.extend(disc_r.get("endpoints", []))
 
         ml_endpoints     = list(dict.fromkeys(ml_endpoints))
         discovered_paths = list(dict.fromkeys(discovered_paths))

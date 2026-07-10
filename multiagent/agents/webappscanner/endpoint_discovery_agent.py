@@ -283,6 +283,13 @@ class EndpointDiscoveryAgent:
         status = ep.get("status")
 
         if status is None:
+            # Unprobed passive entries (sitemap/robots/JS) are not attack surface
+            # until a live status is known. OpenAPI/swagger stays interesting.
+            if ep.get("source") == "swagger":
+                ep.setdefault("interesting", True)
+            else:
+                ep["interesting"] = False
+                ep["verification"] = "unprobed — not confirmed live"
             return ep
 
         if status == 403:
@@ -452,7 +459,7 @@ class EndpointDiscoveryAgent:
                         "source":       "robots.txt",
                         "status":       None,
                         "final_url":    full_url,
-                        "interesting":  True,
+                        "interesting":  False,  # require verify / probe
                         "auth_required":False,
                         "params":       []
                     })
@@ -460,23 +467,44 @@ class EndpointDiscoveryAgent:
 
     async def _parse_sitemap(self, base: str) -> List[Dict]:
         endpoints = []
+        # Marketing / community sitemaps (e.g. openwebui.com) can list thousands
+        # of profile/post URLs — cap and skip non-API paths.
+        _SKIP_PREFIXES = (
+            "/o/", "/u/", "/c/", "/blog/", "/docs/", "/changelog/",
+            "/terms", "/privacy", "/pricing", "/about",
+        )
+        _MAX_SITEMAP = 80
         for path in ("/sitemap.xml", "/sitemap_index.xml"):
             body = await self._fetch_text(f"{base}{path}")
             if not body:
                 continue
             for loc in re.findall(r'<loc>([^<]+)</loc>', body):
                 loc = loc.strip()
-                if loc:
-                    endpoints.append({
-                        "url":          loc,
-                        "method":       "GET",
-                        "source":       "sitemap",
-                        "status":       None,
-                        "final_url":    loc,
-                        "interesting":  True,
-                        "auth_required":False,
-                        "params":       []
-                    })
+                if not loc:
+                    continue
+                try:
+                    loc_path = (urlsplit(loc).path or "/").lower()
+                except Exception:
+                    loc_path = loc.lower()
+                if any(loc_path.startswith(p) for p in _SKIP_PREFIXES):
+                    continue
+                if re.search(
+                    r'\.(png|jpg|gif|css|js|woff2?|svg|ico|pdf|xml)$',
+                    loc_path, re.I,
+                ):
+                    continue
+                endpoints.append({
+                    "url":          loc,
+                    "method":       "GET",
+                    "source":       "sitemap",
+                    "status":       None,
+                    "final_url":    loc,
+                    "interesting":  False,  # unprobed — not an attack surface yet
+                    "auth_required":False,
+                    "params":       []
+                })
+                if len(endpoints) >= _MAX_SITEMAP:
+                    return endpoints
         return endpoints
 
     async def _parse_swagger(self, base: str) -> List[Dict]:
@@ -625,7 +653,7 @@ class EndpointDiscoveryAgent:
                         "source":       "js_bundle",
                         "status":       None,
                         "final_url":    full_url,
-                        "interesting":  True,
+                        "interesting":  False,  # unprobed JS string — not confirmed live
                         "auth_required":False,
                         "params":       []
                     })

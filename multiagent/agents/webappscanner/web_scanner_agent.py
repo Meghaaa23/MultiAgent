@@ -173,6 +173,10 @@ class WebScannerAgent:
         target_url = _resolve_docker_url(target_url, verbose=verbose)
         self.vuln_tester.auth_cookie = auth_cookie or ""
 
+        def _budget_exceeded() -> bool:
+            elapsed_m = (datetime.now() - start).total_seconds() / 60.0
+            return elapsed_m >= max_time_minutes
+
         if verbose:
             print(f"\n{'='*70}")
             print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
@@ -297,9 +301,20 @@ class WebScannerAgent:
         is_ai_powered   = False
 
         try:
+            if _budget_exceeded():
+                if verbose:
+                    print("  Scan budget exhausted before AI phase — skipping AI escalation\n")
+                raise RuntimeError("budget_exceeded")
+            # Cap what AI fingerprint re-probes — marketing sitemaps can be huge.
+            ai_eps = [
+                ep for ep in discovered_endpoints
+                if ep.get("interesting")
+                and not ep.get("spa_fallback")
+                and ep.get("status") is not None
+            ][:40]
             ai_fingerprint = await self.ai_fingerprinter.fingerprint(
                 target_url           = target_url,
-                discovered_endpoints = discovered_endpoints,
+                discovered_endpoints = ai_eps,
                 page_html            = html,
                 response_headers     = initial_headers,
                 verbose              = verbose,
@@ -307,13 +322,14 @@ class WebScannerAgent:
 
             raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
             confidence   = str(ai_fingerprint.get("confidence", "low")).lower()
-            has_concrete = bool(
+            has_live_surface = bool(
                 ai_fingerprint.get("ml_endpoints")
                 or ai_fingerprint.get("ai_headers")
                 or ai_fingerprint.get("auth_required_paths")
-                or ai_fingerprint.get("framework")
             )
-            # Escalate only on clear AI detection (same policy as before).
+            # Brand/framework alone is enough to mark AI-powered (CVE/AVID/ATLAS),
+            # but active injection spray requires a live surface.
+            has_concrete = has_live_surface or bool(ai_fingerprint.get("framework"))
             is_ai_powered = raw_is_ai and (
                 confidence in ("high", "very_high") or has_concrete
             )
@@ -380,12 +396,15 @@ class WebScannerAgent:
                         print(f"  No AI/ML components detected — AI-specific tests skipped\n")
 
         except Exception as e:
-            logger.warning(f"AI detection failed: {e}")
+            if str(e) == "budget_exceeded":
+                logger.info("AI phase skipped — scan budget exhausted")
+            else:
+                logger.warning(f"AI detection failed: {e}")
 
         # AI infra uses the same escalation gate as AVID / AI vuln.
         ai_infra_result = None
         try:
-            if is_ai_powered and ai_fingerprint:
+            if is_ai_powered and ai_fingerprint and not _budget_exceeded():
                 if verbose:
                     print("  AI Infrastructure Build Attack Analysis...")
                 ai_infra_result = await self.ai_infra_agent.scan(

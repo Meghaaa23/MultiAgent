@@ -457,12 +457,19 @@ def test_vuln_uses_discovered_paths_not_generic_spray():
     # No framework, no ml_endpoints — must NOT invent /v1/chat/completions.
     empty = t._build_endpoint_list([], [], "http://localhost:9", {})
     assert empty == []
-    # Discovered custom path should be selected when nothing verified.
+    # Unverified discovered_paths alone must NOT be sprayed (marketing-site guard).
     found = t._build_endpoint_list(
         [], [], "http://localhost:9",
-        {"discovered_paths": ["/assistant/query"]},
+        {"discovered_paths": ["/assistant/query", "/api/agents/ask"]},
     )
-    assert found == ["http://localhost:9/assistant/query"]
+    assert found == []
+    # Framework fallback is allowed when a known product is identified.
+    flowise = t._build_endpoint_list(
+        [], [], "http://localhost:9",
+        {"framework": "Flowise", "discovered_paths": ["/api/agents/ask"]},
+    )
+    assert flowise == ["http://localhost:9/api/v1/prediction"]
+    assert not any("agents/ask" in e for e in flowise)
 
 
 def test_vuln_prefers_verified_over_unverified_discovered():
