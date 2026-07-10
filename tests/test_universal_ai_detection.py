@@ -200,6 +200,22 @@ def test_auth_gated_probe_counts_as_endpoint():
     assert len(auth) == 1
 
 
+def test_spa_405_ignored():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    r = agent._evaluate_probe_response(
+        "http://x/openapi.json", "/openapi.json", "schema",
+        405, {"Content-Type": "application/json"}, "", [],
+        spa_catch_all=True,
+    )
+    assert r["endpoints"] == []
+    r2 = agent._evaluate_probe_response(
+        "http://x/api/chat", "/api/chat", "chat",
+        405, {"Content-Type": "text/plain"}, "", [],
+        spa_catch_all=True,
+    )
+    assert r2["endpoints"] == []
+
+
 def test_html_probe_response_ignored():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     r = agent._evaluate_probe_response(
@@ -208,6 +224,17 @@ def test_html_probe_response_ignored():
         "<!DOCTYPE html><html><body>spa</body></html>", [],
     )
     assert r == {}
+
+
+def test_injection_capable_requires_inference_segment():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    assert t._is_injection_capable("http://x/api/chat")
+    assert t._is_injection_capable("http://x/api/chat/completions")
+    assert t._is_injection_capable("http://x/api/v1/prediction")
+    assert not t._is_injection_capable("http://x/api-docs")
+    assert not t._is_injection_capable("http://x/api/v1/chatflows")
+    assert not t._is_injection_capable("http://x/openapi.json")
+    assert not t._is_injection_capable("http://x/api/models")
 
 
 def test_framework_probe_paths_cover_target_apps():

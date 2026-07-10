@@ -111,9 +111,10 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
     },
     "Gradio": {
         "paths":       ["/config", "/info", "/queue/join", "/run/predict",
-                        "/call/predict", "/gradio_api/info"],
-        "js_strings":  ["gradio", "Gradio", "__gradio_mode__"],
-        "title_hints": ["gradio"],
+                        "/call/predict", "/gradio_api/info", "/gradio_api/config"],
+        "js_strings":  ["gradio", "Gradio", "__gradio_mode__", "gradio-app",
+                        "gradio_api"],
+        "title_hints": ["gradio", "langflow"],
         "capabilities": ["chat", "image_generation"],
     },
     "Dify": {
@@ -690,6 +691,8 @@ class AIFingerprintAgent:
             _, page_headers, page_html = self._fetch(base)
             if not response_headers:
                 response_headers = page_headers
+            if not page_html:
+                logger.warning("[fingerprint] empty root page body from %s", base)
 
         spa_catch_all = await self._detect_spa_catch_all(base)
         if spa_catch_all and verbose:
@@ -703,6 +706,16 @@ class AIFingerprintAgent:
                 "spa_catch_all",
                 "SPA/catch-all routing detected (canary path returned app shell)",
                 "passive"))
+
+        # Always try Gradio config early — Langflow/Gradio often lack obvious HTML brands.
+        gradio_hint = await self._probe_gradio_surface(base, verbose)
+        gradio_endpoints: List[str] = []
+        if isinstance(gradio_hint, dict):
+            html_evidence.extend(gradio_hint.get("evidence", []))
+            gradio_endpoints = list(gradio_hint.get("endpoints", []))
+            for fw in gradio_hint.get("frameworks", []):
+                if fw not in brand_frameworks:
+                    brand_frameworks.append(fw)
 
         # Prefer framework-specific seeds when brand is already visible in HTML.
         extra_seed_paths = list(extracted_links)
@@ -723,7 +736,7 @@ class AIFingerprintAgent:
         js_r, openapi_r, graphql_r, passive_r, probe_r, header_r = parallel
 
         all_evidence: List[EvidenceItem] = list(html_evidence)
-        ml_endpoints:    List[str]  = []
+        ml_endpoints:    List[str]  = list(gradio_endpoints)
         discovered_paths: List[str] = []
         all_frameworks:  List[str]  = list(brand_frameworks)
         auth_signals:    List[AuthSignal] = []
@@ -1058,6 +1071,59 @@ class AIFingerprintAgent:
         except Exception:
             pass
         return False
+
+    async def _probe_gradio_surface(self, base: str, verbose: bool) -> Dict:
+        """Probe Gradio/Langflow config endpoints that often miss HTML brand signals."""
+        evidence: List[EvidenceItem] = []
+        endpoints: List[str] = []
+        frameworks: List[str] = []
+        loop = asyncio.get_event_loop()
+        paths = [
+            "/config", "/info", "/gradio_api/info", "/gradio_api/config",
+            "/api/v1/flows", "/api/v1/all", "/health",
+        ]
+        for path in paths:
+            url = base + path
+            try:
+                status, headers, body = await loop.run_in_executor(
+                    None, lambda u=url: self._fetch(u, max_bytes=50_000))
+                if status != 200 or not body or _looks_html_body(
+                    headers.get("Content-Type", "") or headers.get("content-type", ""),
+                    body,
+                ):
+                    continue
+                body_l = body.lower()
+                ct = (headers.get("Content-Type") or headers.get("content-type") or "").lower()
+                if "json" not in ct and body.strip()[:1] not in "{[":
+                    continue
+                if any(k in body_l for k in ("gradio", "components", "dependencies")):
+                    evidence.append(EvidenceItem.make(
+                        "ml_endpoint_200",
+                        f"Gradio/config surface at {path}",
+                        "probe", endpoint=url, framework="Gradio"))
+                    endpoints.append(url)
+                    frameworks.append("Gradio")
+                    if verbose:
+                        print(f"    [gradio] {path} confirmed")
+                if "langflow" in body_l or path.startswith("/api/v1/"):
+                    if '"flows"' in body_l or "langflow" in body_l or path in (
+                        "/api/v1/flows", "/api/v1/all",
+                    ):
+                        evidence.append(EvidenceItem.make(
+                            "ml_endpoint_200",
+                            f"Langflow API surface at {path}",
+                            "probe", endpoint=url, framework="Langflow"))
+                        endpoints.append(url)
+                        frameworks.append("Langflow")
+                        if verbose:
+                            print(f"    [langflow] {path} confirmed")
+            except Exception:
+                continue
+        return {
+            "evidence": evidence,
+            "endpoints": list(dict.fromkeys(endpoints)),
+            "frameworks": list(dict.fromkeys(frameworks)),
+        }
 
     async def _fetch_and_analyse_js(
         self, js_urls: List[str], base: str, verbose: bool
@@ -1409,7 +1475,7 @@ class AIFingerprintAgent:
                         None, lambda: self._fetch(url, data=b"{}", method="POST"))
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
-                    auth_signals)
+                    auth_signals, spa_catch_all=spa_catch_all)
             except Exception:
                 return None
 
@@ -1474,7 +1540,8 @@ class AIFingerprintAgent:
                     status, resp_headers, body = await loop.run_in_executor(
                         None, lambda: self._fetch(url, data=b"{}", method="POST"))
                 return self._evaluate_probe_response(
-                    url, path, category, status, resp_headers, body, auth_signals)
+                    url, path, category, status, resp_headers, body,
+                    auth_signals, spa_catch_all=spa_catch_all)
             except Exception:
                 return None
 
@@ -1508,6 +1575,7 @@ class AIFingerprintAgent:
         headers: Dict,
         body: str,
         auth_signals: List[AuthSignal],
+        spa_catch_all: bool = False,
     ) -> Dict:
         evidence:  List[EvidenceItem] = []
         endpoints: List[str]          = []
@@ -1551,13 +1619,17 @@ class AIFingerprintAgent:
             if category == "schema" and ("json" in ct or body.strip()[:1] in "{["):
                 if any(k in body_l for k in (
                     "gradio", "components", "dependencies", "models",
-                    "chatflows", "flows", "ollama", "openai",
+                    "chatflows", "flows", "ollama", "openai", "langflow",
                 )):
                     evidence.append(EvidenceItem.make(
                         "ml_endpoint_200",
                         f"AI schema/config at {path} (HTTP 200)",
                         "probe", endpoint=url))
                     endpoints.append(url)
+                    if "gradio" in body_l:
+                        frameworks.append("Gradio")
+                    if "langflow" in body_l:
+                        frameworks.append("Langflow")
 
         if status in (401, 403):
             auth_type = self._detect_auth_type(headers_low, body_l)
@@ -1573,7 +1645,10 @@ class AIFingerprintAgent:
                     "probe", endpoint=url))
                 endpoints.append(url)
 
-        if status == 405 and category in ("chat", "embedding", "ml", "schema"):
+        # On SPA catch-alls, POST→405 is noise for almost every path — ignore it.
+        # Only trust 405 on non-SPA targets, and only for real inference categories.
+        if (status == 405 and not spa_catch_all
+                and category in ("chat", "embedding", "ml")):
             evidence.append(EvidenceItem.make(
                 "ml_endpoint_405",
                 f"Endpoint exists {path} (HTTP 405)",
@@ -1956,7 +2031,8 @@ class AIFingerprintAgent:
                     status, hdrs, body = await loop.run_in_executor(
                         None, lambda: self._fetch(url))
                 r = self._evaluate_probe_response(
-                    url, path, "chat", status, hdrs, body, auth_signals)
+                    url, path, "chat", status, hdrs, body, auth_signals,
+                    spa_catch_all=spa_catch_all)
                 if r:
                     evidence.extend(r.get("evidence", []))
                     endpoints.extend(r.get("endpoints", []))
