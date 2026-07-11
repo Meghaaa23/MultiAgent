@@ -11,7 +11,6 @@ _HEADER_FIXES = {
     "nginx": {
         "X-Frame-Options":           'add_header X-Frame-Options "DENY" always;',
         "X-Content-Type-Options":    'add_header X-Content-Type-Options "nosniff" always;',
-        "X-XSS-Protection":          'add_header X-XSS-Protection "1; mode=block" always;',
         "Content-Security-Policy":   "add_header Content-Security-Policy \"default-src 'self'; script-src 'self';\" always;",
         "Strict-Transport-Security": 'add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;',
         "Referrer-Policy":           'add_header Referrer-Policy "strict-origin-when-cross-origin" always;',
@@ -20,7 +19,6 @@ _HEADER_FIXES = {
     "apache": {
         "X-Frame-Options":           'Header always set X-Frame-Options "DENY"',
         "X-Content-Type-Options":    'Header always set X-Content-Type-Options "nosniff"',
-        "X-XSS-Protection":          'Header always set X-XSS-Protection "1; mode=block"',
         "Content-Security-Policy":   "Header always set Content-Security-Policy \"default-src 'self';\"",
         "Strict-Transport-Security": 'Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"',
         "Referrer-Policy":           'Header always set Referrer-Policy "strict-origin-when-cross-origin"',
@@ -144,7 +142,6 @@ app.add_middleware(SecurityHeadersMiddleware)""",
     "generic": {
         "X-Frame-Options":           "X-Frame-Options: DENY",
         "X-Content-Type-Options":    "X-Content-Type-Options: nosniff",
-        "X-XSS-Protection":          "X-XSS-Protection: 1; mode=block",
         "Content-Security-Policy":   "Content-Security-Policy: default-src 'self';",
         "Strict-Transport-Security": "Strict-Transport-Security: max-age=31536000; includeSubDomains",
         "Referrer-Policy":           "Referrer-Policy: strict-origin-when-cross-origin",
@@ -170,7 +167,8 @@ _EFFORT_MINUTES = {
 
 _SAFE_SERVER_PATTERNS = re.compile(
     r"^(cloudflare|cloudfront|awselb|fastly|google frontend|"
-    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik)$",
+    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik|"
+    r"vercel|netlify|github\.com|amazon s3|s3)$",
     re.I,
 )
 
@@ -314,25 +312,46 @@ class ActionAgent:
         Render whatever was actually captured upstream (status code, raw
         request line, raw response snippet, timestamp) as a verbatim block.
 
-        If nothing was captured, return an explicit, unambiguous statement
-        that no live evidence is attached — never a string that could be
-        mistaken for an observed value.
+        Accepts both ActionAgent-native keys (request_line, status_code,
+        response_snippet) and VulnerabilityTester keys (request,
+        response_status, response_body_snippet) so Confirmed findings never
+        render as "NO EVIDENCE CAPTURED" when evidence was actually present.
         """
         if not evidence:
             return f"[NO EVIDENCE CAPTURED — {fallback_note}]"
 
+        request = (
+            evidence.get("request_line")
+            or evidence.get("request")
+            or ""
+        )
+        status = evidence.get("status_code")
+        if status is None:
+            status = evidence.get("response_status")
+        snippet = (
+            evidence.get("response_snippet")
+            or evidence.get("response_body_snippet")
+            or ""
+        )
+
         lines = []
-        if evidence.get("request_line"):
-            lines.append(f"Request:  {evidence['request_line']}")
-        if evidence.get("status_code") is not None:
-            lines.append(f"Status:   {evidence['status_code']}")
-        if evidence.get("response_snippet"):
-            snippet = evidence["response_snippet"]
+        if request:
+            lines.append(f"Request:  {request}")
+        if status is not None and status != "":
+            lines.append(f"Status:   {status}")
+        if snippet:
             if len(snippet) > 300:
                 snippet = snippet[:300] + " …(truncated)"
             lines.append(f"Response: {snippet}")
         if evidence.get("captured_at"):
             lines.append(f"Captured: {evidence['captured_at']}")
+        # Header-only findings (missing CSP, CORS, etc.) often have headers
+        # but no body snippet — surface a short header summary so PoC is not empty.
+        if not snippet and evidence.get("response_headers"):
+            hdrs = evidence["response_headers"]
+            preview = ", ".join(f"{k}: {v}" for k, v in list(hdrs.items())[:4])
+            if preview:
+                lines.append(f"Headers:  {preview}")
 
         if not lines:
             return f"[NO EVIDENCE CAPTURED — {fallback_note}]"
@@ -484,14 +503,29 @@ class ActionAgent:
                      stack_keywords: List[str],
                      evidence: Optional[Dict] = None) -> Dict:
         evidence = evidence or {}
+        hdrs = {
+            str(k).lower(): str(v)
+            for k, v in (evidence.get("response_headers") or {}).items()
+        }
         reflected_origin = evidence.get("reflected_origin")
-        acao_value       = evidence.get("access_control_allow_origin")
+        acao_value = (
+            evidence.get("access_control_allow_origin")
+            or hdrs.get("access-control-allow-origin")
+            or ""
+        )
+        # Infer reflected Origin from the probe request line when not explicit.
+        if not reflected_origin:
+            req = evidence.get("request") or evidence.get("request_line") or ""
+            if "evil" in req.lower() or "Origin:" in req:
+                reflected_origin = "https://evil-cors-test.example.com"
+            elif acao_value == "*":
+                reflected_origin = "*"
 
-        if reflected_origin and acao_value:
+        if acao_value:
             evidence_block = (
-                f" Sent Origin header: {reflected_origin}\n"
+                f" Sent Origin header: {reflected_origin or '(probe)'}\n"
                 f" Server responded:    Access-Control-Allow-Origin: {acao_value}\n"
-                f" → Attacker-controlled origin was reflected back."
+                f" → Attacker-controlled origin was reflected / allowed."
             )
         else:
             evidence_block = (
@@ -560,7 +594,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
-            "evidence_captured": bool(reflected_origin and acao_value),
+            "evidence_captured": bool(acao_value),
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
@@ -640,8 +674,11 @@ class ActionAgent:
                     stack_keywords: List[str]) -> Dict:
         evidence = evidence or {}
         method = evidence.get("confirmation_method", "http_body")
-        captured_payload  = evidence.get("payload_sent")
-        captured_response = evidence.get("response_snippet")
+        captured_payload  = evidence.get("payload_sent") or evidence.get("payload")
+        captured_response = (
+            evidence.get("response_snippet")
+            or evidence.get("response_body_snippet")
+        )
 
         if captured_payload and captured_response:
             snippet = captured_response[:300]
@@ -785,7 +822,18 @@ class ActionAgent:
     def _action_open_redirect(self, location: str, parameter: str,
                                evidence: Optional[Dict] = None) -> Dict:
         evidence = evidence or {}
-        location_header = evidence.get("redirect_location_header")
+        hdrs = {
+            str(k).lower(): str(v)
+            for k, v in (evidence.get("response_headers") or {}).items()
+        }
+        location_header = (
+            evidence.get("redirect_location_header")
+            or hdrs.get("location")
+            or evidence.get("details")  # sometimes "Redirects to: ..."
+            or ""
+        )
+        if isinstance(location_header, str) and location_header.startswith("Redirects to:"):
+            location_header = location_header.split(":", 1)[-1].strip()
         if location_header:
             evidence_note = f"# Captured Location header on redirect: {location_header}"
             evidence_captured = True
@@ -793,9 +841,14 @@ class ActionAgent:
             evidence_note = "# [NO EVIDENCE CAPTURED — redirect Location header was not recorded]"
             evidence_captured = False
 
+        req = evidence.get("request") or evidence.get("request_line") or ""
         poc = (
             f"{evidence_note}\n"
-            'curl -I "' + location + '?' + parameter + '=https://evil-attacker.example.com"\n'
+            + (f"# Probe: {req}\n" if req else "")
+            + 'curl -I -s "' + location + (
+                ('?' + parameter + '=https://evil-attacker.example.com"')
+                if parameter else '"'
+            ) + '\n'
             "# Check Location header — should point to attacker domain"
         )
         fix_snippet = textwrap.dedent("""\

@@ -1,0 +1,613 @@
+"""
+Tests for universal AI app detection across SPA UIs, auth-gated APIs,
+and framework-specific endpoint selection.
+"""
+import asyncio
+import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import pytest
+
+from multiagent.agents.ai_agents.ai_fingerprint import (
+    AIFingerprintAgent,
+    FRAMEWORK_PROBE_PATHS,
+    FRAMEWORK_SIGNATURES,
+    _looks_html_body,
+    classify_endpoint,
+    score_path_semantics,
+    is_inference_like_path,
+    expand_semantic_candidates,
+    rank_openapi_paths,
+)
+from multiagent.agents.ai_agents.Ai_Infra_agent import (
+    AIInfraAgent,
+    _is_k8s_body,
+)
+from multiagent.agents.ai_agents.ai_vulnerability_test import (
+    AIVulnerabilityTester,
+    detect_application_type,
+)
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _run_server(handler_class, port: int):
+    srv = HTTPServer(("127.0.0.1", port), handler_class)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    return srv
+
+
+class SpaOpenWebUIHandler(BaseHTTPRequestHandler):
+    """Simulates Open WebUI: SPA catch-all HTML + auth-gated JSON APIs."""
+
+    SHELL = (
+        "<!DOCTYPE html><html><head><title>Open WebUI</title>"
+        "<meta name='description' content='Chat with AI models'>"
+        "</head><body><div id='app'>Open WebUI</div>"
+        "<script src='/assets/index.js'></script></body></html>"
+    )
+
+    def _html(self):
+        data = self.SHELL.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, status: int, obj: dict):
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path.startswith("/assets/"):
+            body = b'const WEBUI_NAME="Open WebUI"; fetch("/api/chat");'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path in ("/api/models", "/api/v1/models", "/api/chat",
+                    "/api/chat/completions", "/ollama/api/tags"):
+            self._json(401, {"detail": "Not authenticated"})
+            return
+        # Catch-all SPA shell
+        self._html()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        path = self.path.split("?")[0]
+        if path in ("/api/chat", "/api/chat/completions",
+                    "/api/v1/chat/completions", "/v1/chat/completions"):
+            self._json(401, {"detail": "Not authenticated"})
+            return
+        if path in ("/api/models", "/api/v1/models"):
+            self._json(401, {"detail": "Not authenticated"})
+            return
+        self._html()
+
+    def log_message(self, *args):
+        pass
+
+
+class SpaLangflowHandler(BaseHTTPRequestHandler):
+    """Simulates Langflow/Gradio-style UI with real /api/v1/flows JSON."""
+
+    SHELL = (
+        "<!DOCTYPE html><html><head><title>Langflow</title></head>"
+        "<body>langflow</body></html>"
+    )
+
+    def _html(self):
+        data = self.SHELL.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, status: int, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/api/v1/flows":
+            self._json(200, {"flows": [{"id": "1", "name": "demo"}]})
+            return
+        if path == "/api/v1/components":
+            self._json(200, {"components": []})
+            return
+        if path == "/health":
+            self._json(200, {"status": "ok"})
+            return
+        if path == "/config":
+            self._json(200, {"version": "1.0", "components": [], "gradio": False})
+            return
+        self._html()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        path = self.path.split("?")[0]
+        if path == "/api/v1/run":
+            self._json(422, {"detail": [{"msg": "field required", "loc": ["body"]}]})
+            return
+        self._html()
+
+    def log_message(self, *args):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Unit: HTML brand / SPA helpers
+# ---------------------------------------------------------------------------
+
+def test_html_brand_open_webui():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    _, ev, _, title, brands = agent._analyse_html(
+        "<html><head><title>Open WebUI</title></head></html>",
+        "http://localhost:3001", {},
+    )
+    assert title == "Open WebUI"
+    assert "Open WebUI" in brands
+    assert any(e.key == "html_brand_signal" for e in ev)
+
+
+def test_html_brand_flowise_and_langflow():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    _, _, _, title, brands = agent._analyse_html(
+        "<html><head><title>Flowise - Build AI Agents, Visually</title></head></html>",
+        "http://x", {},
+    )
+    assert "Flowise" in brands
+    _, _, _, title, brands = agent._analyse_html(
+        "<html><head><title>Langflow</title></head><body>langflow</body></html>",
+        "http://x", {},
+    )
+    assert "Langflow" in brands
+
+
+def test_looks_html_body():
+    assert _looks_html_body("text/html", "<html></html>")
+    assert _looks_html_body("", "<!DOCTYPE html><html>")
+    assert not _looks_html_body("application/json", '{"models":[]}')
+
+
+def test_auth_gated_probe_counts_as_endpoint():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    r = agent._evaluate_probe_response(
+        "http://x/api/v1/prediction", "/api/v1/prediction", "chat",
+        401, {"Content-Type": "application/json"},
+        '{"detail":"Unauthorized"}', auth,
+    )
+    assert r["endpoints"] == ["http://x/api/v1/prediction"]
+    assert any(e.key == "ml_endpoint_401_403" for e in r["evidence"])
+    assert len(auth) == 1
+
+
+def test_spa_405_ignored():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    r = agent._evaluate_probe_response(
+        "http://x/openapi.json", "/openapi.json", "schema",
+        405, {"Content-Type": "application/json"}, "", [],
+        spa_catch_all=True,
+    )
+    assert r["endpoints"] == []
+    r2 = agent._evaluate_probe_response(
+        "http://x/api/chat", "/api/chat", "chat",
+        405, {"Content-Type": "text/plain"}, "", [],
+        spa_catch_all=True,
+    )
+    assert r2["endpoints"] == []
+
+
+def test_html_probe_response_ignored():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    r = agent._evaluate_probe_response(
+        "http://x/api/chat", "/api/chat", "chat",
+        200, {"Content-Type": "text/html"},
+        "<!DOCTYPE html><html><body>spa</body></html>", [],
+    )
+    assert r == {}
+
+
+def test_injection_capable_requires_inference_segment():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    assert t._is_injection_capable("http://x/api/chat")
+    assert t._is_injection_capable("http://x/api/chat/completions")
+    assert t._is_injection_capable("http://x/api/v1/prediction")
+    assert not t._is_injection_capable("http://x/api-docs")
+    assert not t._is_injection_capable("http://x/api/v1/chatflows")
+    assert not t._is_injection_capable("http://x/openapi.json")
+    assert not t._is_injection_capable("http://x/api/models")
+
+
+def test_classify_endpoint_segment_boundaries():
+    chatflows = classify_endpoint("http://x/api/v1/chatflows")
+    assert chatflows.endpoint_type == "schema"
+    assert chatflows.risk == "low"
+
+    chat = classify_endpoint("http://x/api/chat")
+    assert chat.endpoint_type == "inference"
+    assert chat.risk == "critical"
+
+    prediction = classify_endpoint("http://x/api/v1/prediction")
+    assert prediction.endpoint_type == "inference"
+
+    agents = classify_endpoint("http://x/api/agents")
+    assert agents.endpoint_type == "agentic"
+
+
+def test_framework_probe_paths_cover_target_apps():
+    for name in ("Open WebUI", "Flowise", "Langflow", "LibreChat",
+                 "AnythingLLM", "Gradio"):
+        assert name in FRAMEWORK_SIGNATURES
+        assert name in FRAMEWORK_PROBE_PATHS
+
+
+# ---------------------------------------------------------------------------
+# Unit: infra classify / k8s
+# ---------------------------------------------------------------------------
+
+def test_infra_classify_spa_and_auth():
+    agent = AIInfraAgent()
+    assert agent._classify(
+        200, "<!DOCTYPE html><html>", "text/html", "/api/tags", False, True
+    ) == "skip"
+    assert agent._classify(
+        401, '{"error":"auth"}', "application/json", "/api/v1/prediction", True, True
+    ) == "auth"
+    assert agent._classify(
+        404, "not found", "text/plain", "/api/generate", False, True
+    ) == "skip"
+    assert agent._classify(
+        200, '{"models":[{"name":"x"}]}', "application/json", "/api/tags", True, False
+    ) == "exposed"
+    assert agent._classify(
+        200, "Welcome", "text/plain", "/api/pull", False, True
+    ) == "skip"
+
+
+def test_k8s_body_strict():
+    assert not _is_k8s_body('{"error":"no"}')
+    assert not _is_k8s_body('{"apiVersion":"v1"}')
+    assert _is_k8s_body('{"kind":"PodList","apiVersion":"v1","items":[]}')
+
+
+def test_infra_select_paths_spa_avoids_k8s():
+    agent = AIInfraAgent()
+    paths = agent._select_paths(
+        ["/api/v1/prediction"],
+        {"framework": "Flowise"},
+        catch_all=True,
+    )
+    assert "/api/v1/namespaces" not in paths
+    assert "/api/v1/pods" not in paths
+    assert "/api/v1/prediction" in paths or "/api/v1/chatflows" in paths
+
+
+# ---------------------------------------------------------------------------
+# Unit: vuln tester framework fallbacks
+# ---------------------------------------------------------------------------
+
+def test_vuln_framework_endpoint_fallback():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    # Zero-FP: framework name alone must NOT spray unverified paths.
+    flowise = t._build_endpoint_list([], [], "http://localhost:3100",
+                                     {"framework": "Flowise"})
+    assert flowise == []
+    openwebui = t._build_endpoint_list([], [], "http://localhost:3001",
+                                       {"framework": "Open WebUI"})
+    assert openwebui == []
+    # Verified ml_endpoints still work.
+    verified = t._build_endpoint_list(
+        ["http://localhost:3100/api/v1/prediction"],
+        [],
+        "http://localhost:3100",
+        {"framework": "Flowise"},
+    )
+    assert verified == ["http://localhost:3100/api/v1/prediction"]
+    langflow = t._build_endpoint_list(
+        ["http://localhost:7860/api/v1/run"],
+        [],
+        "http://localhost:7860",
+        {"framework": "Langflow"},
+    )
+    assert langflow == ["http://localhost:7860/api/v1/run"]
+
+
+def test_app_detect_framework_shortcuts():
+    assert detect_application_type(
+        {"framework": "Ollama", "ml_endpoints": []}
+    ).value == "inference_server"
+
+
+# ---------------------------------------------------------------------------
+# Integration: fingerprint against mock SPA apps
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fingerprint_openwebui_spa():
+    port = _free_port()
+    srv = _run_server(SpaOpenWebUIHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["spa_catch_all"] is True
+        assert result["is_ai_powered"] is True
+        assert result["framework"] == "Open WebUI"
+        assert result["evidence_score"] > 0
+        assert result["ml_endpoints"] or result["auth_required_paths"]
+        # Auth-gated chat/models should be discovered
+        auth_eps = [a["endpoint"] for a in result["auth_required_paths"]]
+        all_eps = result["ml_endpoints"] + auth_eps
+        assert any("/api/" in e for e in all_eps)
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_langflow_spa():
+    port = _free_port()
+    srv = _run_server(SpaLangflowHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["is_ai_powered"] is True
+        assert "Langflow" in (result["framework"], *result.get("frameworks_detected", []))
+        assert any("/api/v1/flows" in e or "/api/v1/run" in e
+                   for e in result["ml_endpoints"])
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_infra_no_false_k8s_on_spa_flowise():
+    port = _free_port()
+    srv = _run_server(SpaOpenWebUIHandler, port)
+    try:
+        fp = {
+            "framework": "Open WebUI",
+            "ml_endpoints": [],
+            "auth_required_paths": [
+                {"endpoint": f"http://127.0.0.1:{port}/api/chat",
+                 "auth_type": "unknown", "status_code": 401, "detail": "auth"},
+            ],
+            "spa_catch_all": True,
+            "capabilities": ["chat"],
+            "evidence": [],
+        }
+        agent = AIInfraAgent(timeout=3)
+        result = await agent.scan(f"http://127.0.0.1:{port}", ai_stack=fp)
+        names = [t.attack_name for t in result.threats]
+        assert not any("Kubernetes" in n for n in names)
+        assert not any("Model Pull" in n for n in names)
+    finally:
+        srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Discovery layer: custom paths (no hardcoded /assistant/query seed)
+# ---------------------------------------------------------------------------
+
+def test_score_path_semantics_assistant_query():
+    assert score_path_semantics("/assistant/query") >= 6
+    assert is_inference_like_path("/assistant/query")
+    assert score_path_semantics("/static/logo.png") == 0
+    assert classify_endpoint("http://x/assistant/query").endpoint_type == "inference"
+
+
+def test_expand_semantic_from_assistant_hint():
+    paths = expand_semantic_candidates(["/assistant"], ["My Assistant App"])
+    assert "/assistant/query" in paths
+    assert any(p.endswith("/ask") for p in paths)
+
+
+def test_rank_openapi_prefers_query_body_field():
+    spec = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/health": {"get": {"responses": {"200": {}}}},
+            "/assistant/query": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "query": {"type": "string"},
+                                        "prompt": {"type": "string"},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/users": {"get": {"responses": {"200": {}}}},
+        },
+    }
+    ranked = rank_openapi_paths(spec)
+    assert ranked[0][0] == "/assistant/query"
+    assert ranked[0][1] == "chat"
+    assert ranked[0][2] >= 10
+
+
+def test_js_extracts_assistant_query():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    js = '''
+      const API = { path: "/assistant/query" };
+      fetch("/assistant/query", { method: "POST", body: JSON.stringify({query: q}) });
+      axios.post("/api/v1/agent/ask", payload);
+    '''
+    paths = agent._extract_api_paths_from_js(js)
+    assert "/assistant/query" in paths
+    assert "/api/v1/agent/ask" in paths
+
+
+def test_vuln_uses_discovered_paths_not_generic_spray():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    # No framework, no ml_endpoints — must NOT invent /v1/chat/completions.
+    empty = t._build_endpoint_list([], [], "http://localhost:9", {})
+    assert empty == []
+    # Unverified discovered_paths alone must NOT be sprayed (marketing-site guard).
+    found = t._build_endpoint_list(
+        [], [], "http://localhost:9",
+        {"discovered_paths": ["/assistant/query", "/api/agents/ask"]},
+    )
+    assert found == []
+    # Framework alone also must not spray.
+    flowise = t._build_endpoint_list(
+        [], [], "http://localhost:9",
+        {"framework": "Flowise", "discovered_paths": ["/api/agents/ask"]},
+    )
+    assert flowise == []
+
+
+def test_vuln_prefers_verified_over_unverified_discovered():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    # Verified auth-gated completions exist — do not queue unverified /api/chat.
+    eps = t._build_endpoint_list(
+        ["http://localhost:3001/api/chat/completions",
+         "http://localhost:3001/api/models"],
+        [],
+        "http://localhost:3001",
+        {"discovered_paths": ["/api/chat", "/_app/immutable/entry/app.js"]},
+    )
+    assert eps == ["http://localhost:3001/api/chat/completions"]
+    assert not any(e.endswith("/api/chat") for e in eps)
+
+
+def test_static_assets_not_discovery_candidates():
+    from multiagent.agents.ai_agents.ai_fingerprint import is_static_asset_path
+    assert is_static_asset_path("/_app/immutable/entry/app.DEoG78Ms.js")
+    assert is_static_asset_path("/static/apple-touch-icon.png")
+    assert not is_static_asset_path("/assistant/query")
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    cands = agent._build_discovery_candidates(
+        html_links=["/_app/immutable/entry/app.js", "/assistant"],
+        js_paths=[],
+        openapi_schema={},
+        robots_paths=[],
+        brand_frameworks=[],
+        text_hints=["Acme Assistant"],
+    )
+    paths = [p for p, _c, _s in cands]
+    assert not any(p.endswith(".js") for p in paths)
+    assert "/assistant/query" in paths
+
+
+class CustomAssistantHandler(BaseHTTPRequestHandler):
+    """Custom AI app: only POST /assistant/query — not in any seed catalog."""
+
+    SHELL = (
+        "<!DOCTYPE html><html><head><title>Acme Assistant</title></head>"
+        "<body><a href='/assistant'>Open assistant</a>"
+        "<script src='/assets/app.js'></script></body></html>"
+    )
+
+    def _html(self):
+        data = self.SHELL.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, status, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path.startswith("/assets/"):
+            body = b'fetch("/assistant/query"); const p="/assistant/query";'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/openapi.json":
+            self._json(200, {
+                "openapi": "3.0.0",
+                "paths": {
+                    "/assistant/query": {
+                        "post": {
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "properties": {
+                                                "query": {"type": "string"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            })
+            return
+        if path == "/assistant":
+            self._html()
+            return
+        self._html()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        path = self.path.split("?")[0]
+        if path == "/assistant/query":
+            self._json(422, {"error": "query field required", "fields": ["query"]})
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_discovers_custom_assistant_query():
+    port = _free_port()
+    srv = _run_server(CustomAssistantHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["is_ai_powered"] is True
+        all_eps = result["ml_endpoints"] + [
+            a.get("endpoint", "") for a in result.get("auth_required_paths", [])
+        ]
+        assert any("/assistant/query" in e for e in all_eps), all_eps
+        assert any(
+            "/assistant/query" in (p if isinstance(p, str) else "")
+            for p in result.get("discovered_paths", [])
+        ) or any("/assistant/query" in e for e in all_eps)
+    finally:
+        srv.shutdown()

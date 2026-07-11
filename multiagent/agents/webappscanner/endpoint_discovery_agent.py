@@ -16,6 +16,12 @@ from urllib.parse import urlparse, urljoin, urlsplit, urlunparse
 logger = logging.getLogger(__name__)
 
 
+def _looks_html_body(ct: str, body: str) -> bool:
+    """True when the response is an HTML document (SPA shell), not a JSON API."""
+    b = (body or "").strip().lower()
+    return "html" in (ct or "").lower() or b.startswith(("<!doctype", "<html"))
+
+
 
 COMMON_PATHS = [
     # API roots
@@ -277,6 +283,13 @@ class EndpointDiscoveryAgent:
         status = ep.get("status")
 
         if status is None:
+            # Unprobed passive entries (sitemap/robots/JS) are not attack surface
+            # until a live status is known. OpenAPI/swagger stays interesting.
+            if ep.get("source") == "swagger":
+                ep.setdefault("interesting", True)
+            else:
+                ep["interesting"] = False
+                ep["verification"] = "unprobed — not confirmed live"
             return ep
 
         if status == 403:
@@ -288,13 +301,30 @@ class EndpointDiscoveryAgent:
         if status == 200:
             body       = await self._fetch_text(url) or ""
             body_lower = body.lower()
+            ct         = (ep.get("content_type") or "").lower()
 
+            # SPA / catch-all HTML shell — not a real API or admin surface.
+            if _looks_html_body(ct, body):
+                stripped = body.strip()
+                # Allow through only if body is actually JSON despite HTML content-type.
+                is_json = False
+                if stripped.startswith(("{", "[")):
+                    try:
+                        import json as _json
+                        _json.loads(stripped[:500])
+                        is_json = True
+                    except Exception:
+                        is_json = False
+                if not is_json:
+                    ep["interesting"]  = False
+                    ep["spa_fallback"] = True
+                    ep["verification"] = "SPA HTML shell (not an API endpoint)"
+                    return ep
 
             sensitive_content_patterns = [
                 ("DB_PASSWORD",   "env_file_exposed"),
                 ("database.yml",  "config_exposed"),
                 ("secret_key",    "secret_exposed"),
-                ("password",      "credential_exposed"),
                 ("[boot loader]", "windows_hosts_exposed"),
                 ("root:x:",       "etc_passwd_exposed"),
             ]
@@ -306,20 +336,17 @@ class EndpointDiscoveryAgent:
                     ep["severity"]         = "Critical"
                     return ep
 
-            # Login / auth form
-            if any(kw in body_lower for kw in (
-                'type="password"', "type='password'",
-                "login", "sign in", "signin", "authenticate"
-            )):
+            # Login / auth form — require a real password field, not SPA JS text.
+            if 'type="password"' in body_lower or "type='password'" in body_lower:
                 ep["interesting"]   = True
                 ep["auth_endpoint"] = True
                 ep["verification"]  = "Login form detected"
                 return ep
 
-            # Admin panel
+            # Admin panel — require structural markers, not bare "admin" in JS bundles.
             if any(kw in body_lower for kw in (
-                "admin", "dashboard", "control panel",
-                "management console", "administrator"
+                "control panel", "management console",
+                'id="admin"', "admin-dashboard",
             )):
                 ep["interesting"]  = True
                 ep["admin_panel"]  = True
@@ -347,8 +374,9 @@ class EndpointDiscoveryAgent:
                 ep["severity"]          = "Medium"
                 return ep
 
-          
-            ep["verification"] = "HTTP 200 — content unclassified"
+            # Unclassified 200 — do NOT keep as interesting (avoids SPA noise).
+            ep["interesting"]  = False
+            ep["verification"] = "HTTP 200 — content unclassified (not flagged)"
             return ep
 
         # 401 = auth required (endpoint exists, protected)
@@ -431,7 +459,7 @@ class EndpointDiscoveryAgent:
                         "source":       "robots.txt",
                         "status":       None,
                         "final_url":    full_url,
-                        "interesting":  True,
+                        "interesting":  False,  # require verify / probe
                         "auth_required":False,
                         "params":       []
                     })
@@ -439,23 +467,44 @@ class EndpointDiscoveryAgent:
 
     async def _parse_sitemap(self, base: str) -> List[Dict]:
         endpoints = []
+        # Marketing / community sitemaps (e.g. openwebui.com) can list thousands
+        # of profile/post URLs — cap and skip non-API paths.
+        _SKIP_PREFIXES = (
+            "/o/", "/u/", "/c/", "/blog/", "/docs/", "/changelog/",
+            "/terms", "/privacy", "/pricing", "/about",
+        )
+        _MAX_SITEMAP = 80
         for path in ("/sitemap.xml", "/sitemap_index.xml"):
             body = await self._fetch_text(f"{base}{path}")
             if not body:
                 continue
             for loc in re.findall(r'<loc>([^<]+)</loc>', body):
                 loc = loc.strip()
-                if loc:
-                    endpoints.append({
-                        "url":          loc,
-                        "method":       "GET",
-                        "source":       "sitemap",
-                        "status":       None,
-                        "final_url":    loc,
-                        "interesting":  True,
-                        "auth_required":False,
-                        "params":       []
-                    })
+                if not loc:
+                    continue
+                try:
+                    loc_path = (urlsplit(loc).path or "/").lower()
+                except Exception:
+                    loc_path = loc.lower()
+                if any(loc_path.startswith(p) for p in _SKIP_PREFIXES):
+                    continue
+                if re.search(
+                    r'\.(png|jpg|gif|css|js|woff2?|svg|ico|pdf|xml)$',
+                    loc_path, re.I,
+                ):
+                    continue
+                endpoints.append({
+                    "url":          loc,
+                    "method":       "GET",
+                    "source":       "sitemap",
+                    "status":       None,
+                    "final_url":    loc,
+                    "interesting":  False,  # unprobed — not an attack surface yet
+                    "auth_required":False,
+                    "params":       []
+                })
+                if len(endpoints) >= _MAX_SITEMAP:
+                    return endpoints
         return endpoints
 
     async def _parse_swagger(self, base: str) -> List[Dict]:
@@ -604,7 +653,7 @@ class EndpointDiscoveryAgent:
                         "source":       "js_bundle",
                         "status":       None,
                         "final_url":    full_url,
-                        "interesting":  True,
+                        "interesting":  False,  # unprobed JS string — not confirmed live
                         "auth_required":False,
                         "params":       []
                     })
@@ -703,12 +752,14 @@ class EndpointDiscoveryAgent:
                 return None
 
             if status == 200 and "text/html" in content_type and not is_sensitive:
-                looks_like_endpoint = any(kw in path_lower for kw in (
-                    "admin", "api", "login", "dashboard", "console",
-                    "panel", "manage", "swagger", "debug", "shell", "graphql"
-                ))
-                if not looks_like_endpoint:
-                    return None
+                # SPA catch-alls return HTML 200 for almost every path — including
+                # /api/*, /admin, /login. Do not treat those as real API surfaces.
+                return None
+
+            # Soft-404 / catch-all: same-length HTML shells as calibration.
+            if self._soft_mode and status == 200 and not is_sensitive:
+                # Defer body check to _verify_endpoint; mark for verification.
+                pass
 
             return {
                 "url":          url,

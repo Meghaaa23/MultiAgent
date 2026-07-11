@@ -89,12 +89,35 @@ GENERIC_PATHS = {"/docs", "/health", "/healthz", "/readyz", "/metrics",
 AI_BODY_SIGNALS = ["model", "ollama", "vllm", "embedding", "inference",
                    "completion", "generate", "torch", "tensorflow", "llm",
                    "cuda", "gpu", "triton", "ray", "bentoml", "langchain",
-                   "huggingface", "transformers", "tokenizer", "checkpoint"]
+                   "huggingface", "transformers", "tokenizer", "checkpoint",
+                   "chatflow", "gradio", "flowise", "langflow", "choices",
+                   "messages", "prompt"]
 
 CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
 INFERENCE_PATHS = ["/v1/chat/completions", "/v1/completions", "/api/generate",
-                   "/api/chat", "/generate"]
+                   "/api/chat", "/generate", "/api/v1/prediction", "/api/ask",
+                   "/api/v1/run", "/run/predict", "/api/chat-messages",
+                   "/api/v1/openai/chat/completions"]
 TRAINING_PATHS = ["/train", "/fine-tune", "/finetune", "/training", "/api/train"]
+
+# Framework → preferred probe path sets (avoids spraying K8s/Ray paths on SPAs).
+FRAMEWORK_INFRA_PATHS = {
+    "ollama": OLLAMA_PATHS + VLLM_PATHS,
+    "open webui": OLLAMA_PATHS + VLLM_PATHS + ["/api/models", "/api/v1/models"],
+    "vllm": VLLM_PATHS + LANGSERVE_PATHS,
+    "tgi": TGI_PATHS,
+    "flowise": ["/api/v1/prediction", "/api/v1/chatflows", "/api/v1/nodes",
+                "/api/v1/ping", "/openapi.json", "/health"],
+    "langflow": ["/api/v1/flows", "/api/v1/run", "/api/v1/components",
+                 "/health", "/openapi.json", "/api/v1/all"],
+    "gradio": ["/config", "/info", "/queue/join", "/run/predict",
+               "/gradio_api/info", "/health"],
+    "librechat": ["/api/ask", "/api/messages", "/api/models", "/api/endpoints",
+                  "/api/convos", "/health"],
+    "anythingllm": ["/api/workspace", "/api/chat", "/api/system/env",
+                    "/api/v1/openai/chat/completions", "/health"],
+    "dify": ["/api/chat-messages", "/api/workflows/run", "/api/apps", "/health"],
+}
 
 HIGH_IMPACT_CAPS = {"code_execution", "shell", "python", "email_send", "tool_calling", "mcp"}
 MED_IMPACT_CAPS  = {"memory", "multi_agent", "web_search", "browser", "retrieval", "rag"}
@@ -186,7 +209,19 @@ def _is_triton_list(body: str) -> bool:
 
 def _is_k8s_body(body: str) -> bool:
     d = _json_body(body)
-    return isinstance(d, dict) and ("kind" in d or "apiVersion" in d)
+    if not isinstance(d, dict):
+        return False
+    # Require both fields — SPA/auth JSON often has one by coincidence.
+    if "kind" in d and "apiVersion" in d:
+        return True
+    kind = d.get("kind")
+    if kind in ("APIVersions", "APIGroupList", "NamespaceList", "PodList", "Status"):
+        return True
+    return (
+        str(d.get("apiVersion", "")).startswith("v1")
+        and isinstance(d.get("items"), list)
+        and kind is not None
+    )
 
 
 def _is_ai_json(body: str) -> bool:
@@ -276,8 +311,17 @@ class AIInfraAgent:
             pass
         return False
 
-    def _select_paths(self, confirmed_paths: list) -> list:
+    def _select_paths(self, confirmed_paths: list, ai_stack: Optional[dict] = None,
+                      catch_all: bool = False) -> list:
         paths_to_probe = []
+        framework = str((ai_stack or {}).get("framework") or "").lower()
+        frameworks = [str(f).lower() for f in (ai_stack or {}).get("frameworks_detected") or []]
+        all_fw = [framework] + frameworks
+
+        for fw_key, fw_paths in FRAMEWORK_INFRA_PATHS.items():
+            if any(fw_key in f for f in all_fw if f):
+                paths_to_probe += fw_paths
+
         if any(p in confirmed_paths for p in ["/api/tags", "/api/generate", "/api/chat"]):
             paths_to_probe += OLLAMA_PATHS
         if any(p in confirmed_paths for p in ["/v1/models", "/v1/chat/completions"]):
@@ -290,15 +334,37 @@ class AIInfraAgent:
             paths_to_probe += TORCHSERVE_PATHS
         if any(p in confirmed_paths for p in ["/v2/models", "/v2/health/ready"]):
             paths_to_probe += TRITON_PATHS
-        paths_to_probe += UNIVERSAL_PATHS + MANAGEMENT_PATHS + KUBERNETES_PATHS
-        return list(dict.fromkeys(paths_to_probe))
+
+        # Always include confirmed fingerprint endpoints + a small universal set.
+        paths_to_probe += confirmed_paths
+        paths_to_probe += ["/health", "/openapi.json", "/v1/models", "/v1/chat/completions"]
+
+        # Avoid spraying K8s/Ray/management probes onto SPA frontends — massive FP source.
+        if not catch_all:
+            paths_to_probe += UNIVERSAL_PATHS + MANAGEMENT_PATHS
+            # Only probe K8s when there is an explicit signal.
+            if any(p.startswith("/api/v1/namespaces") or p == "/apis" for p in confirmed_paths):
+                paths_to_probe += KUBERNETES_PATHS
+        else:
+            # SPA mode: only framework/confirmed paths + management if already confirmed.
+            for p in MANAGEMENT_PATHS:
+                if p in confirmed_paths:
+                    paths_to_probe.append(p)
+
+        return list(dict.fromkeys(p for p in paths_to_probe if p))
 
     async def _probe_ai_endpoints(self, base_url: str, ai_stack: Optional[dict]) -> Tuple[dict, list, bool]:
         is_catch_all = await self._detect_catch_all(base_url)
+        if not is_catch_all and (ai_stack or {}).get("spa_catch_all"):
+            is_catch_all = True
 
-        confirmed       = ai_stack.get("ml_endpoints", []) if ai_stack else []
-        confirmed_paths = [urlparse(e).path for e in confirmed]
-        paths_to_probe  = self._select_paths(confirmed_paths)
+        confirmed       = list((ai_stack or {}).get("ml_endpoints") or [])
+        # Also consider auth-gated paths as known AI surfaces (not "exposed").
+        for sig in (ai_stack or {}).get("auth_required_paths") or []:
+            if isinstance(sig, dict) and sig.get("endpoint"):
+                confirmed.append(sig["endpoint"])
+        confirmed_paths = [urlparse(e).path for e in confirmed if e]
+        paths_to_probe  = self._select_paths(confirmed_paths, ai_stack, catch_all=is_catch_all)
 
         exposed: dict = {}
         auth_hits: list = []
@@ -311,7 +377,8 @@ class AIInfraAgent:
             if isinstance(res, Exception):
                 continue
             status, body, ct = res
-            verdict = self._classify(status, body, ct, path, bool(confirmed_paths))
+            verdict = self._classify(
+                status, body, ct, path, bool(confirmed_paths), catch_all=is_catch_all)
             if verdict == "auth":
                 url = base_url + path
                 if url not in auth_hits:
@@ -320,13 +387,17 @@ class AIInfraAgent:
                 continue
             if verdict == "skip":
                 continue
+            # Defense in depth: never mark non-success/validation statuses as exposed.
+            if status in SKIP_STATUS or status in (401, 403):
+                continue
             exposed[path] = {"status": status, "body": body, "verdict": verdict}
             tag = "content-verified" if is_catch_all else "reached"
             logger.info("[AIInfraAgent] EXPOSED (%s) -> %s [%d]", tag, path, status)
 
         return exposed, auth_hits, is_catch_all
 
-    def _classify(self, status: int, body: str, ct: str, path: str, have_confirmed: bool) -> str:
+    def _classify(self, status: int, body: str, ct: str, path: str,
+                  have_confirmed: bool, catch_all: bool = False) -> str:
         if _looks_html(ct, body):
             return "skip"
         if status in (401, 403):
@@ -334,15 +405,26 @@ class AIInfraAgent:
         if status in SKIP_STATUS:
             return "skip"
         if status == 200:
-            if path in GENERIC_PATHS:
-                if not any(s in (body or "").lower() for s in AI_BODY_SIGNALS):
+            if catch_all or path in GENERIC_PATHS:
+                # SPA mode: require AI-shaped content, never trust status alone.
+                if not _is_ai_json(body) and not any(
+                    s in (body or "").lower() for s in AI_BODY_SIGNALS
+                ):
                     return "skip"
             parsed = _json_body(body)
             b = (body or "").strip().lower()
             if parsed is None and b in ("", "null"):
                 return "skip"
+            # Non-JSON 200 with no AI signals is not an AI exposure.
+            if parsed is None and not any(s in b for s in AI_BODY_SIGNALS):
+                return "skip"
             return "exposed"
         if status in (400, 422):
+            # Validation errors prove a real handler; still skip HTML SPA shells.
+            if catch_all and not (_json_body(body) or any(
+                s in (body or "").lower() for s in AI_BODY_SIGNALS
+            )):
+                return "skip"
             return "reached"
         return "skip"
 
@@ -444,9 +526,18 @@ class AIInfraAgent:
 
     async def _analyze_runtime_plane(self, url, exposed, capabilities, reachability):
         threats = []
-        exposed_inference = [p for p in INFERENCE_PATHS
-                             if p in exposed and _is_ai_json(exposed[p].get("body", ""))
-                             or (p in exposed and exposed[p].get("verdict") == "reached")]
+        exposed_inference = []
+        for p in INFERENCE_PATHS:
+            if p not in exposed:
+                continue
+            entry = exposed[p]
+            body = entry.get("body", "")
+            verdict = entry.get("verdict")
+            if _is_ai_json(body) or verdict == "reached":
+                # Ignore 404/HTML ghosts that slipped through.
+                if entry.get("status") in SKIP_STATUS:
+                    continue
+                exposed_inference.append(p)
         exposed_inference = list(dict.fromkeys(exposed_inference))
 
         if exposed_inference:
@@ -517,6 +608,8 @@ class AIInfraAgent:
             if path not in exposed:
                 continue
             d = exposed[path]
+            if d.get("status") not in (200, 400, 422):
+                continue
             status_note = "(reached handler, requires body) " if d["status"] in (400, 422) else ""
             threats.append(AIInfraThreat(
                 attack_name=f"{action.title()} API Exposed (management endpoint)",

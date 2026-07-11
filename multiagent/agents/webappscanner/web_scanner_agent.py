@@ -179,7 +179,7 @@ class WebScannerAgent:
             if auth_cookie:
                 print(f"  Auth   : Session cookie provided (authenticated scan)")
             print(f"  Target : {target_url}")
-            print(f"  Budget : {max_time_minutes} minutes")
+            print(f"  Mode   : full scan (no time budget)")
             print(f"{'='*70}\n")
 
         all_forms:       List[Dict] = []
@@ -288,7 +288,6 @@ class WebScannerAgent:
                   f"({interesting} interesting, {protected} access-controlled)"
                   + (" [soft-404 filter active]" if soft_mode else "") + "\n")
 
-      
         if verbose:
             print("AI/ML Component Detection...")
 
@@ -296,26 +295,68 @@ class WebScannerAgent:
         avid_results    = None
         ai_vuln_results = None
         is_ai_powered   = False
+        brand_only_ai   = False
 
         try:
+            # Cap what AI fingerprint re-probes — marketing sitemaps can be huge.
+            ai_eps = [
+                ep for ep in discovered_endpoints
+                if ep.get("interesting")
+                and not ep.get("spa_fallback")
+                and ep.get("status") is not None
+            ][:40]
             ai_fingerprint = await self.ai_fingerprinter.fingerprint(
                 target_url           = target_url,
-                discovered_endpoints = discovered_endpoints,
+                discovered_endpoints = ai_eps,
                 page_html            = html,
                 response_headers     = initial_headers,
                 verbose              = verbose,
             )
 
             raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
-            confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers"))
-            is_ai_powered = raw_is_ai and (confidence == "high" or has_concrete)
+            confidence   = str(ai_fingerprint.get("confidence", "low")).lower()
+            has_live_surface = bool(
+                ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("ai_headers")
+                or ai_fingerprint.get("auth_required_paths")
+            )
+            # Brand/HTML alone (openwebui.com marketing) is NOT a live AI app.
+            is_ai_powered = bool(raw_is_ai and has_live_surface)
+            brand_only_ai = bool(
+                raw_is_ai
+                and not has_live_surface
+                and (ai_fingerprint.get("framework") or confidence in ("high", "very_high"))
+            )
 
             if is_ai_powered:
                 if verbose:
                     print(f"  AI-powered app detected [{confidence} confidence]")
+                    print(f"     Framework   : {ai_fingerprint.get('framework') or '(unknown)'}")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
+
+                # Merge AI framework into stack/CVE identity only when a live
+                # AI surface was verified (auth-gated or open inference).
+                fw = (ai_fingerprint.get("framework") or "").strip()
+                if fw and has_live_surface:
+                    stack["ai_framework"] = fw
+                    techs = list(stack.get("technologies") or [])
+                    names_lower = set()
+                    for t in techs:
+                        if isinstance(t, dict):
+                            names_lower.add(str(t.get("name", "")).lower())
+                        else:
+                            names_lower.add(str(t).split("/")[0].lower())
+                    if fw.lower() not in names_lower:
+                        techs.insert(0, {"name": fw, "version": "", "confidence": "high"})
+                        stack["technologies"] = techs
+                    summary = stack.get("stack_summary") or ""
+                    if fw.lower() not in summary.lower():
+                        stack["stack_summary"] = (
+                            f"{fw} · {summary}" if summary and summary != "Unknown" else fw
+                        )
+                    if not stack.get("app_identity_name"):
+                        stack["app_identity_name"] = fw
 
                 if verbose:
                     print("  Querying AVID database for AI vulnerabilities...")
@@ -341,9 +382,22 @@ class WebScannerAgent:
                     s = len(ai_vuln_results.get("strategic_recommendations", []))
                     print(f"   AI vulns: {c} confirmed, {p} potential")
                     print(f"   Strategic recommendations: {s} ATLAS-based\n")
+            elif brand_only_ai:
+                fw = (ai_fingerprint.get("framework") or "AI product").strip()
+                if verbose:
+                    print(f"  AI product brand detected ({fw}) but no live inference surface")
+                    print(f"     Skipping active AI injection / infra probes\n")
+                from ..ai_agents.ai_vulnerability_test import AIVulnerabilityTester as _AVT
+                ai_vuln_results = {
+                    "confirmed_ai_vulns": [],
+                    "potential_ai_vulns": [],
+                    "strategic_recommendations": _AVT._build_strategic_recommendations(
+                        ai_fingerprint, [], [],
+                    ),
+                }
             else:
                 if verbose:
-                    if raw_is_ai and not has_concrete:
+                    if raw_is_ai and not has_live_surface:
                         print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
                     else:
                         print(f"  No AI/ML components detected — AI-specific tests skipped\n")
@@ -351,9 +405,10 @@ class WebScannerAgent:
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
 
+        # AI infra uses the same escalation gate as AVID / AI vuln.
         ai_infra_result = None
         try:
-            if ai_fingerprint and ai_fingerprint.get("is_ai_powered"):
+            if is_ai_powered and ai_fingerprint:
                 if verbose:
                     print("  AI Infrastructure Build Attack Analysis...")
                 ai_infra_result = await self.ai_infra_agent.scan(
@@ -362,8 +417,9 @@ class WebScannerAgent:
                 if verbose:
                     print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
         except Exception as e:
-            logging.warning(f"AIInfraAgent failed: {e}")
+            logger.warning(f"AIInfraAgent failed: {e}")
 
+        # Traditional web vulnerability scanning continues regardless of AI.
         if verbose:
             print(" CVE Lookup ")
         try:
@@ -438,11 +494,6 @@ class WebScannerAgent:
 
         tasks_executed = 0
         for idx, task in enumerate(tasks[:8], 1):
-            elapsed = (datetime.now() - start).total_seconds() / 60
-            if elapsed > max_time_minutes * 0.40:
-                if verbose:
-                    print(f"  Crawl budget reached ({elapsed:.1f}m)")
-                break
             result = await self.browser.execute_task(task, target_url)
             all_forms.extend(result.get("forms", []))
             all_urls.extend(result.get("urls", []))
@@ -569,6 +620,36 @@ class WebScannerAgent:
                     seen.add(key)
                     all_findings.append(f)
 
+        # Zero-FP gate: Confirmed XSS/open-redirect without captured evidence
+        # are demoted to Potential before reporting.
+        for f in all_findings:
+            ftype = f.get("type", "")
+            status = f.get("status", "")
+            ev = f.get("evidence") or {}
+            if status != "Confirmed":
+                continue
+            if "XSS" in ftype and "Potential" not in ftype:
+                snippet = ev.get("response_body_snippet") or ev.get("response_snippet") or ""
+                method = ev.get("confirmation_method", "")
+                if method not in ("js_execution", "dom_reflection") and not snippet:
+                    f["status"] = "Potential"
+                    f["confidence"] = "Low"
+                    f["details"] = (
+                        (f.get("details") or "")
+                        + " [Demoted: no response snippet captured]"
+                    ).strip()
+            if ftype == "Open Redirect":
+                loc_hdr = (ev.get("response_headers") or {}).get("Location") or \
+                          (ev.get("response_headers") or {}).get("location") or ""
+                from .vulnerability_tester import _open_redirect_to_attacker
+                if not _open_redirect_to_attacker(loc_hdr, ""):
+                    f["status"] = "Potential"
+                    f["confidence"] = "Low"
+                    f["details"] = (
+                        (f.get("details") or "")
+                        + " [Demoted: Location is not an external attacker host]"
+                    ).strip()
+
         if verbose:
             print(" Action Agent (PoC + fix generation)...")
         action_results: List[Dict] = []
@@ -631,7 +712,8 @@ class WebScannerAgent:
             "scan_duration":          round(duration, 1),
             "authenticated_scan":     bool(auth_cookie),
             "timestamp":              datetime.now().isoformat(),
-            "is_ai_powered":          is_ai_powered,
+            "is_ai_powered":          is_ai_powered or brand_only_ai,
+            "ai_brand_only":          brand_only_ai,
             "ai_fingerprint":         ai_fingerprint,
             "avid_findings":          (avid_results or {}).get("avid_findings", []),
             "avid_backdoor_relevant": (avid_results or {}).get("backdoor_relevant", []),
@@ -641,6 +723,7 @@ class WebScannerAgent:
                 if ai_infra_result else None
             ),
             "action_results": action_results,
+            "response_headers": initial_headers,
             "headers_capture_failed": headers_capture_failed,
         }
 

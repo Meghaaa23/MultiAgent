@@ -8,6 +8,9 @@ services:
     ports:
       - "3101:3001"
 
+    environment:
+      STORAGE_DIR: /app/server/storage
+
     volumes:
       - ./storage:/app/server/storage
 
