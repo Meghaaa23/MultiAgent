@@ -296,6 +296,7 @@ class WebScannerAgent:
         avid_results    = None
         ai_vuln_results = None
         is_ai_powered   = False
+        brand_only_ai   = False
 
         try:
             ai_fingerprint = await self.ai_fingerprinter.fingerprint(
@@ -306,14 +307,19 @@ class WebScannerAgent:
                 verbose              = verbose,
             )
 
-            raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
-            confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers"))
-            is_ai_powered = raw_is_ai and (confidence == "high" or has_concrete)
+            has_live_surface = bool(
+                ai_fingerprint.get("has_live_surface")
+                or ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("auth_required_paths")
+            )
+            brand_only_ai = bool(ai_fingerprint.get("ai_brand_only")) and not has_live_surface
+            is_ai_powered = bool(ai_fingerprint.get("is_ai_powered") and has_live_surface)
 
             if is_ai_powered:
                 if verbose:
-                    print(f"  AI-powered app detected [{confidence} confidence]")
+                    conf = ai_fingerprint.get("confidence", "low")
+                    post = ai_fingerprint.get("posterior", 0.0)
+                    print(f"  AI-powered app detected [{conf} confidence, P(AI)={post:.3f}]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
@@ -341,19 +347,23 @@ class WebScannerAgent:
                     s = len(ai_vuln_results.get("strategic_recommendations", []))
                     print(f"   AI vulns: {c} confirmed, {p} potential")
                     print(f"   Strategic recommendations: {s} ATLAS-based\n")
+            elif brand_only_ai:
+                if verbose:
+                    fw = ai_fingerprint.get("framework") or (
+                        (ai_fingerprint.get("frameworks_detected") or ["unknown"])[0]
+                    )
+                    print(f"  AI product brand detected ({fw}) but no live inference surface")
+                    print(f"     P(AI)={ai_fingerprint.get('posterior', 0.0):.3f} — skipping AI escalation\n")
             else:
                 if verbose:
-                    if raw_is_ai and not has_concrete:
-                        print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
-                    else:
-                        print(f"  No AI/ML components detected — AI-specific tests skipped\n")
+                    print(f"  No AI/ML components detected — AI-specific tests skipped\n")
 
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
 
         ai_infra_result = None
         try:
-            if ai_fingerprint and ai_fingerprint.get("is_ai_powered"):
+            if is_ai_powered and ai_fingerprint:
                 if verbose:
                     print("  AI Infrastructure Build Attack Analysis...")
                 ai_infra_result = await self.ai_infra_agent.scan(
@@ -631,7 +641,8 @@ class WebScannerAgent:
             "scan_duration":          round(duration, 1),
             "authenticated_scan":     bool(auth_cookie),
             "timestamp":              datetime.now().isoformat(),
-            "is_ai_powered":          is_ai_powered,
+            "is_ai_powered":          is_ai_powered or brand_only_ai,
+            "ai_brand_only":          brand_only_ai,
             "ai_fingerprint":         ai_fingerprint,
             "avid_findings":          (avid_results or {}).get("avid_findings", []),
             "avid_backdoor_relevant": (avid_results or {}).get("backdoor_relevant", []),

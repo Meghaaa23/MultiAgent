@@ -338,6 +338,9 @@ async def test_fingerprint_openwebui_spa():
         result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
         assert result["spa_catch_all"] is True
         assert result["is_ai_powered"] is True
+        assert result["has_live_surface"] is True
+        assert result["ai_brand_only"] is False
+        assert result["posterior"] > 0.5
         assert result["framework"] == "Open WebUI"
         assert result["evidence_score"] > 0
         assert result["ml_endpoints"] or result["auth_required_paths"]
@@ -357,6 +360,7 @@ async def test_fingerprint_langflow_spa():
         agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
         result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
         assert result["is_ai_powered"] is True
+        assert result["has_live_surface"] is True
         assert "Langflow" in (result["framework"], *result.get("frameworks_detected", []))
         assert any("/api/v1/flows" in e or "/api/v1/run" in e
                    for e in result["ml_endpoints"])
@@ -385,5 +389,52 @@ async def test_infra_no_false_k8s_on_spa_flowise():
         names = [t.attack_name for t in result.threats]
         assert not any("Kubernetes" in n for n in names)
         assert not any("Model Pull" in n for n in names)
+    finally:
+        srv.shutdown()
+
+
+class MarketingBrandHandler(BaseHTTPRequestHandler):
+    PAGE = (
+        "<!DOCTYPE html><html><head><title>Open WebUI — The best AI interface</title>"
+        "<meta name='description' content='Chat with AI models online'>"
+        "</head><body><h1>Open WebUI</h1><p>Download our AI assistant.</p>"
+        "</body></html>"
+    )
+
+    def do_GET(self):  # noqa: N802
+        data = self.PAGE.encode()
+        self.send_response(200 if self.path in ("/", "/index.html") else 404)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        data = b"Not Found"
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_brand_only_marketing_site_not_ai_powered():
+    port = _free_port()
+    srv = _run_server(MarketingBrandHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["has_live_surface"] is False
+        assert result["is_ai_powered"] is False
+        assert result["ai_brand_only"] is True
+        assert not result["ml_endpoints"]
+        assert not result["auth_required_paths"]
+        assert result["posterior"] >= 0.0
     finally:
         srv.shutdown()

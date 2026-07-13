@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import math
 import hashlib
 import asyncio
 import logging
@@ -11,74 +12,24 @@ import urllib.error
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+from multiagent.agents.ai_agents.ai_evidence_scoring import (
+    FEATURE_RATES,
+    LogisticCalibrator,
+    combine_scores,
+    feature_log_lr,
+    has_brand_only_evidence,
+    has_live_surface_evidence,
+    score_evidence_keys,
+)
+
 logger = logging.getLogger(__name__)
 
 
+# Evidence weights
 EVIDENCE_WEIGHTS: Dict[str, int] = {
-    "openapi_schema":           18,
-    "openapi_ai_endpoint":      14,
-    "graphql_schema":           14,
-    "graphql_ai_field":         12,
-
-    "framework_identified":     30,
-    "framework_header":         15,
-    "framework_cookie":         10,
-
-    "behavior_llm_response":    22,
-    "behavior_model_reported":  20,
-    "behavior_streaming":       14,
-
-    "chat_endpoint_200":        14,
-    "embedding_endpoint_200":   10,
-    "tool_endpoint_200":        10,
-    "ml_endpoint_200":           8,
-    "ml_endpoint_401_403":       6,
-    "ml_endpoint_405":           5,
-
-    "error_openai_format":      12,
-    "error_missing_messages":   10,
-    "error_missing_model":       8,
-    "error_triton_format":       8,
-    "error_huggingface_format":  7,
-    "error_generic_validation":  4,
-
-    "sse_streaming_header":     10,
-    "sse_chunked_transfer":      8,
-    "sse_in_js":                 6,
-    "websocket_ai_path":         6,
-
-    "ai_response_header":        7,
-
-    "js_ai_sdk":                 7,
-    "js_api_path_extracted":     5,
-
-    "robots_ai_path":            5,
-    "sitemap_ai_path":           4,
-    "csp_ai_domain":             6,
-    "meta_ai_tag":               4,
-    "favicon_known_framework":   5,
-    "page_title_ai":             8,
-    "html_brand_signal":        12,
-    "spa_catch_all":             2,
-
-    "dom_assistant_role":        3,
-    "html_ai_form":              3,
+    key: int(round(feature_log_lr(key) * 10))
+    for key in FEATURE_RATES
 }
-
-CONFIDENCE_BANDS = [
-    (100, "very_high"),
-    ( 65, "high"),
-    ( 40, "medium"),
-    ( 20, "low"),
-    (  0, "none"),
-]
-
-
-def score_to_confidence(score: int) -> str:
-    for threshold, label in CONFIDENCE_BANDS:
-        if score >= threshold:
-            return label
-    return "none"
 
 
 FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
@@ -458,14 +409,20 @@ class EvidenceItem:
     source:    str
     endpoint:  str = ""
     framework: str = ""
+    log_lr:    float = 0.0
+    likelihood_ratio: float = 1.0
 
     @staticmethod
     def make(key: str, detail: str, source: str,
              endpoint: str = "", framework: str = "") -> "EvidenceItem":
+        log_lr = feature_log_lr(key)
+        lr = math.exp(log_lr) if log_lr < 20 else float("inf")
         return EvidenceItem(
             key=key, detail=detail,
-            weight=EVIDENCE_WEIGHTS.get(key, 0),
+            weight=EVIDENCE_WEIGHTS.get(key, int(round(log_lr * 10))),
             source=source, endpoint=endpoint, framework=framework,
+            log_lr=log_lr,
+            likelihood_ratio=lr if not math.isinf(lr) else 1e9,
         )
 
 
@@ -567,11 +524,24 @@ class FingerprintReport:
     spa_catch_all:    bool               = False
     app_description:  str                = ""
 
+    has_live_surface: bool = False
+    ai_brand_only:    bool = False
+    posterior:        float = 0.0
+    prior:            float = 0.0
+    log_odds:         float = 0.0
+    bayesian:         Dict = field(default_factory=dict)
+
     def to_dict(self) -> Dict:
         return {
             "is_ai_powered":          self.is_ai_powered,
             "confidence":             self.confidence,
             "evidence_score":         self.evidence_score,
+            "has_live_surface":       self.has_live_surface,
+            "ai_brand_only":          self.ai_brand_only,
+            "posterior":              round(self.posterior, 6),
+            "prior":                  self.prior,
+            "log_odds":               round(self.log_odds, 6),
+            "bayesian":               self.bayesian,
             "framework":              self.framework,
             "framework_confidence":   round(self.framework_confidence * 100, 1),
             "framework_signals":      self.framework_signals,
@@ -608,8 +578,11 @@ class FingerprintReport:
             "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
+                 "log_lr": round(e.log_lr, 4),
+                 "likelihood_ratio": round(e.likelihood_ratio, 4)
+                 if not math.isinf(e.likelihood_ratio) else 1e9,
                  "source": e.source, "endpoint": e.endpoint, "framework": e.framework}
-                for e in sorted(self.evidence_items, key=lambda x: x.weight, reverse=True)
+                for e in sorted(self.evidence_items, key=lambda x: x.log_lr, reverse=True)
             ],
         }
 
@@ -618,7 +591,11 @@ class FingerprintReport:
         print(f"\n{'='*w}")
         print(f"  AI Fingerprint Report")
         print(f"{'='*w}")
-        print(f"  Confidence       : {self.confidence.upper()} (score={self.evidence_score})")
+        print(f"  Confidence       : {self.confidence.upper()} "
+              f"(P(AI)={self.posterior:.3f}, score={self.evidence_score})")
+        print(f"  Live surface     : {self.has_live_surface}")
+        if self.ai_brand_only:
+            print(f"  Brand only       : True")
         if self.framework:
             pct = f"{self.framework_confidence*100:.0f}%"
             print(f"  Framework        : {self.framework}  (confidence {pct})")
@@ -646,8 +623,8 @@ class FingerprintReport:
         if self.deployment_signals:
             print(f"  Deployment       : {self.deployment_signals}")
         print(f"\n  Evidence (top 8):")
-        for ev in sorted(self.evidence_items, key=lambda x: x.weight, reverse=True)[:8]:
-            print(f"    +{ev.weight:3d}  [{ev.source:10s}]  {ev.detail[:60]}")
+        for ev in sorted(self.evidence_items, key=lambda x: x.log_lr, reverse=True)[:8]:
+            print(f"    LR={ev.likelihood_ratio:6.2f}  [{ev.source:10s}]  {ev.detail[:60]}")
         print(f"{'='*w}\n")
 
 
@@ -659,11 +636,13 @@ class AIFingerprintAgent:
         max_js_bundles: int = 3,
         max_js_bundle_bytes: int = 200_000,
         run_behavioral_probes: bool = True,
+        calibrator: Optional[LogisticCalibrator] = None,
     ):
         self.timeout               = timeout
         self.max_js_bundles        = max_js_bundles
         self.max_js_bundle_bytes   = max_js_bundle_bytes
         self.run_behavioral_probes = run_behavioral_probes
+        self.calibrator            = calibrator
 
     async def fingerprint(
         self,
@@ -845,7 +824,14 @@ class AIFingerprintAgent:
         detected_framework   = framework_result.get("framework", "")
         detected_protocol    = framework_result.get("protocol", "")
         detected_infra       = framework_result.get("inference_server", "")
-        if not detected_framework and brand_frameworks:
+
+        # Live surface
+        evidence_keys = [ev.key for ev in all_evidence]
+        live_from_paths = bool(ml_endpoints or auth_signals)
+        live_from_keys = has_live_surface_evidence(evidence_keys)
+        has_live_surface = live_from_paths or live_from_keys
+
+        if not detected_framework and brand_frameworks and has_live_surface:
             detected_framework = brand_frameworks[0]
         if detected_framework and detected_framework not in all_frameworks:
             all_frameworks.insert(0, detected_framework)
@@ -856,7 +842,7 @@ class AIFingerprintAgent:
             detected_framework, all_frameworks, openapi_schema,
             ml_endpoints, graphql_types)
 
-        # Deduplicate evidence by (key, detail) to avoid meta-tag spam.
+        # Deduplicate evidence
         seen_ev: Set[Tuple[str, str]] = set()
         deduped_evidence: List[EvidenceItem] = []
         for ev in all_evidence:
@@ -867,9 +853,17 @@ class AIFingerprintAgent:
             deduped_evidence.append(ev)
         all_evidence = deduped_evidence
 
-        total_score = sum(ev.weight for ev in all_evidence)
-        confidence  = score_to_confidence(total_score)
-        is_ai       = total_score >= 20 or bool(detected_framework and total_score >= 12)
+        # Bayesian scoring
+        evidence_keys = [ev.key for ev in all_evidence]
+        bayes = score_evidence_keys(evidence_keys)
+        bayes = combine_scores(bayes, self.calibrator, evidence_keys)
+        confidence = bayes.confidence
+        total_score = bayes.evidence_score
+        ai_brand_only = (
+            (bool(brand_frameworks) or has_brand_only_evidence(evidence_keys))
+            and not has_live_surface
+        )
+        is_ai = has_live_surface
 
         atlas: List[str] = []
         for ep in ml_endpoints:
@@ -952,6 +946,12 @@ class AIFingerprintAgent:
             page_title            = page_title,
             spa_catch_all         = spa_catch_all,
             app_description       = meta_desc,
+            has_live_surface      = has_live_surface,
+            ai_brand_only         = ai_brand_only,
+            posterior             = bayes.posterior,
+            prior                 = bayes.prior,
+            log_odds              = bayes.log_odds,
+            bayesian              = bayes.to_dict(),
         )
 
     def _analyse_html(
