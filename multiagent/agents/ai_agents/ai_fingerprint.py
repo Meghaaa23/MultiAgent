@@ -197,6 +197,18 @@ AI_RESPONSE_BODY_PATTERNS = [
     r'"generated_text"\s*:',
 ]
 
+OPENAI_JSON_KEYS = (
+    "choices", "model", "object", "data", "message", "response",
+    "usage", "models", "generated_text", "error",
+)
+
+UNIVERSAL_OPENAI_PATHS: List[Tuple[str, str]] = [
+    ("/v1/chat/completions", "chat"),
+    ("/v1/completions", "chat"),
+    ("/v1/models", "schema"),
+    ("/api/chat/completions", "chat"),
+]
+
 LLM_RESPONSE_SIGNALS = [
     r"\bI\s+(?:am|can|will|don'?t|cannot|understand)\b",
     r"\bAs\s+an?\s+(?:AI|assistant|language model)\b",
@@ -342,6 +354,8 @@ FRAMEWORK_PROBE_PATHS: Dict[str, List[Tuple[str, str]]] = {
         ("/api/models", "schema"),
         ("/api/endpoints", "schema"),
         ("/api/agents", "chat"),
+        ("/v1/chat/completions", "chat"),
+        ("/v1/models", "schema"),
     ],
     "Dify": [
         ("/api/chat-messages", "chat"),
@@ -369,6 +383,27 @@ AI_TITLE_KEYWORDS = [
 def _looks_html_body(ct: str, body: str) -> bool:
     b = (body or "").strip().lower()
     return "html" in (ct or "").lower() or b.startswith(("<!doctype", "<html"))
+
+
+def _looks_ai_api_json(body: str) -> bool:
+    text = (body or "").strip()
+    if not text or text in ("{}", "[]", "null"):
+        return False
+    if any(re.search(p, text, re.I) for p in AI_RESPONSE_BODY_PATTERNS):
+        return True
+    try:
+        data = json.loads(text)
+    except Exception:
+        return False
+    if isinstance(data, dict):
+        if any(k in data for k in OPENAI_JSON_KEYS):
+            return True
+        err = data.get("error")
+        if isinstance(err, dict):
+            return True
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        return any(k in data[0] for k in ("id", "object", "model", "created"))
+    return False
 
 
 OPENAPI_SPEC_PATHS = [
@@ -1447,12 +1482,14 @@ class AIFingerprintAgent:
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "chat"] +
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c in ("embedding", "ml", "graphql")]
         )
-        # Prioritize extra/framework paths discovered from HTML/JS.
         for p in extra_paths:
             path = p if p.startswith("/") else "/" + p
             if not any(path == existing for existing, _ in ordered):
                 cat = "chat" if self._is_ai_api_path(path) else "schema"
                 ordered.append((path, cat))
+
+        always = list(UNIVERSAL_OPENAI_PATHS)
+        always_set = {p for p, _ in always}
 
         async def probe(path: str, category: str):
             url = base + path
@@ -1461,7 +1498,6 @@ class AIFingerprintAgent:
                     None, lambda: self._fetch(url))
                 ct = (resp_headers.get("Content-Type")
                       or resp_headers.get("content-type") or "")
-                # SPA shells return HTML 200 for unknown routes — retry as API POST.
                 needs_post = (
                     status in (404, 405)
                     or (status == 200 and _looks_html_body(ct, body))
@@ -1480,15 +1516,22 @@ class AIFingerprintAgent:
         schema_paths = [(p, c) for p, c in ordered if c == "schema"]
         schema_results = await asyncio.gather(
             *[probe(p, c) for p, c in schema_paths[:20]], return_exceptions=True)
+        open_hits = 0
         for r in schema_results:
             if isinstance(r, dict) and r:
                 evidence.extend(r.get("evidence", []))
                 endpoints.extend(r.get("endpoints", []))
                 frameworks.extend(r.get("frameworks", []))
-                confirmed += len(r.get("endpoints", []))
+                for ev in r.get("evidence", []):
+                    if getattr(ev, "key", "").endswith("_200"):
+                        open_hits += 1
 
         for path, category in ordered:
-            if confirmed >= 8:
+            if path in always_set:
+                continue
+            if open_hits >= 8 and category != "chat":
+                continue
+            if open_hits >= 8 and category == "chat" and confirmed >= 12:
                 break
             if category == "schema":
                 continue
@@ -1499,7 +1542,21 @@ class AIFingerprintAgent:
                 if new_eps:
                     endpoints.extend(new_eps)
                     confirmed += len(new_eps)
+                for ev in r.get("evidence", []):
+                    if getattr(ev, "key", "").endswith("_200"):
+                        open_hits += 1
                 frameworks.extend(r.get("frameworks", []))
+
+        # Always probe OpenAI-compatible passthroughs — auth-gated /api/* must not starve them.
+        for path, category in always:
+            if any(urllib.parse.urlparse(e).path == path for e in endpoints):
+                continue
+            r = await probe(path, category)
+            if isinstance(r, dict) and r:
+                evidence.extend(r.get("evidence", []))
+                endpoints.extend(r.get("endpoints", []))
+                frameworks.extend(r.get("frameworks", []))
+                confirmed += len(r.get("endpoints", []))
 
         return {
             "evidence":    evidence,
@@ -1591,9 +1648,8 @@ class AIFingerprintAgent:
             return {}
 
         if status == 200 and body:
-            if ("json" in ct or body.strip()[:1] in "{[") and any(
-                re.search(p, body, re.I) for p in AI_RESPONSE_BODY_PATTERNS
-            ):
+            is_json = "json" in ct or body.strip()[:1] in "{["
+            if is_json and _looks_ai_api_json(body):
                 ev_key = ("chat_endpoint_200" if category == "chat" else
                           "embedding_endpoint_200" if category == "embedding" else
                           "ml_endpoint_200")
@@ -1601,6 +1657,10 @@ class AIFingerprintAgent:
                     ev_key, f"AI body at {path} (HTTP 200)",
                     "probe", endpoint=url))
                 endpoints.append(url)
+                if category in ("chat", "schema") and (
+                    '"object"' in body_l or '"choices"' in body_l or '"data"' in body_l
+                ):
+                    frameworks.append("OpenAI-compatible")
 
             if "text/event-stream" in ct:
                 evidence.append(EvidenceItem.make(
@@ -1614,7 +1674,7 @@ class AIFingerprintAgent:
                     f"Chunked transfer at {path}", "probe", endpoint=url))
 
             # Gradio /config and similar schema endpoints.
-            if category == "schema" and ("json" in ct or body.strip()[:1] in "{["):
+            if category == "schema" and is_json and url not in endpoints:
                 if any(k in body_l for k in (
                     "gradio", "components", "dependencies", "models",
                     "chatflows", "flows", "ollama", "openai", "langflow",

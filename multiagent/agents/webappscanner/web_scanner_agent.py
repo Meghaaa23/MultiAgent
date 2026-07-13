@@ -295,6 +295,7 @@ class WebScannerAgent:
         ai_fingerprint  = None
         avid_results    = None
         ai_vuln_results = None
+        ai_infra_result = None
         is_ai_powered   = False
         brand_only_ai   = False
 
@@ -322,6 +323,23 @@ class WebScannerAgent:
                     print(f"  AI-powered app detected [{det}, confidence={conf}]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
+
+                if verbose:
+                    print("  AI Infrastructure Build Attack Analysis...")
+                try:
+                    ai_infra_result = await self.ai_infra_agent.scan(
+                        target_url=target_url, ai_stack=ai_fingerprint,
+                    )
+                    if ai_infra_result and ai_infra_result.exposed_endpoints:
+                        ai_fingerprint = AIVulnerabilityTester.merge_exposed_endpoints(
+                            ai_fingerprint, ai_infra_result.exposed_endpoints)
+                        if verbose:
+                            print(f"     Infra exposed endpoints merged: "
+                                  f"{ai_infra_result.exposed_endpoints[:3]}")
+                    if verbose:
+                        print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
+                except Exception as e:
+                    logging.warning(f"AIInfraAgent failed: {e}")
 
                 if verbose:
                     print("  Querying AVID database for AI vulnerabilities...")
@@ -361,19 +379,6 @@ class WebScannerAgent:
 
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
-
-        ai_infra_result = None
-        try:
-            if is_ai_powered and ai_fingerprint:
-                if verbose:
-                    print("  AI Infrastructure Build Attack Analysis...")
-                ai_infra_result = await self.ai_infra_agent.scan(
-                    target_url=target_url, ai_stack=ai_fingerprint,
-                )
-                if verbose:
-                    print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
-        except Exception as e:
-            logging.warning(f"AIInfraAgent failed: {e}")
 
         if verbose:
             print(" CVE Lookup ")

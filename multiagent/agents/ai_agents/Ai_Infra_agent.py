@@ -43,6 +43,7 @@ class AIInfraScanResult:
     error:           str = ""
     catch_all_detected: bool = False
     auth_protected_endpoints: list = field(default_factory=list)
+    exposed_endpoints: list = field(default_factory=list)
 
 
 RAY_SERVE_PATHS = ["/-/routes", "/api/serve/routes", "/-/healthz",
@@ -277,6 +278,11 @@ class AIInfraAgent:
 
             exposed, auth_hits, catch_all = await self._probe_ai_endpoints(target_url, ai_stack)
             result.catch_all_detected = catch_all
+            result.exposed_endpoints = [
+                f"{target_url}{path}" for path, meta in exposed.items()
+                if (meta or {}).get("verdict") == "exposed"
+                or (meta or {}).get("status") == 200
+            ]
             for ep in auth_hits:
                 if ep not in result.auth_protected_endpoints:
                     result.auth_protected_endpoints.append(ep)
@@ -740,5 +746,6 @@ class AIInfraAgent:
             "summary":        result.summary,
             "catch_all_detected": result.catch_all_detected,
             "auth_protected_endpoints": result.auth_protected_endpoints,
+            "exposed_endpoints": result.exposed_endpoints,
             "planes_covered": ["BUILD", "DEPLOYMENT", "RUNTIME", "ORCHESTRATION"],
         }

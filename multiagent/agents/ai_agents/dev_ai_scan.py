@@ -73,6 +73,10 @@ async def main():
         for t in infra_result.threats:
             print(f"  [{t.severity}] {t.attack_name} — {t.stride_category}")
         print(f"\n  Summary: {infra_result.summary}")
+        if infra_result.exposed_endpoints:
+            ai_fingerprint = AIVulnerabilityTester.merge_exposed_endpoints(
+                ai_fingerprint, infra_result.exposed_endpoints)
+            print(f"  Merged exposed endpoints: {infra_result.exposed_endpoints}")
 
     
     if args.agent in ("vuln", "all"):

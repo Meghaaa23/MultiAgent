@@ -12,7 +12,9 @@ from multiagent.agents.ai_agents.ai_evidence_scoring import (
 from multiagent.agents.ai_agents.ai_fingerprint import (
     AIFingerprintAgent,
     EvidenceItem,
+    _looks_ai_api_json,
 )
+from multiagent.agents.ai_agents.ai_vulnerability_test import AIVulnerabilityTester
 
 
 # Classification
@@ -132,3 +134,53 @@ def test_extract_text_openai_shape():
 def test_extract_text_ollama_shape():
     body = '{"response":"Blue water everywhere."}'
     assert AIFingerprintAgent._extract_text(body) == "Blue water everywhere."
+
+
+# OpenAI passthrough acceptance
+
+def test_looks_ai_api_json_openai_shapes():
+    assert _looks_ai_api_json('{"choices":[{"message":{"content":"hi"}}]}')
+    assert _looks_ai_api_json('{"object":"list","data":[{"id":"gpt"}]}')
+    assert _looks_ai_api_json('{"model":"gpt-4","usage":{"total_tokens":1}}')
+    assert _looks_ai_api_json('{"error":{"message":"missing messages","type":"invalid_request"}}')
+    assert not _looks_ai_api_json("{}")
+    assert not _looks_ai_api_json("<html></html>")
+
+
+def test_evaluate_probe_records_openai_passthrough_200():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    body = '{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"content":"ok"}}]}'
+    r = agent._evaluate_probe_response(
+        "http://x/v1/chat/completions", "/v1/chat/completions", "chat",
+        200, {"Content-Type": "application/json"}, body, auth, spa_catch_all=True,
+    )
+    assert "http://x/v1/chat/completions" in r["endpoints"]
+    assert any(e.key == "chat_endpoint_200" for e in r["evidence"])
+
+
+def test_evaluate_probe_records_models_list_200():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    body = '{"object":"list","data":[{"id":"gpt-3.5-turbo","object":"model"}]}'
+    r = agent._evaluate_probe_response(
+        "http://x/v1/models", "/v1/models", "schema",
+        200, {"Content-Type": "application/json"}, body, auth, spa_catch_all=True,
+    )
+    assert "http://x/v1/models" in r["endpoints"]
+
+
+def test_merge_exposed_endpoints_backstop():
+    fp = {
+        "is_ai_powered": True,
+        "has_live_surface": True,
+        "ml_endpoints": ["http://localhost:3080/api/messages"],
+        "auth_required_paths": [
+            {"endpoint": "http://localhost:3080/api/messages",
+             "auth_type": "unknown", "status_code": 401, "detail": "auth"},
+        ],
+    }
+    merged = AIVulnerabilityTester.merge_exposed_endpoints(
+        fp, ["http://localhost:3080/v1/chat/completions"])
+    assert "http://localhost:3080/v1/chat/completions" in merged["ml_endpoints"]
+    assert merged["has_live_surface"] is True
