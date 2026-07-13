@@ -513,3 +513,187 @@ async def test_brand_only_marketing_site_not_ai_powered():
         assert "brand" in result.get("evidence_classes", {})
     finally:
         srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Regression: status-code-only must not confirm AI (Canva / LibreChat)
+# ---------------------------------------------------------------------------
+
+class CanvaStyleMarketingHandler(BaseHTTPRequestHandler):
+    """Non-AI marketing site: AI-heavy copy + robots spray + 405/403 noise."""
+
+    PAGE = (
+        "<!DOCTYPE html><html><head>"
+        "<title>Canva — AI Design Magic</title>"
+        "<meta name='description' content='Create with AI generative design'>"
+        "</head><body><h1>AI-powered design for everyone</h1>"
+        "<a href='/create/'>Create</a><a href='/features/'>Features</a>"
+        "</body></html>"
+    )
+    ROBOTS = (
+        "User-agent: *\n"
+        "Disallow: /create/\n"
+        "Disallow: /features/\n"
+        "Disallow: /da_dk/funktioner/\n"
+        "Disallow: /admin\n"
+        "Disallow: /_print/export\n"
+        "Sitemap: http://127.0.0.1:{port}/sitemap.xml\n"
+    )
+    SITEMAP = (
+        '<?xml version="1.0"?><urlset>'
+        "<url><loc>http://127.0.0.1:{port}/create/</loc></url>"
+        "<url><loc>http://127.0.0.1:{port}/features/</loc></url>"
+        "<url><loc>http://127.0.0.1:{port}/da_dk/funktioner/</loc></url>"
+        "</urlset>"
+    )
+
+    def _send(self, status: int, body: bytes, ctype: str):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        port = self.server.server_address[1]
+        if path == "/robots.txt":
+            body = self.ROBOTS.format(port=port).encode()
+            return self._send(200, body, "text/plain")
+        if path == "/sitemap.xml":
+            body = self.SITEMAP.format(port=port).encode()
+            return self._send(200, body, "application/xml")
+        if path in ("/create/", "/features/", "/da_dk/funktioner/",
+                    "/admin", "/_print/export"):
+            return self._send(403, b'{"error":"forbidden"}', "application/json")
+        if path in ("/", "/index.html"):
+            return self._send(200, self.PAGE.encode(), "text/html")
+        return self._send(404, b"not found", "text/plain")
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        path = self.path.split("?")[0]
+        if path in ("/create/", "/features/", "/da_dk/funktioner/",
+                    "/admin", "/_print/export"):
+            return self._send(405, b"Method Not Allowed", "text/plain")
+        return self._send(404, b"not found", "text/plain")
+
+    def log_message(self, *args):
+        pass
+
+
+class LibreChatStyleHandler(BaseHTTPRequestHandler):
+    """Auth-gated inference surfaces must still confirm."""
+
+    PAGE = (
+        "<!DOCTYPE html><html><head><title>Chat</title></head>"
+        "<body><div id='root'></div>"
+        "<script src='/assets/index.js'></script></body></html>"
+    )
+
+    def _json(self, status: int, obj: dict):
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _html(self):
+        data = self.PAGE.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path.startswith("/assets/"):
+            body = (
+                b'fetch("/api/chat"); fetch("/api/messages"); '
+                b'fetch("/v1/chat/completions");'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path in ("/api/chat", "/api/messages", "/v1/chat/completions"):
+            self._json(401, {"detail": "Unauthorized"})
+            return
+        self._html()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        path = self.path.split("?")[0]
+        if path in ("/api/chat", "/api/messages", "/v1/chat/completions"):
+            self._json(401, {"detail": "Unauthorized"})
+            return
+        self._html()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_marketing_site_status_codes_do_not_confirm_ai():
+    """Canva/Picsart regression: 405/403 on non-inference paths + AI copy
+    must never produce has_live_surface / confirmed / ml_endpoints.
+    """
+    port = _free_port()
+    srv = _run_server(CanvaStyleMarketingHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["has_live_surface"] is False
+        assert result["is_ai_powered"] is False
+        assert result["detection"] in ("possible", "probable")
+        assert result["detection"] != "confirmed"
+        assert result["ml_endpoints"] == []
+        keys = {e.get("key") for e in (result.get("evidence_items") or [])
+                if isinstance(e, dict)}
+        # No live-surface status keys on marketing paths.
+        assert "ml_endpoint_405" not in keys
+        assert "ml_endpoint_401_403" not in keys
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_auth_gated_inference_still_confirms():
+    """LibreChat regression: 401 on inference paths must still confirm AI."""
+    port = _free_port()
+    srv = _run_server(LibreChatStyleHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["has_live_surface"] is True
+        assert result["is_ai_powered"] is True
+        assert result["detection"] == "confirmed"
+        auth_eps = [a["endpoint"] for a in (result.get("auth_required_paths") or [])]
+        all_eps = list(result.get("ml_endpoints") or []) + auth_eps
+        assert any(
+            any(seg in e for seg in ("/api/chat", "/api/messages", "/v1/chat/completions"))
+            for e in all_eps
+        )
+    finally:
+        srv.shutdown()
+
+
+def test_normalize_ignores_non_inference_endpoints():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    fp = t._normalize_ai_fingerprint({
+        "is_ai_powered": True,
+        "ml_endpoints": ["http://x/admin", "http://x/features/"],
+        "auth_required_paths": [
+            {"endpoint": "http://x/admin", "auth_type": "unknown",
+             "status_code": 401, "detail": "auth"},
+        ],
+        "evidence_classes": {"passive_hint": ["robots_ai_path"], "brand": ["page_title_ai"]},
+    })
+    assert fp["has_live_surface"] is False
+    assert fp["is_ai_powered"] is False

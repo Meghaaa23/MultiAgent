@@ -597,8 +597,12 @@ class AIFingerprintAgent:
             candidates.extend(js_api_paths)
 
         if isinstance(passive_r, dict):
-            discovered_paths.extend(passive_r.get("paths", []))
-            candidates.extend(passive_r.get("paths", []))
+            # Always record discovered paths for reporting; only probe
+            # inference-shaped ones (status codes on /features/ are noise).
+            for path in passive_r.get("paths", []) or []:
+                discovered_paths.append(path)
+                if _is_inference_path(path):
+                    candidates.append(path)
 
         for ep in discovered_endpoints or []:
             url = ep.get("url", "") if isinstance(ep, dict) else str(ep)
@@ -702,11 +706,19 @@ class AIFingerprintAgent:
         detected_protocol    = framework_result.get("protocol", "")
         detected_infra       = framework_result.get("inference_server", "")
 
-        # Live surface
+        # Live surface: evidence keys OR inference-shaped endpoints/auth only.
+        # Non-inference AuthSignals (e.g. /admin 401) must not flip is_ai.
         evidence_keys = [ev.key for ev in all_evidence]
-        live_from_paths = bool(ml_endpoints or auth_signals)
         live_from_keys = has_live_surface_evidence(evidence_keys)
-        has_live_surface = live_from_paths or live_from_keys
+
+        def _ep_path(ep: str) -> str:
+            return urllib.parse.urlparse(ep).path if "://" in ep else ep
+
+        live_from_ml = any(_is_inference_path(_ep_path(ep)) for ep in ml_endpoints)
+        live_from_auth = any(
+            _is_inference_path(_ep_path(sig.endpoint)) for sig in auth_signals
+        )
+        has_live_surface = live_from_keys or live_from_ml or live_from_auth
 
         if detected_framework and detected_framework not in all_frameworks:
             all_frameworks.insert(0, detected_framework)
@@ -1068,7 +1080,8 @@ class AIFingerprintAgent:
             "info", "flow", "node", "workspace", "endpoint", "convo", "schema",
         )):
             return "schema"
-        return "chat"
+        # Unknown paths must not be assumed chat — schema has stricter body gates.
+        return "schema"
 
     @staticmethod
     def _normalize_candidate_paths(paths: List[str]) -> List[str]:
@@ -1418,23 +1431,16 @@ class AIFingerprintAgent:
         if status == 200 and body:
             is_json = "json" in ct or body.strip()[:1] in "{["
             ai_shaped = is_json and _looks_ai_api_json(body)
-            inference_live = (
-                _is_inference_path(path)
-                and is_json
-                and not _looks_html_body(ct, body)
-                and not _is_soft_404_json(body)
-            )
-            if ai_shaped or inference_live:
+            # 200 live-surface evidence requires an AI-shaped body — status alone
+            # on an inference path is not enough (matches 401/405 path-shape gate).
+            if ai_shaped:
                 ev_key = ("chat_endpoint_200" if category == "chat" or _is_inference_path(path) else
                           "embedding_endpoint_200" if category == "embedding" else
                           "ml_endpoint_200")
-                detail = (
-                    f"AI body at {path} (HTTP 200)"
-                    if ai_shaped else
-                    f"Open inference handler at {path} (HTTP 200 JSON)"
-                )
                 evidence.append(EvidenceItem.make(
-                    ev_key, detail, "probe", endpoint=url))
+                    ev_key,
+                    f"AI body at {path} (HTTP 200)",
+                    "probe", endpoint=url))
                 endpoints.append(url)
                 if category in ("chat", "schema") or _is_inference_path(path):
                     frameworks.append("OpenAI-compatible")
@@ -1450,27 +1456,15 @@ class AIFingerprintAgent:
                     "sse_chunked_transfer",
                     f"Chunked transfer at {path}", "probe", endpoint=url))
 
-            # Schema/config endpoints with AI-shaped JSON.
-            if category == "schema" and is_json and url not in endpoints:
-                if any(k in body_l for k in (
-                    "components", "dependencies", "models", "data",
-                    "chatflows", "flows", "choices", "object",
-                )):
-                    evidence.append(EvidenceItem.make(
-                        "ml_endpoint_200",
-                        f"AI schema/config at {path} (HTTP 200)",
-                        "probe", endpoint=url))
-                    endpoints.append(url)
-                    if any(k in body_l for k in ("choices", '"object"', "chat.completion")):
-                        frameworks.append("OpenAI-compatible")
-
-        elif status == 200 and _is_inference_path(path) and "json" in ct:
-            evidence.append(EvidenceItem.make(
-                "chat_endpoint_200",
-                f"Open inference handler at {path} (HTTP 200)",
-                "probe", endpoint=url))
-            endpoints.append(url)
-            frameworks.append("OpenAI-compatible")
+            # Schema/config endpoints with AI-shaped JSON only.
+            if (category == "schema" and ai_shaped and url not in endpoints):
+                evidence.append(EvidenceItem.make(
+                    "ml_endpoint_200",
+                    f"AI schema/config at {path} (HTTP 200)",
+                    "probe", endpoint=url))
+                endpoints.append(url)
+                if any(k in body_l for k in ("choices", '"object"', "chat.completion")):
+                    frameworks.append("OpenAI-compatible")
 
         if status in (401, 403):
             auth_type = self._detect_auth_type(headers_low, body_l)
@@ -1478,18 +1472,16 @@ class AIFingerprintAgent:
                 endpoint=url, auth_type=auth_type,
                 status_code=status,
                 detail=f"Auth required ({auth_type}) at {path}"))
-            # Any AI-related category (including schema/model lists) counts.
-            if category in ("chat", "embedding", "ml", "graphql", "schema"):
+            # Auth is always recorded; AI live-surface only on inference paths.
+            if _is_inference_path(path):
                 evidence.append(EvidenceItem.make(
                     "ml_endpoint_401_403",
                     f"Auth-gated {path} (HTTP {status}, {auth_type})",
                     "probe", endpoint=url))
                 endpoints.append(url)
 
-        # On SPA catch-alls, POST→405 is noise for almost every path — ignore it.
-        # Only trust 405 on non-SPA targets, and only for real inference categories.
-        if (status == 405 and not spa_catch_all
-                and category in ("chat", "embedding", "ml")):
+        # 405 is noise on SPA catch-alls and on non-inference paths.
+        if (status == 405 and not spa_catch_all and _is_inference_path(path)):
             evidence.append(EvidenceItem.make(
                 "ml_endpoint_405",
                 f"Endpoint exists {path} (HTTP 405)",
@@ -1744,10 +1736,12 @@ class AIFingerprintAgent:
             framework = "OpenAI-compatible"
             protocol = "OpenAI-compatible"
             signals.append("live_surface")
-        elif keys & {"error_generic_validation", "ml_endpoint_200", "ml_endpoint_401_403"}:
+        elif "ml_endpoint_200" in keys:
+            # Label-only. Bare validation / auth status codes are not enough —
+            # those fire on any REST API and must not imply an AI framework.
             framework = "chat_api"
             protocol = "chat_api"
-            signals.append("api_validation_or_ml_surface")
+            signals.append("ai_shaped_ml_surface")
 
         fw_confidence = 0.8 if framework else 0.0
         if framework:

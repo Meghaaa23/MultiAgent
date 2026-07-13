@@ -10,7 +10,10 @@ from typing import Dict, Iterable, List, Tuple
 class EvidenceClass(str, Enum):
     BEHAVIORAL = "behavioral"
     LIVE_SURFACE = "live_surface"
-    PASSIVE = "passive"
+    PASSIVE_STRUCTURAL = "passive_structural"
+    PASSIVE_HINT = "passive_hint"
+    # Alias: same value as PASSIVE_HINT so legacy references keep working.
+    PASSIVE = "passive_hint"
     BRAND = "brand"
 
 
@@ -22,9 +25,10 @@ class Detection(str, Enum):
 
 
 _CLASS_RANK: Dict[EvidenceClass, int] = {
-    EvidenceClass.BEHAVIORAL: 4,
-    EvidenceClass.LIVE_SURFACE: 3,
-    EvidenceClass.PASSIVE: 2,
+    EvidenceClass.BEHAVIORAL: 5,
+    EvidenceClass.LIVE_SURFACE: 4,
+    EvidenceClass.PASSIVE_STRUCTURAL: 3,
+    EvidenceClass.PASSIVE_HINT: 2,
     EvidenceClass.BRAND: 1,
 }
 
@@ -40,9 +44,10 @@ _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
     # Product/framework headers and cookies are brand signals only —
     # they must not escalate detection without a live API/behavior surface.
     (re.compile(r"^framework_header$"), EvidenceClass.BRAND),
-    (re.compile(r"^framework_cookie$"), EvidenceClass.PASSIVE),
-    (re.compile(r"^(?:openapi|graphql)_schema$"), EvidenceClass.PASSIVE),
-    (re.compile(r"^(?:js_|sse_in_js|websocket_|robots_|sitemap_|csp_)"), EvidenceClass.PASSIVE),
+    (re.compile(r"^framework_cookie$"), EvidenceClass.PASSIVE_HINT),
+    (re.compile(r"^(?:openapi|graphql)_schema$"), EvidenceClass.PASSIVE_STRUCTURAL),
+    (re.compile(r"^(?:js_|sse_in_js|websocket_|robots_|sitemap_|csp_)"),
+     EvidenceClass.PASSIVE_HINT),
 ]
 
 
@@ -54,7 +59,10 @@ _CONFIDENCE: Dict[Detection, str] = {
 }
 
 
-PROBABLE_MIN_PASSIVE = 2
+# Hints alone need a high bar — two robots lines must not reach PROBABLE.
+PROBABLE_MIN_HINT = 4
+# Back-compat alias for older imports/tests.
+PROBABLE_MIN_PASSIVE = PROBABLE_MIN_HINT
 
 
 def classify_evidence(key: str) -> EvidenceClass:
@@ -72,14 +80,22 @@ def evidence_weight(key: str) -> int:
 class EvidenceGroup:
     behavioral: List[str] = field(default_factory=list)
     live_surface: List[str] = field(default_factory=list)
-    passive: List[str] = field(default_factory=list)
+    passive_structural: List[str] = field(default_factory=list)
+    passive_hint: List[str] = field(default_factory=list)
     brand: List[str] = field(default_factory=list)
+
+    @property
+    def passive(self) -> List[str]:
+        """Legacy combined view (hints only — structural has its own bucket)."""
+        return self.passive_hint
 
     def bucket(self, cls: EvidenceClass) -> List[str]:
         return {
             EvidenceClass.BEHAVIORAL: self.behavioral,
             EvidenceClass.LIVE_SURFACE: self.live_surface,
-            EvidenceClass.PASSIVE: self.passive,
+            EvidenceClass.PASSIVE_STRUCTURAL: self.passive_structural,
+            EvidenceClass.PASSIVE_HINT: self.passive_hint,
+            EvidenceClass.PASSIVE: self.passive_hint,
             EvidenceClass.BRAND: self.brand,
         }[cls]
 
@@ -87,7 +103,10 @@ class EvidenceGroup:
         return {
             EvidenceClass.BEHAVIORAL.value: self.behavioral,
             EvidenceClass.LIVE_SURFACE.value: self.live_surface,
-            EvidenceClass.PASSIVE.value: self.passive,
+            EvidenceClass.PASSIVE_STRUCTURAL.value: self.passive_structural,
+            EvidenceClass.PASSIVE_HINT.value: self.passive_hint,
+            # Compat key for older readers.
+            "passive": self.passive_hint,
             EvidenceClass.BRAND.value: self.brand,
         }
 
@@ -125,13 +144,17 @@ def score_evidence(keys: Iterable[str]) -> DetectionResult:
     group = group_evidence(keys)
     has_behavioral = bool(group.behavioral)
     has_live_surface = bool(group.behavioral or group.live_surface)
-    structural = bool(group.behavioral or group.live_surface or group.passive)
+    any_passive = bool(group.passive_structural or group.passive_hint)
+    structural = bool(group.behavioral or group.live_surface or any_passive)
 
     if has_live_surface:
         detection = Detection.CONFIRMED
-    elif len(group.passive) >= PROBABLE_MIN_PASSIVE:
+    elif (
+        len(group.passive_structural) >= 1
+        or len(group.passive_hint) >= PROBABLE_MIN_HINT
+    ):
         detection = Detection.PROBABLE
-    elif group.passive or group.brand:
+    elif any_passive or group.brand:
         detection = Detection.POSSIBLE
     else:
         detection = Detection.NOT_DETECTED
@@ -139,6 +162,7 @@ def score_evidence(keys: Iterable[str]) -> DetectionResult:
     return DetectionResult(
         detection=detection,
         confidence=_CONFIDENCE[detection],
+        # Invariant: is_ai == has_live_surface (AI-shaped live evidence only).
         is_ai=has_live_surface,
         has_behavioral=has_behavioral,
         has_live_surface=has_live_surface,
@@ -159,5 +183,8 @@ def has_behavioral_evidence(keys: Iterable[str]) -> bool:
 def has_brand_only_evidence(keys: Iterable[str]) -> bool:
     group = group_evidence(keys)
     return bool(group.brand) and not (
-        group.behavioral or group.live_surface or group.passive
+        group.behavioral
+        or group.live_surface
+        or group.passive_structural
+        or group.passive_hint
     )

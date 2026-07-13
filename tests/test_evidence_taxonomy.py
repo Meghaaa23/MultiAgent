@@ -1,6 +1,7 @@
 from multiagent.agents.ai_agents.ai_evidence_scoring import (
     Detection,
     EvidenceClass,
+    PROBABLE_MIN_HINT,
     classify_evidence,
     evidence_weight,
     group_evidence,
@@ -22,7 +23,7 @@ from multiagent.agents.ai_agents.ai_vulnerability_test import AIVulnerabilityTes
 def test_behavior_is_behavioral():
     assert classify_evidence("behavior_llm_response") == EvidenceClass.BEHAVIORAL
     assert classify_evidence("behavior_nondeterministic") == EvidenceClass.BEHAVIORAL
-    assert evidence_weight("behavior_llm_response") == 4
+    assert evidence_weight("behavior_llm_response") == 5
 
 
 def test_endpoint_and_error_are_live_surface():
@@ -31,12 +32,18 @@ def test_endpoint_and_error_are_live_surface():
     assert classify_evidence("openapi_ai_endpoint") == EvidenceClass.LIVE_SURFACE
     assert classify_evidence("error_openai_format") == EvidenceClass.LIVE_SURFACE
     assert classify_evidence("ai_response_header") == EvidenceClass.LIVE_SURFACE
+    assert evidence_weight("chat_endpoint_200") == 4
 
 
-def test_passive_and_brand_defaults():
-    assert classify_evidence("openapi_schema") == EvidenceClass.PASSIVE
-    assert classify_evidence("js_ai_sdk") == EvidenceClass.PASSIVE
-    assert classify_evidence("framework_cookie") == EvidenceClass.PASSIVE
+def test_passive_structural_vs_hint_and_brand():
+    assert classify_evidence("openapi_schema") == EvidenceClass.PASSIVE_STRUCTURAL
+    assert classify_evidence("graphql_schema") == EvidenceClass.PASSIVE_STRUCTURAL
+    assert classify_evidence("js_ai_sdk") == EvidenceClass.PASSIVE_HINT
+    assert classify_evidence("robots_ai_path") == EvidenceClass.PASSIVE_HINT
+    assert classify_evidence("sitemap_ai_path") == EvidenceClass.PASSIVE_HINT
+    assert classify_evidence("framework_cookie") == EvidenceClass.PASSIVE_HINT
+    # Alias maps to the same enum member as PASSIVE_HINT.
+    assert EvidenceClass.PASSIVE is EvidenceClass.PASSIVE_HINT
     assert classify_evidence("framework_header") == EvidenceClass.BRAND
     assert classify_evidence("page_title_ai") == EvidenceClass.BRAND
     assert classify_evidence("html_brand_signal") == EvidenceClass.BRAND
@@ -47,14 +54,19 @@ def test_group_evidence_buckets():
     group = group_evidence([
         "behavior_streaming",
         "chat_endpoint_200",
+        "openapi_schema",
         "js_ai_sdk",
         "page_title_ai",
         "page_title_ai",
     ])
     assert group.behavioral == ["behavior_streaming"]
     assert group.live_surface == ["chat_endpoint_200"]
-    assert group.passive == ["js_ai_sdk"]
+    assert group.passive_structural == ["openapi_schema"]
+    assert group.passive_hint == ["js_ai_sdk"]
+    assert group.passive == ["js_ai_sdk"]  # compat alias
     assert group.brand == ["page_title_ai"]
+    d = group.as_dict()
+    assert "passive_structural" in d and "passive_hint" in d and "passive" in d
 
 
 # Detection tiers
@@ -75,12 +87,20 @@ def test_confirmed_on_behavioral():
     assert result.is_ai is True
 
 
-def test_probable_needs_two_passive():
-    one = score_evidence(["js_ai_sdk"])
-    two = score_evidence(["js_ai_sdk", "openapi_schema"])
-    assert one.detection == Detection.POSSIBLE
-    assert two.detection == Detection.PROBABLE
-    assert two.is_ai is False
+def test_probable_structural_or_many_hints():
+    hint_one = score_evidence(["js_ai_sdk"])
+    structural = score_evidence(["openapi_schema"])
+    two_hints = score_evidence(["robots_ai_path", "sitemap_ai_path"])
+    many_hints = score_evidence([
+        "robots_ai_path", "sitemap_ai_path", "js_ai_sdk", "csp_ai",
+    ])
+    assert hint_one.detection == Detection.POSSIBLE
+    assert structural.detection == Detection.PROBABLE
+    assert structural.is_ai is False
+    assert two_hints.detection == Detection.POSSIBLE  # bar raised past 2
+    assert many_hints.detection == Detection.PROBABLE
+    assert len(many_hints.classes["passive_hint"]) >= PROBABLE_MIN_HINT
+    assert many_hints.is_ai is False
 
 
 def test_possible_brand_only():
@@ -114,7 +134,10 @@ def test_evidence_item_uses_class_weight():
     assert item.weight == 1
     live = EvidenceItem.make("chat_endpoint_200", "chat ok", "probe")
     assert live.evidence_class == "live_surface"
-    assert live.weight == 3
+    assert live.weight == 4
+    structural = EvidenceItem.make("openapi_schema", "spec", "openapi")
+    assert structural.evidence_class == "passive_structural"
+    assert structural.weight == 3
 
 
 # Non-determinism helpers
@@ -187,17 +210,16 @@ def test_merge_exposed_endpoints_backstop():
     assert merged["has_live_surface"] is True
 
 
-def test_inference_path_200_json_without_ai_keys():
+def test_inference_path_200_requires_ai_shaped_body():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     auth = []
-    # Opaque JSON 200 on the OpenAI passthrough (no choices/model/object keys)
+    # Opaque JSON 200 on an inference path is not enough without AI body shape.
     body = '{"status":"ready","detail":"accepted"}'
     r = agent._evaluate_probe_response(
         "http://x/v1/chat/completions", "/v1/chat/completions", "chat",
         200, {"Content-Type": "application/json"}, body, auth, spa_catch_all=True,
     )
-    assert "http://x/v1/chat/completions" in r["endpoints"]
-    assert any(e.key == "chat_endpoint_200" for e in r["evidence"])
+    assert r.get("endpoints", []) == []
 
 
 def test_inference_path_ignores_soft_404_json():
@@ -208,6 +230,36 @@ def test_inference_path_ignores_soft_404_json():
         200, {"Content-Type": "application/json"}, "{}", auth, spa_catch_all=True,
     )
     assert r.get("endpoints", []) == []
+
+
+def test_non_inference_401_is_auth_only():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    r = agent._evaluate_probe_response(
+        "http://x/admin", "/admin", "schema",
+        401, {"Content-Type": "application/json"},
+        '{"detail":"Unauthorized"}', auth,
+    )
+    assert r.get("endpoints", []) == []
+    assert not any(e.key == "ml_endpoint_401_403" for e in r.get("evidence", []))
+    assert len(auth) == 1
+
+
+def test_non_inference_405_emits_nothing():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    r = agent._evaluate_probe_response(
+        "http://x/create/", "/create/", "schema",
+        405, {"Content-Type": "text/plain"}, "", [],
+        spa_catch_all=False,
+    )
+    assert r.get("endpoints", []) == []
+    assert not any(e.key == "ml_endpoint_405" for e in r.get("evidence", []))
+
+
+def test_guess_probe_category_fallthrough_is_schema():
+    assert AIFingerprintAgent._guess_probe_category("/features/") == "schema"
+    assert AIFingerprintAgent._guess_probe_category("/create/") == "schema"
+    assert AIFingerprintAgent._guess_probe_category("/api/chat") == "chat"
 
 
 def test_infra_classify_inference_passthrough():
