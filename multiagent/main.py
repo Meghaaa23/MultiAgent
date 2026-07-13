@@ -419,6 +419,18 @@ def safe_file_path(filename: str) -> Path:
 def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
+
+def _as_count(value, default: int = 0) -> int:
+    """Coerce a list or pre-computed int count to an int safely."""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return len(value)
+    except TypeError:
+        return default
+
 # ============================================================================
 # ROOT / HEALTH
 # ============================================================================
@@ -674,6 +686,9 @@ async def query_with_full_autogen(request: Request):
                 scan_data = (
                     result.get("reasoning_chain", {}).get("scan_results") or {}
                 )
+                vulns = scan_data.get("vulnerabilities", []) or []
+                if not isinstance(vulns, list):
+                    vulns = []
                 return JSONResponse({
                     "answer":               result["report"],
                     "report_sections":      result.get("report_sections", []),
@@ -683,16 +698,20 @@ async def query_with_full_autogen(request: Request):
                     "reasoning_chain":      result.get("reasoning_chain"),
                     "scan_performed":       result.get("web_scan_performed", False),
                     "target_url":           target_url,
-                    "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
+                    "vulnerabilities_found": (
+                        _as_count(scan_data.get("confirmed_vulns", 0))
+                        + _as_count(scan_data.get("potential_vulns", 0))
+                    ),
                     # AI backdoor fields (populated when ML detected)
                     "is_ai_powered":        scan_data.get("is_ai_powered", False),
                     "ai_vulns_found":       len([
-                        f for f in scan_data.get("vulnerabilities", [])
-                        if f.get("category") == "ai_vulnerability"
+                        f for f in vulns
+                        if isinstance(f, dict) and f.get("category") == "ai_vulnerability"
                     ]),
-                    "avid_findings":        len(scan_data.get("avid_findings", [])),
-                    "strategic_recommendations": len(
-                        scan_data.get("strategic_recommendations", [])
+                    # _summarize_scan_results already stores these as ints.
+                    "avid_findings":        _as_count(scan_data.get("avid_findings", 0)),
+                    "strategic_recommendations": _as_count(
+                        scan_data.get("strategic_recommendations", 0)
                     ),
                 })
 
@@ -981,7 +1000,7 @@ async def query_stream(request: StreamQueryRequest):
                     await asyncio.sleep(0)
 
                 scan_results = await scan_task
-                vuln_count   = len(scan_results.get('vulnerabilities', []))
+                vuln_count   = _as_count(scan_results.get("vulnerabilities", []))
                 ai_powered   = scan_results.get("is_ai_powered", False)
 
                 yield _format_sse("progress", {
