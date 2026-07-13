@@ -18,6 +18,7 @@ try:
         has_live_surface_evidence,
         score_evidence,
     )
+    from multiagent.agents.ai_agents.signature_loader import get_signature_catalog
 except ImportError:
     from ai_evidence_scoring import (
         classify_evidence,
@@ -25,127 +26,27 @@ except ImportError:
         has_live_surface_evidence,
         score_evidence,
     )
+    from signature_loader import get_signature_catalog
 
 logger = logging.getLogger(__name__)
 
 
-FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
-    "Open WebUI": {
-        "headers":     {"x-open-webui": None},
-        "paths":       ["/api/chat", "/api/models", "/api/chat/completions",
-                        "/api/v1/models", "/ollama/api/tags", "/api/v1/auths"],
-        "js_strings":  ["open-webui", "OpenWebUI", "open webui", "webui-logo",
-                        "Open WebUI"],
-        "js_globals":  ["WEBUI_NAME", "WEBUI_URL"],
-        "cookie_names":["webui-session", "token"],
-        "title_hints": ["open webui", "openwebui"],
-        "capabilities": ["chat", "rag", "tool_calling", "image_generation", "web_search"],
-    },
-    "Flowise": {
-        "paths":       ["/api/v1/prediction", "/api/v1/chatflows", "/api/v1/nodes",
-                        "/api/v1/ping", "/api/v1/chatflows-streaming"],
-        "js_strings":  ["flowise", "Flowise", "FlowiseAI"],
-        "js_globals":  ["FLOWISE_URL"],
-        "title_hints": ["flowise"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow"],
-    },
-    "Langflow": {
-        "paths":       ["/api/v1/flows", "/api/v1/run", "/api/v1/components",
-                        "/api/v1/all", "/api/v1/build", "/health"],
-        "js_strings":  ["langflow", "Langflow"],
-        "js_globals":  ["LANGFLOW_AUTO_LOGIN"],
-        "title_hints": ["langflow"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow", "multi_agent"],
-    },
-    "Gradio": {
-        "paths":       ["/config", "/info", "/queue/join", "/run/predict",
-                        "/call/predict", "/gradio_api/info", "/gradio_api/config"],
-        "js_strings":  ["gradio", "Gradio", "__gradio_mode__", "gradio-app",
-                        "gradio_api"],
-        "title_hints": ["gradio", "langflow"],
-        "capabilities": ["chat", "image_generation"],
-    },
-    "Dify": {
-        "paths":       ["/api/chat-messages", "/api/workflows/run", "/api/apps"],
-        "js_strings":  ["dify.ai", "Dify", "difyChatbot"],
-        "cookie_names":["dify_session"],
-        "title_hints": ["dify"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow", "image_generation"],
-    },
-    "AnythingLLM": {
-        "paths":       ["/api/workspace", "/api/chat", "/api/system/env",
-                        "/api/v1/openai/chat/completions", "/api/embed"],
-        "js_strings":  ["anythingllm", "AnythingLLM", "mintplex", "anything-llm"],
-        "title_hints": ["anythingllm", "anything llm"],
-        "capabilities": ["chat", "rag", "memory"],
-    },
-    "LibreChat": {
-        "paths":       ["/api/messages", "/api/ask", "/api/convos",
-                        "/api/agents", "/api/models", "/api/endpoints"],
-        "js_strings":  ["librechat", "LibreChat"],
-        "cookie_names":["refreshToken"],
-        "title_hints": ["librechat"],
-        "capabilities": ["chat", "tool_calling", "image_generation", "web_search"],
-    },
-    "LobeChat": {
-        "paths":       ["/api/chat", "/api/openai"],
-        "js_strings":  ["lobe-chat", "LobeChat", "@lobehub"],
-        "title_hints": ["lobechat", "lobe chat"],
-        "capabilities": ["chat", "tool_calling", "image_generation"],
-    },
-    "OpenHands": {
-        "paths":       ["/api/conversations", "/api/submit-feedback", "/api/options/config"],
-        "js_strings":  ["OpenHands", "opendevin", "openhands"],
-        "capabilities": ["code_execution", "shell", "filesystem", "browser", "multi_agent"],
-    },
-    "CrewAI": {
-        "paths":       ["/api/crews", "/api/kickoff", "/api/agents"],
-        "js_strings":  ["crewai", "CrewAI"],
-        "capabilities": ["multi_agent", "tool_calling", "workflow"],
-    },
-    "AutoGen": {
-        "paths":       ["/api/messages", "/api/agents", "/api/run"],
-        "js_strings":  ["autogen", "AutoGen", "pyautogen"],
-        "capabilities": ["multi_agent", "code_execution", "tool_calling"],
-    },
-    "LangGraph": {
-        "paths":       ["/runs", "/threads", "/assistants", "/store"],
-        "js_strings":  ["langgraph", "LangGraph", "@langchain/langgraph"],
-        "capabilities": ["multi_agent", "memory", "workflow", "tool_calling"],
-    },
-    "Haystack": {
-        "paths":       ["/query", "/pipeline", "/document-store"],
-        "js_strings":  ["haystack", "deepset"],
-        "capabilities": ["rag", "chat", "tool_calling"],
-    },
-    "Ollama": {
-        "paths":       ["/api/chat", "/api/generate", "/api/tags", "/api/version",
-                        "/api/show", "/api/pull", "/api/delete", "/api/copy"],
-        "headers":     {"x-ollama-version": None},
-        "js_strings":  ["ollama", "Ollama"],
-        "body_patterns": [r'"done_reason"', r'"total_duration"', r'"eval_count"'],
-        "capabilities": ["chat", "embedding"],
-    },
-    "vLLM": {
-        "paths":       ["/v1/chat/completions", "/v1/completions", "/v1/models"],
-        "headers":     {"server": "vllm"},
-        "body_patterns": [r'"object"\s*:\s*"chat\.completion"'],
-        "capabilities": ["chat", "embedding"],
-    },
-    "TGI (HuggingFace)": {
-        "paths":       ["/generate", "/generate_stream", "/v1/chat/completions"],
-        "headers":     {"server": "text-generation-inference"},
-        "body_patterns": [r'"generated_text"', r'"details".*"finish_reason"'],
-        "capabilities": ["chat", "embedding"],
-    },
-    "OpenAI-compatible": {
-        "paths":       ["/v1/chat/completions", "/v1/completions", "/v1/models",
-                        "/v1/embeddings"],
-        "body_patterns": [r'"choices"\s*:\s*\[', r'"object"\s*:\s*"chat\.completion"',
-                          r'"finish_reason"'],
-        "capabilities": ["chat", "embedding", "image_generation"],
-    },
-}
+# Signature catalog
+_SIGNATURE_CATALOG = get_signature_catalog()
+FRAMEWORK_SIGNATURES: Dict[str, Dict] = _SIGNATURE_CATALOG.framework_signatures()
+FRAMEWORK_PROBE_PATHS: Dict[str, List[Tuple[str, str]]] = (
+    _SIGNATURE_CATALOG.framework_probe_paths()
+)
+# Protocol always-probes from universal openai_compatible pack only.
+# Naming packs must not drive this list.
+UNIVERSAL_OPENAI_PATHS: List[Tuple[str, str]] = (
+    _SIGNATURE_CATALOG.openai_compatible_paths()
+)
+SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = (
+    _SIGNATURE_CATALOG.seed_endpoint_ranking()
+    or list(UNIVERSAL_OPENAI_PATHS)
+)
+
 
 MODEL_NAME_PATTERNS = [
     r'\b(gpt-?4|gpt-?3\.5|gpt-?4o)\b',
@@ -201,13 +102,6 @@ OPENAI_JSON_KEYS = (
     "choices", "model", "object", "data", "message", "response",
     "usage", "models", "generated_text", "error",
 )
-
-UNIVERSAL_OPENAI_PATHS: List[Tuple[str, str]] = [
-    ("/v1/chat/completions", "chat"),
-    ("/v1/completions", "chat"),
-    ("/v1/models", "schema"),
-    ("/api/chat/completions", "chat"),
-]
 
 OPENAI_CHAT_PROBE = json.dumps({
     "model": "gpt-3.5-turbo",
@@ -278,117 +172,6 @@ ML_LIBRARY_JS_SIGNATURES: Dict[str, List[str]] = {
     "Groq JS":          ["groq-sdk", "new Groq("],
     "Mistral JS":       ["@mistralai/mistralai", "new MistralClient"],
     "Vercel AI SDK":    ["ai/react", "useChat(", "useCompletion("],
-}
-
-SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
-    ("/openapi.json",         "schema"),
-    ("/swagger.json",         "schema"),
-    ("/api-docs",             "schema"),
-    ("/api/openapi.json",     "schema"),
-    ("/graphql",              "graphql"),
-    ("/api/graphql",          "graphql"),
-    ("/v1/chat/completions",  "chat"),
-    ("/api/chat/completions", "chat"),
-    ("/api/chat",             "chat"),
-    ("/v1/completions",       "chat"),
-    ("/v1/embeddings",        "embedding"),
-    ("/api/embeddings",       "embedding"),
-    ("/api/v1/prediction",    "chat"),
-    ("/api/generate",         "chat"),
-    ("/api/tags",             "schema"),
-    ("/v1/models",            "schema"),
-    ("/api/models",           "schema"),
-    ("/api/v1/models",        "schema"),
-    ("/v2/health/ready",      "schema"),
-    ("/v2/models",            "schema"),
-    ("/api/predict",          "ml"),
-    ("/predict",              "ml"),
-    ("/invocations",          "ml"),
-    ("/predictions",          "ml"),
-    ("/runs",                 "chat"),
-    ("/threads",              "chat"),
-    # Framework-specific seeds (SPA UIs often hide these behind auth)
-    ("/api/v1/chatflows",     "schema"),
-    ("/api/v1/flows",         "schema"),
-    ("/api/v1/run",           "chat"),
-    ("/api/v1/components",    "schema"),
-    ("/api/v1/nodes",         "schema"),
-    ("/api/v1/ping",          "schema"),
-    ("/api/ask",              "chat"),
-    ("/api/messages",         "chat"),
-    ("/api/convos",           "schema"),
-    ("/api/endpoints",        "schema"),
-    ("/api/workspace",        "schema"),
-    ("/api/system/env",       "schema"),
-    ("/api/v1/openai/chat/completions", "chat"),
-    ("/ollama/api/tags",      "schema"),
-    ("/config",               "schema"),
-    ("/info",                 "schema"),
-    ("/queue/join",           "chat"),
-    ("/run/predict",          "chat"),
-    ("/gradio_api/info",      "schema"),
-    ("/api/chat-messages",    "chat"),
-]
-
-# Extra paths probed once a framework is identified from HTML/JS brand signals.
-FRAMEWORK_PROBE_PATHS: Dict[str, List[Tuple[str, str]]] = {
-    "Open WebUI": [
-        ("/api/models", "schema"),
-        ("/api/v1/models", "schema"),
-        ("/api/chat", "chat"),
-        ("/api/chat/completions", "chat"),
-        ("/api/v1/chat/completions", "chat"),
-        ("/ollama/api/tags", "schema"),
-        ("/api/v1/auths", "schema"),
-    ],
-    "Flowise": [
-        ("/api/v1/prediction", "chat"),
-        ("/api/v1/chatflows", "schema"),
-        ("/api/v1/nodes", "schema"),
-        ("/api/v1/ping", "schema"),
-    ],
-    "Langflow": [
-        ("/api/v1/flows", "schema"),
-        ("/api/v1/run", "chat"),
-        ("/api/v1/components", "schema"),
-        ("/api/v1/all", "schema"),
-        ("/health", "schema"),
-    ],
-    "Gradio": [
-        ("/config", "schema"),
-        ("/info", "schema"),
-        ("/queue/join", "chat"),
-        ("/run/predict", "chat"),
-        ("/gradio_api/info", "schema"),
-    ],
-    "AnythingLLM": [
-        ("/api/workspace", "schema"),
-        ("/api/chat", "chat"),
-        ("/api/system/env", "schema"),
-        ("/api/v1/openai/chat/completions", "chat"),
-    ],
-    "LibreChat": [
-        ("/api/ask", "chat"),
-        ("/api/messages", "chat"),
-        ("/api/convos", "schema"),
-        ("/api/models", "schema"),
-        ("/api/endpoints", "schema"),
-        ("/api/agents", "chat"),
-        ("/v1/chat/completions", "chat"),
-        ("/v1/models", "schema"),
-    ],
-    "Dify": [
-        ("/api/chat-messages", "chat"),
-        ("/api/workflows/run", "chat"),
-        ("/api/apps", "schema"),
-    ],
-    "Ollama": [
-        ("/api/tags", "schema"),
-        ("/api/chat", "chat"),
-        ("/api/generate", "chat"),
-        ("/v1/chat/completions", "chat"),
-        ("/v1/models", "schema"),
-    ],
 }
 
 SPA_CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"

@@ -1,0 +1,31 @@
+id: langflow
+requires_live_surface: true
+meta:
+  name: Langflow
+  capabilities:
+  - chat
+  - rag
+  - tool_calling
+  - workflow
+  - multi_agent
+detection:
+  paths:
+  - path: /api/v1/flows
+    category: schema
+  - path: /api/v1/run
+    category: chat
+  - path: /api/v1/components
+    category: schema
+  - path: /api/v1/all
+    category: schema
+  - path: /api/v1/build
+    category: schema
+  - path: /health
+    category: schema
+  js_strings:
+  - langflow
+  - Langflow
+  js_globals:
+  - LANGFLOW_AUTO_LOGIN
+  title_hints:
+  - langflow

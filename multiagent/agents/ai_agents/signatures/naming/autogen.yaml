@@ -1,0 +1,20 @@
+id: autogen
+requires_live_surface: true
+meta:
+  name: AutoGen
+  capabilities:
+  - multi_agent
+  - code_execution
+  - tool_calling
+detection:
+  paths:
+  - path: /api/messages
+    category: chat
+  - path: /api/agents
+    category: chat
+  - path: /api/run
+    category: chat
+  js_strings:
+  - autogen
+  - AutoGen
+  - pyautogen

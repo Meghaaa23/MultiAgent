@@ -35,9 +35,11 @@ _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
     (re.compile(r"_endpoint_(?:200|401_403|405)$"), EvidenceClass.LIVE_SURFACE),
     (re.compile(r"_ai_(?:endpoint|field)$"), EvidenceClass.LIVE_SURFACE),
     (re.compile(
-        r"^(?:sse_streaming_header|sse_chunked_transfer|ai_response_header|"
-        r"framework_header)$"
+        r"^(?:sse_streaming_header|sse_chunked_transfer|ai_response_header)$"
     ), EvidenceClass.LIVE_SURFACE),
+    # Product/framework headers and cookies are naming signals only — they
+    # must not escalate detection without a live API/behavior surface.
+    (re.compile(r"^framework_header$"), EvidenceClass.BRAND),
     (re.compile(r"^framework_cookie$"), EvidenceClass.PASSIVE),
     (re.compile(r"^(?:openapi|graphql)_schema$"), EvidenceClass.PASSIVE),
     (re.compile(r"^(?:js_|sse_in_js|websocket_|robots_|sitemap_|csp_)"), EvidenceClass.PASSIVE),

@@ -1,0 +1,26 @@
+id: dify
+requires_live_surface: true
+meta:
+  name: Dify
+  capabilities:
+  - chat
+  - rag
+  - tool_calling
+  - workflow
+  - image_generation
+detection:
+  paths:
+  - path: /api/chat-messages
+    category: chat
+  - path: /api/workflows/run
+    category: chat
+  - path: /api/apps
+    category: schema
+  js_strings:
+  - dify.ai
+  - Dify
+  - difyChatbot
+  cookie_names:
+  - dify_session
+  title_hints:
+  - dify

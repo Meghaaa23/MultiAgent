@@ -1,0 +1,29 @@
+id: flowise
+requires_live_surface: true
+meta:
+  name: Flowise
+  capabilities:
+  - chat
+  - rag
+  - tool_calling
+  - workflow
+detection:
+  paths:
+  - path: /api/v1/prediction
+    category: chat
+  - path: /api/v1/chatflows
+    category: schema
+  - path: /api/v1/nodes
+    category: schema
+  - path: /api/v1/ping
+    category: schema
+  - path: /api/v1/chatflows-streaming
+    category: chat
+  js_strings:
+  - flowise
+  - Flowise
+  - FlowiseAI
+  js_globals:
+  - FLOWISE_URL
+  title_hints:
+  - flowise

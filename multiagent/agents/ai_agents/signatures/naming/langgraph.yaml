@@ -1,0 +1,23 @@
+id: langgraph
+requires_live_surface: true
+meta:
+  name: LangGraph
+  capabilities:
+  - multi_agent
+  - memory
+  - workflow
+  - tool_calling
+detection:
+  paths:
+  - path: /runs
+    category: chat
+  - path: /threads
+    category: chat
+  - path: /assistants
+    category: schema
+  - path: /store
+    category: schema
+  js_strings:
+  - langgraph
+  - LangGraph
+  - '@langchain/langgraph'

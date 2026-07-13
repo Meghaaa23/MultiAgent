@@ -1,0 +1,10 @@
+id: streaming_sse
+class: behavioral
+meta:
+  name: LLM streaming transport
+  capabilities: [chat]
+detection:
+  paths: []
+  body_patterns:
+    - 'text/event-stream'
+    - 'data:\s*\{.*"choices"'

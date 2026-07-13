@@ -30,13 +30,14 @@ def test_endpoint_and_error_are_live_surface():
     assert classify_evidence("ml_endpoint_401_403") == EvidenceClass.LIVE_SURFACE
     assert classify_evidence("openapi_ai_endpoint") == EvidenceClass.LIVE_SURFACE
     assert classify_evidence("error_openai_format") == EvidenceClass.LIVE_SURFACE
-    assert classify_evidence("framework_header") == EvidenceClass.LIVE_SURFACE
+    assert classify_evidence("ai_response_header") == EvidenceClass.LIVE_SURFACE
 
 
 def test_passive_and_brand_defaults():
     assert classify_evidence("openapi_schema") == EvidenceClass.PASSIVE
     assert classify_evidence("js_ai_sdk") == EvidenceClass.PASSIVE
     assert classify_evidence("framework_cookie") == EvidenceClass.PASSIVE
+    assert classify_evidence("framework_header") == EvidenceClass.BRAND
     assert classify_evidence("page_title_ai") == EvidenceClass.BRAND
     assert classify_evidence("html_brand_signal") == EvidenceClass.BRAND
     assert classify_evidence("unknown_new_detector") == EvidenceClass.BRAND

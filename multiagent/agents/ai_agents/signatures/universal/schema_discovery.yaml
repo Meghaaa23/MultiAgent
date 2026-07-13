@@ -1,0 +1,22 @@
+id: schema_discovery
+class: passive
+meta:
+  name: API schema discovery
+  capabilities: []
+detection:
+  paths:
+    - {path: /openapi.json, category: schema}
+    - {path: /swagger.json, category: schema}
+    - {path: /api-docs, category: schema}
+    - {path: /api/openapi.json, category: schema}
+    - {path: /graphql, category: graphql}
+    - {path: /api/graphql, category: graphql}
+    - {path: /v1/models, category: schema}
+    - {path: /api/models, category: schema}
+    - {path: /api/v1/models, category: schema}
+    - {path: /api/tags, category: schema}
+    - {path: /v2/models, category: schema}
+    - {path: /v2/health/ready, category: schema}
+    - {path: /config, category: schema}
+    - {path: /info, category: schema}
+    - {path: /health, category: schema}

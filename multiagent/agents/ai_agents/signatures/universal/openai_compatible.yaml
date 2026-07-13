@@ -1,0 +1,25 @@
+id: openai_compatible
+class: live_surface
+meta:
+  name: OpenAI-compatible API
+  capabilities: [chat, embedding, image_generation]
+detection:
+  paths:
+    - {path: /v1/chat/completions, category: chat}
+    - {path: /v1/completions, category: chat}
+    - {path: /v1/models, category: schema}
+    - {path: /v1/embeddings, category: embedding}
+    - {path: /api/chat/completions, category: chat}
+  body_patterns:
+    - '"choices"\s*:\s*\['
+    - '"object"\s*:\s*"(chat\.completion|list|model|text_completion)"'
+    - '"finish_reason"'
+  probe:
+    path: /v1/chat/completions
+    method: POST
+    body:
+      model: gpt-3.5-turbo
+      messages:
+        - {role: user, content: Hi}
+      max_tokens: 1
+      stream: false
