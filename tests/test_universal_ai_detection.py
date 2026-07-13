@@ -412,8 +412,7 @@ async def test_fingerprint_openwebui_spa():
         assert result["confidence"] == "high"
         # Protocol label only — never a product brand.
         assert result["framework"] in (
-            "", "OpenAI-compatible", "Generic chat inference API",
-            "API schema discovery",
+            "", "OpenAI-compatible", "chat_api",
         )
         assert result["framework"] not in (
             "Open WebUI", "LibreChat", "Flowise", "Langflow",

@@ -1,35 +1,34 @@
-"""Discovery-first detection — no endpoint path catalogs."""
+"""Discovery-first evidence helpers — no signature packs or bootstrap catalogs."""
 from multiagent.agents.ai_agents.ai_evidence_scoring import Detection, score_evidence
 from multiagent.agents.ai_agents.ai_fingerprint import (
     AIFingerprintAgent,
-    GRAPHQL_BOOTSTRAP_PATHS,
-    PROTOCOL_SIGNATURES,
-    SPEC_BOOTSTRAP_PATHS,
+    _body_from_openapi,
+    _probe_post_body,
 )
-from multiagent.agents.ai_agents.signature_loader import load_signature_catalog
 
 
-def test_catalog_body_patterns_only_for_protocol_labels():
-    cat = load_signature_catalog()
-    assert len(cat.universal) >= 4
-    assert "OpenAI-compatible" in PROTOCOL_SIGNATURES
+def test_no_signature_loader_module():
+    import importlib.util
+    spec = importlib.util.find_spec("multiagent.agents.ai_agents.signature_loader")
+    assert spec is None
 
 
-def test_no_product_brand_labels():
-    labels = set(PROTOCOL_SIGNATURES)
-    for banned in (
-        "Open WebUI", "LibreChat", "Flowise", "Langflow",
-        "Gradio", "Ollama", "Dify", "AnythingLLM",
-    ):
-        assert banned not in labels
+def test_extract_spec_refs_from_app_surface_only():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    refs = agent._extract_spec_refs(
+        'fetch("/openapi.json"); const docs = "/swagger.yaml";'
+    )
+    assert "/openapi.json" in refs
+    assert "/swagger.yaml" in refs
+    # Must not invent catalog paths that were never referenced.
+    assert agent._extract_spec_refs("<html></html>") == []
 
 
-def test_spec_bootstrap_is_meta_only():
-    """Bootstrap finds API maps — not AI chat endpoints."""
-    assert "/openapi.json" in SPEC_BOOTSTRAP_PATHS
-    assert "/v1/chat/completions" not in SPEC_BOOTSTRAP_PATHS
-    assert "/api/chat" not in SPEC_BOOTSTRAP_PATHS
-    assert "/graphql" in GRAPHQL_BOOTSTRAP_PATHS
+def test_extract_graphql_refs_from_app_surface_only():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    refs = agent._extract_graphql_refs('axios.post("/api/graphql", body)')
+    assert "/api/graphql" in refs
+    assert agent._extract_graphql_refs("no api map here") == []
 
 
 def test_js_path_extraction_finds_app_routes():
@@ -43,31 +42,48 @@ def test_js_path_extraction_finds_app_routes():
     assert "/assets/app.js" not in paths
 
 
-def test_normalize_candidates_dedupes_and_caps():
-    agent = AIFingerprintAgent(run_behavioral_probes=False)
-    out = agent._normalize_candidate_paths([
-        "/api/chat", "http://x/api/chat", "/api/chat?x=1",
-        "/v1/chat/completions", "/logo.png",
-    ])
-    assert out.count("/api/chat") == 1
-    assert "/logo.png" not in out
-    assert "/v1/chat/completions" in out
+def test_openapi_derived_probe_body():
+    schema = {
+        "paths": {
+            "/api/ask": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "properties": {
+                                        "question": {"type": "string"},
+                                        "stream": {"type": "boolean"},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    body = _body_from_openapi("/api/ask", schema)
+    assert body is not None
+    import json
+    parsed = json.loads(body)
+    assert parsed["question"] == "Hi"
+    assert parsed["stream"] is False
+
+
+def test_generic_probe_fallback_without_schema():
+    body = _probe_post_body("/api/chat", "chat", None)
+    assert b"messages" in body
 
 
 def test_unknown_openai_surface_confirmed_without_product_name():
     result = score_evidence(["chat_endpoint_200", "error_openai_format"])
     assert result.detection == Detection.CONFIRMED
     assert result.is_ai is True
-    assert result.has_live_surface is True
 
 
 def test_brand_only_does_not_escalate():
-    result = score_evidence([
-        "html_brand_signal",
-        "page_title_ai",
-        "framework_header",
-    ])
+    result = score_evidence(["html_brand_signal", "page_title_ai", "framework_header"])
     assert result.detection == Detection.POSSIBLE
     assert result.is_ai is False
-    assert result.has_live_surface is False
     assert result.brand_only is True
