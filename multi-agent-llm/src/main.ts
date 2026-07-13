@@ -909,7 +909,13 @@ export class AppComponent {
       });
     } catch (fallbackErr: any) {
       this.isLoading.set(false);
-      const errorMessage = fallbackErr?.error?.detail || fallbackErr?.message || 'Unknown error';
+      let errorMessage = fallbackErr?.error?.detail || fallbackErr?.message || 'Unknown error';
+      // Status 0 = browser never got a response (backend down, bad proxy, CORS, reset)
+      if (fallbackErr?.status === 0) {
+        errorMessage =
+          'Cannot reach the API backend. Is FastAPI running on http://localhost:8000, ' +
+          'and is proxy.conf.json targeting that port (not 4200)?';
+      }
       this.uploadError.set(errorMessage);
       this.appendMessage({ sender: 'agent', text: ` Error: ${errorMessage}` });
     }

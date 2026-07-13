@@ -134,6 +134,15 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+
+@app.middleware("http")
+async def strip_api_prefix(request: Request, call_next):
+    """Accept both /query/ and /api/query/ (Angular proxy / reverse proxies)."""
+    path = request.scope.get("path", "")
+    if path == "/api" or path.startswith("/api/"):
+        request.scope["path"] = path[4:] or "/"
+    return await call_next(request)
+
 # ============================================================================
 # MONGODB & VECTOR STORE
 # ============================================================================
