@@ -318,8 +318,8 @@ class WebScannerAgent:
             if is_ai_powered:
                 if verbose:
                     conf = ai_fingerprint.get("confidence", "low")
-                    post = ai_fingerprint.get("posterior", 0.0)
-                    print(f"  AI-powered app detected [{conf} confidence, P(AI)={post:.3f}]")
+                    det = ai_fingerprint.get("detection", "not_detected")
+                    print(f"  AI-powered app detected [{det}, confidence={conf}]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
@@ -352,8 +352,9 @@ class WebScannerAgent:
                     fw = ai_fingerprint.get("framework") or (
                         (ai_fingerprint.get("frameworks_detected") or ["unknown"])[0]
                     )
+                    det = ai_fingerprint.get("detection", "possible")
                     print(f"  AI product brand detected ({fw}) but no live inference surface")
-                    print(f"     P(AI)={ai_fingerprint.get('posterior', 0.0):.3f} — skipping AI escalation\n")
+                    print(f"     detection={det} — skipping AI escalation\n")
             else:
                 if verbose:
                     print(f"  No AI/ML components detected — AI-specific tests skipped\n")

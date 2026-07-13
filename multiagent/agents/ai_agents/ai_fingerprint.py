@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import json
-import math
 import hashlib
 import asyncio
 import logging
@@ -14,37 +13,20 @@ from typing import Dict, List, Optional, Set, Tuple
 
 try:
     from multiagent.agents.ai_agents.ai_evidence_scoring import (
-        FEATURE_RATES,
-        FeatureRate,
-        LogisticCalibrator,
-        combine_scores,
-        feature_log_lr,
-        has_brand_only_evidence,
+        classify_evidence,
+        evidence_weight,
         has_live_surface_evidence,
-        resolve_prior,
-        score_evidence_keys,
+        score_evidence,
     )
 except ImportError:
     from ai_evidence_scoring import (
-        FEATURE_RATES,
-        FeatureRate,
-        LogisticCalibrator,
-        combine_scores,
-        feature_log_lr,
-        has_brand_only_evidence,
+        classify_evidence,
+        evidence_weight,
         has_live_surface_evidence,
-        resolve_prior,
-        score_evidence_keys,
+        score_evidence,
     )
 
 logger = logging.getLogger(__name__)
-
-
-# Evidence weights
-EVIDENCE_WEIGHTS: Dict[str, int] = {
-    key: int(round(feature_log_lr(key) * 10))
-    for key in FEATURE_RATES
-}
 
 
 FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
@@ -424,20 +406,16 @@ class EvidenceItem:
     source:    str
     endpoint:  str = ""
     framework: str = ""
-    log_lr:    float = 0.0
-    likelihood_ratio: float = 1.0
+    evidence_class: str = ""
 
     @staticmethod
     def make(key: str, detail: str, source: str,
              endpoint: str = "", framework: str = "") -> "EvidenceItem":
-        log_lr = feature_log_lr(key)
-        lr = math.exp(log_lr) if log_lr < 20 else float("inf")
         return EvidenceItem(
             key=key, detail=detail,
-            weight=EVIDENCE_WEIGHTS.get(key, int(round(log_lr * 10))),
+            weight=evidence_weight(key),
             source=source, endpoint=endpoint, framework=framework,
-            log_lr=log_lr,
-            likelihood_ratio=lr if not math.isinf(lr) else 1e9,
+            evidence_class=classify_evidence(key).value,
         )
 
 
@@ -508,7 +486,6 @@ def classify_endpoint(url: str, auth_signals: List[AuthSignal] = None) -> Endpoi
 class FingerprintReport:
     is_ai_powered:    bool
     confidence:       str
-    evidence_score:   int
 
     framework:            str   = ""
     framework_confidence: float = 0.0
@@ -541,22 +518,17 @@ class FingerprintReport:
 
     has_live_surface: bool = False
     ai_brand_only:    bool = False
-    posterior:        float = 0.0
-    prior:            float = 0.0
-    log_odds:         float = 0.0
-    bayesian:         Dict = field(default_factory=dict)
+    detection:        str  = "not_detected"
+    evidence_classes: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
             "is_ai_powered":          self.is_ai_powered,
+            "detection":              self.detection,
             "confidence":             self.confidence,
-            "evidence_score":         self.evidence_score,
             "has_live_surface":       self.has_live_surface,
             "ai_brand_only":          self.ai_brand_only,
-            "posterior":              round(self.posterior, 6),
-            "prior":                  self.prior,
-            "log_odds":               round(self.log_odds, 6),
-            "bayesian":               self.bayesian,
+            "evidence_classes":       self.evidence_classes,
             "framework":              self.framework,
             "framework_confidence":   round(self.framework_confidence * 100, 1),
             "framework_signals":      self.framework_signals,
@@ -593,11 +565,9 @@ class FingerprintReport:
             "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
-                 "log_lr": round(e.log_lr, 4),
-                 "likelihood_ratio": round(e.likelihood_ratio, 4)
-                 if not math.isinf(e.likelihood_ratio) else 1e9,
+                 "evidence_class": e.evidence_class,
                  "source": e.source, "endpoint": e.endpoint, "framework": e.framework}
-                for e in sorted(self.evidence_items, key=lambda x: x.log_lr, reverse=True)
+                for e in sorted(self.evidence_items, key=lambda x: x.weight, reverse=True)
             ],
         }
 
@@ -606,8 +576,7 @@ class FingerprintReport:
         print(f"\n{'='*w}")
         print(f"  AI Fingerprint Report")
         print(f"{'='*w}")
-        print(f"  Confidence       : {self.confidence.upper()} "
-              f"(P(AI)={self.posterior:.3f}, score={self.evidence_score})")
+        print(f"  Detection        : {self.detection.upper()}  (confidence={self.confidence})")
         print(f"  Live surface     : {self.has_live_surface}")
         if self.ai_brand_only:
             print(f"  Brand only       : True")
@@ -638,8 +607,8 @@ class FingerprintReport:
         if self.deployment_signals:
             print(f"  Deployment       : {self.deployment_signals}")
         print(f"\n  Evidence (top 8):")
-        for ev in sorted(self.evidence_items, key=lambda x: x.log_lr, reverse=True)[:8]:
-            print(f"    LR={ev.likelihood_ratio:6.2f}  [{ev.source:10s}]  {ev.detail[:60]}")
+        for ev in sorted(self.evidence_items, key=lambda x: x.weight, reverse=True)[:8]:
+            print(f"    [{ev.evidence_class:12s}] [{ev.source:10s}]  {ev.detail[:60]}")
         print(f"{'='*w}\n")
 
 
@@ -651,17 +620,21 @@ class AIFingerprintAgent:
         max_js_bundles: int = 3,
         max_js_bundle_bytes: int = 200_000,
         run_behavioral_probes: bool = True,
-        calibrator: Optional[LogisticCalibrator] = None,
-        feature_rates: Optional[Dict[str, FeatureRate]] = None,
-        scan_context: str = "general",
+        probe_prompt: str = "In one sentence, describe the ocean.",
+        probe_model: str = "gpt-3.5-turbo",
+        nondeterminism_samples: int = 3,
+        nondeterminism_low: float = 0.15,
+        nondeterminism_high: float = 0.98,
     ):
-        self.timeout               = timeout
-        self.max_js_bundles        = max_js_bundles
-        self.max_js_bundle_bytes   = max_js_bundle_bytes
-        self.run_behavioral_probes = run_behavioral_probes
-        self.calibrator            = calibrator
-        self.feature_rates         = feature_rates or FEATURE_RATES
-        self.scan_context          = scan_context
+        self.timeout                = timeout
+        self.max_js_bundles         = max_js_bundles
+        self.max_js_bundle_bytes    = max_js_bundle_bytes
+        self.run_behavioral_probes  = run_behavioral_probes
+        self.probe_prompt           = probe_prompt
+        self.probe_model            = probe_model
+        self.nondeterminism_samples = nondeterminism_samples
+        self.nondeterminism_low     = nondeterminism_low
+        self.nondeterminism_high    = nondeterminism_high
 
     async def fingerprint(
         self,
@@ -807,6 +780,9 @@ class AIFingerprintAgent:
             behav_r = await self._behavioral_probes(probe_targets[:2], verbose)
             if isinstance(behav_r, dict):
                 all_evidence.extend(behav_r.get("evidence", []))
+            nd_r = await self._nondeterminism_probe(probe_targets[0], verbose)
+            if isinstance(nd_r, dict):
+                all_evidence.extend(nd_r.get("evidence", []))
 
         if js_api_paths:
             extra = await self._confirm_js_paths(
@@ -872,18 +848,12 @@ class AIFingerprintAgent:
             deduped_evidence.append(ev)
         all_evidence = deduped_evidence
 
-        # Bayesian scoring
+        # Taxonomy scoring
         evidence_keys = [ev.key for ev in all_evidence]
-        bayes = score_evidence_keys(
-            evidence_keys,
-            prior=resolve_prior(self.scan_context),
-            rates=self.feature_rates,
-        )
-        bayes = combine_scores(bayes, self.calibrator, evidence_keys)
-        confidence = bayes.confidence
-        total_score = bayes.evidence_score
+        detection = score_evidence(evidence_keys)
+        confidence = detection.confidence
         ai_brand_only = (
-            (bool(brand_frameworks) or has_brand_only_evidence(evidence_keys))
+            (bool(brand_frameworks) or detection.brand_only)
             and not has_live_surface
         )
         is_ai = has_live_surface
@@ -945,7 +915,6 @@ class AIFingerprintAgent:
         return FingerprintReport(
             is_ai_powered         = is_ai,
             confidence            = confidence,
-            evidence_score        = total_score,
             framework             = detected_framework,
             framework_confidence  = framework_result.get("framework_confidence", 0.0),
             framework_signals     = framework_result.get("framework_signals", []),
@@ -971,10 +940,8 @@ class AIFingerprintAgent:
             app_description       = meta_desc,
             has_live_surface      = has_live_surface,
             ai_brand_only         = ai_brand_only,
-            posterior             = bayes.posterior,
-            prior                 = bayes.prior,
-            log_odds              = bayes.log_odds,
-            bayesian              = bayes.to_dict(),
+            detection             = detection.detection.value,
+            evidence_classes      = detection.classes,
         )
 
     def _analyse_html(
@@ -1817,10 +1784,84 @@ class AIFingerprintAgent:
                             f"{urllib.parse.urlparse(endpoint).path}",
                             "behavior", endpoint=endpoint))
 
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Behavioral probe failed on {endpoint}: {e}")
 
         return {"evidence": evidence, "model_reported": model_reported}
+
+    async def _nondeterminism_probe(self, endpoint: str, verbose: bool) -> Dict:
+        evidence: List[EvidenceItem] = []
+        loop = asyncio.get_event_loop()
+        payload = json.dumps({
+            "model": self.probe_model,
+            "messages": [{"role": "user", "content": self.probe_prompt}],
+        }).encode()
+
+        responses: List[str] = []
+        for _ in range(max(2, self.nondeterminism_samples)):
+            try:
+                status, _, body = await loop.run_in_executor(
+                    None,
+                    lambda ep=endpoint, data=payload: self._fetch(
+                        ep, data=data, method="POST"),
+                )
+                if status in (200, 201) and body:
+                    text = self._extract_text(body)
+                    if text:
+                        responses.append(text)
+            except Exception:
+                continue
+
+        if len(responses) < 2:
+            return {"evidence": evidence}
+
+        divergences = [
+            self._token_divergence(responses[i], responses[j])
+            for i in range(len(responses))
+            for j in range(i + 1, len(responses))
+        ]
+        mean_div = sum(divergences) / len(divergences)
+        if self.nondeterminism_low < mean_div < self.nondeterminism_high:
+            evidence.append(EvidenceItem.make(
+                "behavior_nondeterministic",
+                f"Non-deterministic output over {len(responses)} samples "
+                f"(mean divergence {mean_div:.2f})",
+                "behavior", endpoint=endpoint))
+            if verbose:
+                print(f"    [behavior] non-determinism at {endpoint} div={mean_div:.2f}")
+        return {"evidence": evidence}
+
+    @staticmethod
+    def _token_divergence(a: str, b: str) -> float:
+        ta = set(re.findall(r"\w+", a.lower()))
+        tb = set(re.findall(r"\w+", b.lower()))
+        if not ta and not tb:
+            return 0.0
+        if not ta or not tb:
+            return 1.0
+        return 1.0 - len(ta & tb) / len(ta | tb)
+
+    @staticmethod
+    def _extract_text(body: str) -> str:
+        try:
+            data = json.loads(body)
+        except Exception:
+            return body
+        if isinstance(data, dict):
+            choices = data.get("choices")
+            if isinstance(choices, list) and choices:
+                message = choices[0].get("message", {})
+                if isinstance(message, dict) and message.get("content"):
+                    return str(message["content"])
+                if choices[0].get("text"):
+                    return str(choices[0]["text"])
+            for candidate in ("response", "answer", "text", "generated_text"):
+                if data.get(candidate):
+                    return str(data[candidate])
+            message = data.get("message", {})
+            if isinstance(message, dict) and message.get("content"):
+                return str(message["content"])
+        return body
 
     async def _analyse_headers_cookies(
         self, headers: Dict, verbose: bool

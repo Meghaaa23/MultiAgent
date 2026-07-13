@@ -340,9 +340,9 @@ async def test_fingerprint_openwebui_spa():
         assert result["is_ai_powered"] is True
         assert result["has_live_surface"] is True
         assert result["ai_brand_only"] is False
-        assert result["posterior"] > 0.5
+        assert result["detection"] == "confirmed"
+        assert result["confidence"] == "high"
         assert result["framework"] == "Open WebUI"
-        assert result["evidence_score"] > 0
         assert result["ml_endpoints"] or result["auth_required_paths"]
         # Auth-gated chat/models should be discovered
         auth_eps = [a["endpoint"] for a in result["auth_required_paths"]]
@@ -361,6 +361,7 @@ async def test_fingerprint_langflow_spa():
         result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
         assert result["is_ai_powered"] is True
         assert result["has_live_surface"] is True
+        assert result["detection"] == "confirmed"
         assert "Langflow" in (result["framework"], *result.get("frameworks_detected", []))
         assert any("/api/v1/flows" in e or "/api/v1/run" in e
                    for e in result["ml_endpoints"])
@@ -433,8 +434,9 @@ async def test_brand_only_marketing_site_not_ai_powered():
         assert result["has_live_surface"] is False
         assert result["is_ai_powered"] is False
         assert result["ai_brand_only"] is True
+        assert result["detection"] in ("possible", "probable")
         assert not result["ml_endpoints"]
         assert not result["auth_required_paths"]
-        assert result["posterior"] >= 0.0
+        assert "brand" in result.get("evidence_classes", {})
     finally:
         srv.shutdown()
