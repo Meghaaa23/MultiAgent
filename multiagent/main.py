@@ -434,6 +434,14 @@ def safe_file_path(filename: str) -> Path:
 
 
 def _format_sse(event_type: str, data: dict) -> str:
+    if event_type == "progress":
+        logger.info(
+            "SSE EMITTED @ %s phase=%s percent=%s msg=%s",
+            datetime.now().isoformat(),
+            data.get("phase"),
+            data.get("percent"),
+            data.get("message"),
+        )
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
@@ -996,24 +1004,30 @@ async def query_stream(request: StreamQueryRequest):
 
                 heartbeats = [
                     "Fingerprinting tech stack...",
-                    "Detecting AI/ML components...",        
-                    "Querying AVID database...",            
-                    "Testing ML endpoints...",              
+                    "Detecting AI/ML components...",
+                    "Querying AVID database...",
+                    "Testing ML endpoints...",
                     "Testing XSS / SQLi...",
                     "Verifying findings...",
                 ]
-                hb_idx, base_pct = 0, 50
+                # Poll every 1s so "scan complete" lands promptly; emit heartbeat
+                # text only every 5s so the UI is not spammed.
+                hb_idx, base_pct, last_beat = 0, 50, 0
                 while not scan_task.done():
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)
                     if scan_task.done():
                         break
+                    last_beat += 1
+                    if last_beat < 5:
+                        continue
+                    last_beat = 0
                     yield _format_sse("progress", {
                         "phase": "active_scanning", "step": 4, "total_steps": 6,
                         "message": heartbeats[hb_idx % len(heartbeats)],
                         "percent": min(63, base_pct + 2),
                     })
-                    hb_idx   += 1
-                    base_pct  = min(63, base_pct + 2)
+                    hb_idx  += 1
+                    base_pct = min(63, base_pct + 2)
                     await asyncio.sleep(0)
 
                 scan_results = await scan_task

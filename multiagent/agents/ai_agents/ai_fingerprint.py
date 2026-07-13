@@ -540,7 +540,10 @@ class AIFingerprintAgent:
         base = target_url.rstrip("/")
 
         if not page_html:
-            status, page_headers, page_html = self._fetch(base, max_bytes=200_000)
+            # Bare urllib must not block the SSE event loop / heartbeats.
+            loop = asyncio.get_event_loop()
+            status, page_headers, page_html = await loop.run_in_executor(
+                None, lambda: self._fetch(base, max_bytes=200_000))
             if not response_headers:
                 response_headers = page_headers
             if not page_html:
