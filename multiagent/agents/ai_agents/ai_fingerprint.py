@@ -15,21 +15,25 @@ from typing import Dict, List, Optional, Set, Tuple
 try:
     from multiagent.agents.ai_agents.ai_evidence_scoring import (
         FEATURE_RATES,
+        FeatureRate,
         LogisticCalibrator,
         combine_scores,
         feature_log_lr,
         has_brand_only_evidence,
         has_live_surface_evidence,
+        resolve_prior,
         score_evidence_keys,
     )
 except ImportError:
     from ai_evidence_scoring import (
         FEATURE_RATES,
+        FeatureRate,
         LogisticCalibrator,
         combine_scores,
         feature_log_lr,
         has_brand_only_evidence,
         has_live_surface_evidence,
+        resolve_prior,
         score_evidence_keys,
     )
 
@@ -648,12 +652,16 @@ class AIFingerprintAgent:
         max_js_bundle_bytes: int = 200_000,
         run_behavioral_probes: bool = True,
         calibrator: Optional[LogisticCalibrator] = None,
+        feature_rates: Optional[Dict[str, FeatureRate]] = None,
+        scan_context: str = "general",
     ):
         self.timeout               = timeout
         self.max_js_bundles        = max_js_bundles
         self.max_js_bundle_bytes   = max_js_bundle_bytes
         self.run_behavioral_probes = run_behavioral_probes
         self.calibrator            = calibrator
+        self.feature_rates         = feature_rates or FEATURE_RATES
+        self.scan_context          = scan_context
 
     async def fingerprint(
         self,
@@ -866,7 +874,11 @@ class AIFingerprintAgent:
 
         # Bayesian scoring
         evidence_keys = [ev.key for ev in all_evidence]
-        bayes = score_evidence_keys(evidence_keys)
+        bayes = score_evidence_keys(
+            evidence_keys,
+            prior=resolve_prior(self.scan_context),
+            rates=self.feature_rates,
+        )
         bayes = combine_scores(bayes, self.calibrator, evidence_keys)
         confidence = bayes.confidence
         total_score = bayes.evidence_score
