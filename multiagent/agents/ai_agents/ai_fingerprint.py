@@ -44,10 +44,6 @@ SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = (
 )
 UNIVERSAL_INJECTION_PATHS: List[str] = _SIGNATURE_CATALOG.injection_paths()
 
-# Back-compat aliases — empty / protocol-only; product catalogs removed.
-FRAMEWORK_SIGNATURES: Dict[str, Dict] = PROTOCOL_SIGNATURES
-FRAMEWORK_PROBE_PATHS: Dict[str, List[Tuple[str, str]]] = {}
-
 
 
 MODEL_NAME_PATTERNS = [
