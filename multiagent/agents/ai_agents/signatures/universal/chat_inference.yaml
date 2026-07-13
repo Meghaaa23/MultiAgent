@@ -11,7 +11,9 @@ detection:
     - {path: /api/messages, category: chat}
     - {path: /api/v1/prediction, category: chat}
     - {path: /api/v1/run, category: chat}
+    - {path: /api/v1/openai/chat/completions, category: chat}
     - {path: /api/chat-messages, category: chat}
+    - {path: /api/agents, category: chat}
     - {path: /api/predict, category: ml}
     - {path: /predict, category: ml}
     - {path: /invocations, category: ml}
@@ -20,8 +22,10 @@ detection:
     - {path: /threads, category: chat}
     - {path: /queue/join, category: chat}
     - {path: /run/predict, category: chat}
+    - {path: /call/predict, category: chat}
     - {path: /generate, category: chat}
     - {path: /generate_stream, category: chat}
+    - {path: /api/workflows/run, category: chat}
   body_patterns:
     - '"response"\s*:'
     - '"message"\s*:'

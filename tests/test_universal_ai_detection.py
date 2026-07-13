@@ -12,8 +12,8 @@ import pytest
 
 from multiagent.agents.ai_agents.ai_fingerprint import (
     AIFingerprintAgent,
-    FRAMEWORK_PROBE_PATHS,
-    FRAMEWORK_SIGNATURES,
+    SEED_ENDPOINT_RANKING,
+    UNIVERSAL_INJECTION_PATHS,
     _looks_html_body,
     classify_endpoint,
 )
@@ -154,32 +154,27 @@ class SpaLangflowHandler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------------------
-# Unit: HTML brand / SPA helpers
+# Unit: HTML / SPA helpers
 # ---------------------------------------------------------------------------
 
-def test_html_brand_open_webui():
+def test_html_generic_ai_title():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
-    _, ev, _, title, brands = agent._analyse_html(
-        "<html><head><title>Open WebUI</title></head></html>",
+    js_urls, ev, links, title = agent._analyse_html(
+        "<html><head><title>AI Chat Assistant</title></head></html>",
         "http://localhost:3001", {},
     )
-    assert title == "Open WebUI"
-    assert "Open WebUI" in brands
-    assert any(e.key == "html_brand_signal" for e in ev)
+    assert title == "AI Chat Assistant"
+    assert any(e.key == "page_title_ai" for e in ev)
 
 
-def test_html_brand_flowise_and_langflow():
+def test_html_no_product_brand_matching():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
-    _, _, _, title, brands = agent._analyse_html(
-        "<html><head><title>Flowise - Build AI Agents, Visually</title></head></html>",
+    _, ev, _, title = agent._analyse_html(
+        "<html><head><title>Flowise - Build Agents</title></head></html>",
         "http://x", {},
     )
-    assert "Flowise" in brands
-    _, _, _, title, brands = agent._analyse_html(
-        "<html><head><title>Langflow</title></head><body>langflow</body></html>",
-        "http://x", {},
-    )
-    assert "Langflow" in brands
+    assert title.startswith("Flowise")
+    assert not any(e.key == "html_brand_signal" for e in ev)
 
 
 def test_looks_html_body():
@@ -254,11 +249,14 @@ def test_classify_endpoint_segment_boundaries():
     assert agents.endpoint_type == "agentic"
 
 
-def test_framework_probe_paths_cover_target_apps():
-    for name in ("Open WebUI", "Flowise", "Langflow", "LibreChat",
-                 "AnythingLLM", "Gradio"):
-        assert name in FRAMEWORK_SIGNATURES
-        assert name in FRAMEWORK_PROBE_PATHS
+def test_universal_seed_paths_cover_common_surfaces():
+    ranked = {p for p, _ in SEED_ENDPOINT_RANKING}
+    for path in (
+        "/api/chat", "/api/v1/prediction", "/api/v1/run",
+        "/api/v1/flows", "/v1/chat/completions", "/run/predict",
+    ):
+        assert path in ranked
+    assert UNIVERSAL_INJECTION_PATHS
 
 
 # ---------------------------------------------------------------------------
@@ -294,35 +292,33 @@ def test_infra_select_paths_spa_avoids_k8s():
     agent = AIInfraAgent()
     paths = agent._select_paths(
         ["/api/v1/prediction"],
-        {"framework": "Flowise"},
+        {"framework": "OpenAI-compatible"},
         catch_all=True,
     )
     assert "/api/v1/namespaces" not in paths
     assert "/api/v1/pods" not in paths
-    assert "/api/v1/prediction" in paths or "/api/v1/chatflows" in paths
+    assert "/api/v1/prediction" in paths
 
 
 # ---------------------------------------------------------------------------
-# Unit: vuln tester framework fallbacks
+# Unit: vuln tester universal fallbacks
 # ---------------------------------------------------------------------------
 
-def test_vuln_framework_endpoint_fallback():
+def test_vuln_universal_endpoint_fallback():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
-    flowise = t._build_endpoint_list([], [], "http://localhost:3100",
-                                     {"framework": "Flowise"})
-    assert flowise == ["http://localhost:3100/api/v1/prediction"]
-    openwebui = t._build_endpoint_list([], [], "http://localhost:3001",
-                                       {"framework": "Open WebUI"})
-    assert any("/api/chat" in e for e in openwebui)
-    langflow = t._build_endpoint_list([], [], "http://localhost:7860",
-                                      {"framework": "Langflow"})
-    assert langflow == ["http://localhost:7860/api/v1/run"]
+    eps = t._build_endpoint_list([], [], "http://localhost:3100", {})
+    paths = {e.split("://", 1)[-1].split("/", 1)[-1] and
+             "/" + e.split("://", 1)[-1].split("/", 1)[-1] for e in eps}
+    # Simpler: check path suffixes
+    path_list = [e[len("http://localhost:3100"):] for e in eps]
+    assert "/v1/chat/completions" in path_list or "/api/chat" in path_list
+    assert "/api/v1/prediction" in path_list
 
 
 def test_normalize_derives_live_surface_from_endpoints():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
     fp = t._normalize_ai_fingerprint({
-        "framework": "Open WebUI",
+        "framework": "OpenAI-compatible",
         "ml_endpoints": ["http://localhost:3001/api/chat"],
     })
     assert fp["has_live_surface"] is True
@@ -332,7 +328,7 @@ def test_normalize_derives_live_surface_from_endpoints():
 def test_normalize_brand_only_clears_ai_flag():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
     fp = t._normalize_ai_fingerprint({
-        "framework": "Flowise",
+        "framework": "",
         "is_ai_powered": True,
         "ml_endpoints": [],
         "auth_required_paths": [],
@@ -346,7 +342,7 @@ async def test_vuln_tester_skips_brand_only_framework():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
     result = await t.test_all(
         {
-            "framework": "Flowise",
+            "framework": "",
             "is_ai_powered": True,
             "ml_endpoints": [],
             "auth_required_paths": [],
@@ -364,7 +360,7 @@ async def test_vuln_tester_auth_gated_still_reported():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
     result = await t.test_all(
         {
-            "framework": "Open WebUI",
+            "framework": "OpenAI-compatible",
             "ml_endpoints": [],
             "auth_required_paths": [
                 {"endpoint": "http://localhost:3001/api/chat",
@@ -379,9 +375,9 @@ async def test_vuln_tester_auth_gated_still_reported():
     assert "auth-gated" in result["potential_ai_vulns"][0]["type"]
 
 
-def test_app_detect_framework_shortcuts():
+def test_app_detect_from_inference_paths():
     assert detect_application_type(
-        {"framework": "Ollama", "ml_endpoints": []}
+        {"framework": "", "ml_endpoints": ["http://x/api/tags", "http://x/api/generate"]}
     ).value == "inference_server"
 
 
@@ -402,9 +398,15 @@ async def test_fingerprint_openwebui_spa():
         assert result["ai_brand_only"] is False
         assert result["detection"] == "confirmed"
         assert result["confidence"] == "high"
-        assert result["framework"] == "Open WebUI"
+        # Protocol label only — never a product brand.
+        assert result["framework"] in (
+            "", "OpenAI-compatible", "Generic chat inference API",
+            "API schema discovery",
+        )
+        assert result["framework"] not in (
+            "Open WebUI", "LibreChat", "Flowise", "Langflow",
+        )
         assert result["ml_endpoints"] or result["auth_required_paths"]
-        # Auth-gated chat/models should be discovered
         auth_eps = [a["endpoint"] for a in result["auth_required_paths"]]
         all_eps = result["ml_endpoints"] + auth_eps
         assert any("/api/" in e for e in all_eps)
@@ -422,7 +424,7 @@ async def test_fingerprint_langflow_spa():
         assert result["is_ai_powered"] is True
         assert result["has_live_surface"] is True
         assert result["detection"] == "confirmed"
-        assert "Langflow" in (result["framework"], *result.get("frameworks_detected", []))
+        assert "Langflow" not in (result["framework"], *result.get("frameworks_detected", []))
         assert any("/api/v1/flows" in e or "/api/v1/run" in e
                    for e in result["ml_endpoints"])
     finally:
@@ -435,7 +437,7 @@ async def test_infra_no_false_k8s_on_spa_flowise():
     srv = _run_server(SpaOpenWebUIHandler, port)
     try:
         fp = {
-            "framework": "Open WebUI",
+            "framework": "OpenAI-compatible",
             "ml_endpoints": [],
             "auth_required_paths": [
                 {"endpoint": f"http://127.0.0.1:{port}/api/chat",

@@ -88,12 +88,11 @@ INFO_ENDPOINTS = {
 GENERIC_PATHS = {"/docs", "/health", "/healthz", "/readyz", "/metrics",
                  "/openapi.json", "/info", "/ping"}
 
-AI_BODY_SIGNALS = ["model", "ollama", "vllm", "embedding", "inference",
+AI_BODY_SIGNALS = ["model", "embedding", "inference",
                    "completion", "generate", "torch", "tensorflow", "llm",
                    "cuda", "gpu", "triton", "ray", "bentoml", "langchain",
                    "huggingface", "transformers", "tokenizer", "checkpoint",
-                   "chatflow", "gradio", "flowise", "langflow", "choices",
-                   "messages", "prompt"]
+                   "choices", "messages", "prompt", "chatflows", "flows"]
 
 CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
 INFERENCE_PATHS = ["/v1/chat/completions", "/v1/completions", "/api/generate",
@@ -114,25 +113,6 @@ OPENAI_CHAT_PROBE = {
     "messages": [{"role": "user", "content": "Hi"}],
     "max_tokens": 1,
     "stream": False,
-}
-
-# Framework → preferred probe path sets (avoids spraying K8s/Ray paths on SPAs).
-FRAMEWORK_INFRA_PATHS = {
-    "ollama": OLLAMA_PATHS + VLLM_PATHS,
-    "open webui": OLLAMA_PATHS + VLLM_PATHS + ["/api/models", "/api/v1/models"],
-    "vllm": VLLM_PATHS + LANGSERVE_PATHS,
-    "tgi": TGI_PATHS,
-    "flowise": ["/api/v1/prediction", "/api/v1/chatflows", "/api/v1/nodes",
-                "/api/v1/ping", "/openapi.json", "/health"],
-    "langflow": ["/api/v1/flows", "/api/v1/run", "/api/v1/components",
-                 "/health", "/openapi.json", "/api/v1/all"],
-    "gradio": ["/config", "/info", "/queue/join", "/run/predict",
-               "/gradio_api/info", "/health"],
-    "librechat": ["/api/ask", "/api/messages", "/api/models", "/api/endpoints",
-                  "/api/convos", "/v1/chat/completions", "/v1/models", "/health"],
-    "anythingllm": ["/api/workspace", "/api/chat", "/api/system/env",
-                    "/api/v1/openai/chat/completions", "/health"],
-    "dify": ["/api/chat-messages", "/api/workflows/run", "/api/apps", "/health"],
 }
 
 HIGH_IMPACT_CAPS = {"code_execution", "shell", "python", "email_send", "tool_calling", "mcp"}
@@ -335,14 +315,8 @@ class AIInfraAgent:
     def _select_paths(self, confirmed_paths: list, ai_stack: Optional[dict] = None,
                       catch_all: bool = False) -> list:
         paths_to_probe = []
-        framework = str((ai_stack or {}).get("framework") or "").lower()
-        frameworks = [str(f).lower() for f in (ai_stack or {}).get("frameworks_detected") or []]
-        all_fw = [framework] + frameworks
 
-        for fw_key, fw_paths in FRAMEWORK_INFRA_PATHS.items():
-            if any(fw_key in f for f in all_fw if f):
-                paths_to_probe += fw_paths
-
+        # Expand from confirmed path patterns (no product-name catalogs).
         if any(p in confirmed_paths for p in ["/api/tags", "/api/generate", "/api/chat"]):
             paths_to_probe += OLLAMA_PATHS
         if any(p in confirmed_paths for p in ["/v1/models", "/v1/chat/completions"]):
@@ -363,11 +337,9 @@ class AIInfraAgent:
         # Avoid spraying K8s/Ray/management probes onto SPA frontends — massive FP source.
         if not catch_all:
             paths_to_probe += UNIVERSAL_PATHS + MANAGEMENT_PATHS
-            # Only probe K8s when there is an explicit signal.
             if any(p.startswith("/api/v1/namespaces") or p == "/apis" for p in confirmed_paths):
                 paths_to_probe += KUBERNETES_PATHS
         else:
-            # SPA mode: only framework/confirmed paths + management if already confirmed.
             for p in MANAGEMENT_PATHS:
                 if p in confirmed_paths:
                     paths_to_probe.append(p)

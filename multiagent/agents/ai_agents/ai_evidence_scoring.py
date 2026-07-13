@@ -37,8 +37,8 @@ _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
     (re.compile(
         r"^(?:sse_streaming_header|sse_chunked_transfer|ai_response_header)$"
     ), EvidenceClass.LIVE_SURFACE),
-    # Product/framework headers and cookies are naming signals only — they
-    # must not escalate detection without a live API/behavior surface.
+    # Product/framework headers and cookies are brand signals only —
+    # they must not escalate detection without a live API/behavior surface.
     (re.compile(r"^framework_header$"), EvidenceClass.BRAND),
     (re.compile(r"^framework_cookie$"), EvidenceClass.PASSIVE),
     (re.compile(r"^(?:openapi|graphql)_schema$"), EvidenceClass.PASSIVE),

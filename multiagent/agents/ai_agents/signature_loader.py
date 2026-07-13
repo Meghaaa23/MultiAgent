@@ -11,41 +11,26 @@ except ImportError:  # pragma: no cover
     yaml = None
 
 
-# Signature model
 @dataclass
 class Signature:
     id: str
     kind: str
     name: str = ""
-    evidence_class: str = "brand"
+    evidence_class: str = "live_surface"
     capabilities: List[str] = field(default_factory=list)
-    requires_live_surface: bool = False
     paths: List[Tuple[str, str]] = field(default_factory=list)
-    headers: Dict[str, Optional[str]] = field(default_factory=dict)
-    js_strings: List[str] = field(default_factory=list)
-    js_globals: List[str] = field(default_factory=list)
-    cookie_names: List[str] = field(default_factory=list)
-    title_hints: List[str] = field(default_factory=list)
     body_patterns: List[re.Pattern] = field(default_factory=list)
     probe: Optional[Dict[str, Any]] = None
     source_file: str = ""
 
-    def as_framework_dict(self) -> Dict[str, Any]:
+    def as_protocol_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
+            "id": self.id,
             "paths": [p for p, _ in self.paths],
-            "js_strings": list(self.js_strings),
+            "path_categories": dict(self.paths),
             "capabilities": list(self.capabilities),
-            "kind": self.kind,
-            "requires_live_surface": self.requires_live_surface,
+            "evidence_class": self.evidence_class,
         }
-        if self.headers:
-            out["headers"] = dict(self.headers)
-        if self.js_globals:
-            out["js_globals"] = list(self.js_globals)
-        if self.cookie_names:
-            out["cookie_names"] = list(self.cookie_names)
-        if self.title_hints:
-            out["title_hints"] = list(self.title_hints)
         if self.body_patterns:
             out["body_patterns"] = [p.pattern for p in self.body_patterns]
         return out
@@ -54,23 +39,13 @@ class Signature:
 @dataclass
 class SignatureCatalog:
     universal: List[Signature] = field(default_factory=list)
-    naming: List[Signature] = field(default_factory=list)
 
-    def framework_signatures(self) -> Dict[str, Dict[str, Any]]:
+    def protocol_signatures(self) -> Dict[str, Dict[str, Any]]:
+        """Protocol/capability labels only — never product names."""
         out: Dict[str, Dict[str, Any]] = {}
-        for sig in self.naming:
-            out[sig.name or sig.id] = sig.as_framework_dict()
         for sig in self.universal:
-            if sig.id == "openai_compatible":
-                out.setdefault("OpenAI-compatible", sig.as_framework_dict())
-        return out
-
-    def framework_probe_paths(self) -> Dict[str, List[Tuple[str, str]]]:
-        out: Dict[str, List[Tuple[str, str]]] = {}
-        for sig in self.naming:
-            key = sig.name or sig.id
-            if sig.paths:
-                out[key] = list(sig.paths)
+            label = _protocol_label(sig)
+            out[label] = sig.as_protocol_dict()
         return out
 
     def universal_probe_paths(self) -> List[Tuple[str, str]]:
@@ -85,7 +60,6 @@ class SignatureCatalog:
         return paths
 
     def openai_compatible_paths(self) -> List[Tuple[str, str]]:
-        """Always-probe OpenAI-protocol paths from the universal pack only."""
         for sig in self.universal:
             if sig.id == "openai_compatible":
                 return list(sig.paths)
@@ -99,7 +73,6 @@ class SignatureCatalog:
     def seed_endpoint_ranking(self) -> List[Tuple[str, str]]:
         ranked: List[Tuple[str, str]] = []
         seen = set()
-        # Prefer OpenAI-compatible paths first so unknown apps are found early.
         for path, cat in self.openai_compatible_paths():
             if path in seen:
                 continue
@@ -110,16 +83,26 @@ class SignatureCatalog:
                 continue
             seen.add(path)
             ranked.append((path, cat))
-        for sig in self.naming:
-            for path, cat in sig.paths:
-                if path in seen:
-                    continue
-                seen.add(path)
-                ranked.append((path, cat))
         return ranked
 
-    def naming_labels(self) -> set[str]:
-        return {sig.name or sig.id for sig in self.naming}
+    def injection_paths(self) -> List[str]:
+        """Chat/inference paths suitable for vulnerability injection probes."""
+        out: List[str] = []
+        seen = set()
+        for path, cat in self.universal_probe_paths():
+            if cat not in ("chat", "ml", "embedding"):
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            out.append(path)
+        return out
+
+
+def _protocol_label(sig: Signature) -> str:
+    if sig.id == "openai_compatible":
+        return "OpenAI-compatible"
+    return sig.name or sig.id.replace("_", " ")
 
 
 def default_signatures_dir() -> Path:
@@ -140,8 +123,7 @@ def _normalize_paths(raw: Any) -> List[Tuple[str, str]]:
     for item in raw:
         if isinstance(item, str):
             path = item if item.startswith("/") else "/" + item
-            cat = _guess_category(path)
-            out.append((path, cat))
+            out.append((path, _guess_category(path)))
         elif isinstance(item, dict):
             path = str(item.get("path") or "")
             if not path:
@@ -155,9 +137,9 @@ def _normalize_paths(raw: Any) -> List[Tuple[str, str]]:
 
 def _guess_category(path: str) -> str:
     p = path.lower()
-    if any(x in p for x in ("embed",)):
+    if "embed" in p:
         return "embedding"
-    if any(x in p for x in ("graphql",)):
+    if "graphql" in p:
         return "graphql"
     if any(x in p for x in (
         "chat", "completion", "generate", "ask", "message", "predict",
@@ -172,42 +154,29 @@ def _guess_category(path: str) -> str:
     return "ml"
 
 
-def _parse_signature(data: Dict[str, Any], kind: str, source_file: str) -> Signature:
+def _parse_signature(data: Dict[str, Any], source_file: str) -> Signature:
     meta = data.get("meta") or {}
     detection = data.get("detection") or {}
-    headers_raw = detection.get("headers") or {}
-    headers = {
-        str(k).lower(): (None if v in (None, "", ".*") else str(v))
-        for k, v in headers_raw.items()
-    }
     body_patterns = [
         _compile_pattern(str(p))
         for p in (detection.get("body_patterns") or [])
     ]
     return Signature(
         id=str(data.get("id") or Path(source_file).stem),
-        kind=kind,
+        kind="universal",
         name=str(meta.get("name") or data.get("id") or Path(source_file).stem),
-        evidence_class=str(data.get("class") or meta.get("class") or (
-            "live_surface" if kind == "universal" else "brand"
-        )),
-        capabilities=[str(c) for c in (meta.get("capabilities") or [])],
-        requires_live_surface=bool(
-            data.get("requires_live_surface", kind == "naming")
+        evidence_class=str(
+            data.get("class") or meta.get("class") or "live_surface"
         ),
+        capabilities=[str(c) for c in (meta.get("capabilities") or [])],
         paths=_normalize_paths(detection.get("paths") or data.get("paths")),
-        headers=headers,
-        js_strings=[str(x) for x in (detection.get("js_strings") or [])],
-        js_globals=[str(x) for x in (detection.get("js_globals") or [])],
-        cookie_names=[str(x) for x in (detection.get("cookie_names") or [])],
-        title_hints=[str(x) for x in (detection.get("title_hints") or [])],
         body_patterns=body_patterns,
         probe=detection.get("probe") or data.get("probe"),
         source_file=source_file,
     )
 
 
-def _load_dir(directory: Path, kind: str) -> List[Signature]:
+def _load_dir(directory: Path) -> List[Signature]:
     if yaml is None:
         raise RuntimeError("PyYAML is required to load signature packs")
     if not directory.is_dir():
@@ -218,16 +187,13 @@ def _load_dir(directory: Path, kind: str) -> List[Signature]:
             data = yaml.safe_load(fh) or {}
         if not isinstance(data, dict):
             continue
-        out.append(_parse_signature(data, kind=kind, source_file=str(file)))
+        out.append(_parse_signature(data, source_file=str(file)))
     return out
 
 
 def load_signature_catalog(signatures_dir: Optional[str | Path] = None) -> SignatureCatalog:
     root = Path(signatures_dir) if signatures_dir else default_signatures_dir()
-    return SignatureCatalog(
-        universal=_load_dir(root / "universal", "universal"),
-        naming=_load_dir(root / "naming", "naming"),
-    )
+    return SignatureCatalog(universal=_load_dir(root / "universal"))
 
 
 _CATALOG: Optional[SignatureCatalog] = None

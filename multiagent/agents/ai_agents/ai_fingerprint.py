@@ -33,12 +33,8 @@ logger = logging.getLogger(__name__)
 
 # Signature catalog
 _SIGNATURE_CATALOG = get_signature_catalog()
-FRAMEWORK_SIGNATURES: Dict[str, Dict] = _SIGNATURE_CATALOG.framework_signatures()
-FRAMEWORK_PROBE_PATHS: Dict[str, List[Tuple[str, str]]] = (
-    _SIGNATURE_CATALOG.framework_probe_paths()
-)
-# Protocol always-probes from universal openai_compatible pack only.
-# Naming packs must not drive this list.
+PROTOCOL_SIGNATURES: Dict[str, Dict] = _SIGNATURE_CATALOG.protocol_signatures()
+# Always-probe OpenAI-protocol paths from the universal openai_compatible pack.
 UNIVERSAL_OPENAI_PATHS: List[Tuple[str, str]] = (
     _SIGNATURE_CATALOG.openai_compatible_paths()
 )
@@ -46,6 +42,12 @@ SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = (
     _SIGNATURE_CATALOG.seed_endpoint_ranking()
     or list(UNIVERSAL_OPENAI_PATHS)
 )
+UNIVERSAL_INJECTION_PATHS: List[str] = _SIGNATURE_CATALOG.injection_paths()
+
+# Back-compat aliases — empty / protocol-only; product catalogs removed.
+FRAMEWORK_SIGNATURES: Dict[str, Dict] = PROTOCOL_SIGNATURES
+FRAMEWORK_PROBE_PATHS: Dict[str, List[Tuple[str, str]]] = {}
+
 
 
 MODEL_NAME_PATTERNS = [
@@ -151,7 +153,6 @@ AI_RESPONSE_HEADERS = [
     "x-model-version", "x-model-id", "x-inference-time", "x-ai-backend",
     "x-ml-model", "x-openai-model", "x-anthropic-model", "openai-model",
     "openai-version", "x-inference-id", "x-model-name", "x-prediction-id",
-    "x-ollama-version",
 ]
 
 AI_CSP_DOMAINS = [
@@ -178,8 +179,7 @@ SPA_CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this
 
 AI_TITLE_KEYWORDS = [
     "ai", "llm", "gpt", "chat", "assistant", "bot", "openai", "claude",
-    "ollama", "webui", "flowise", "langflow", "librechat", "gradio",
-    "dify", "anythingllm", "lobe", "huggingface", "inference",
+    "huggingface", "inference", "embedding", "model",
 ]
 
 
@@ -532,7 +532,6 @@ class AIFingerprintAgent:
         base = target_url.rstrip("/")
 
         if not page_html:
-            # Gradio/Langflow shells can exceed 8 KiB before useful markers appear.
             status, page_headers, page_html = self._fetch(base, max_bytes=200_000)
             if not response_headers:
                 response_headers = page_headers
@@ -541,13 +540,12 @@ class AIFingerprintAgent:
                     "[fingerprint] empty root page body from %s (HTTP %s) — "
                     "host unreachable or returned no content",
                     base, status)
-                # Still probe Gradio/Langflow config even when the root shell is empty.
 
         spa_catch_all = await self._detect_spa_catch_all(base)
         if spa_catch_all and verbose:
             print("    [spa] catch-all/SPA fallback detected — using content-based probes")
 
-        js_urls, html_evidence, extracted_links, page_title, brand_frameworks = (
+        js_urls, html_evidence, extracted_links, page_title = (
             self._analyse_html(page_html, base, response_headers)
         )
         if spa_catch_all:
@@ -556,21 +554,7 @@ class AIFingerprintAgent:
                 "SPA/catch-all routing detected (canary path returned app shell)",
                 "passive"))
 
-        # Always try Gradio config early — Langflow/Gradio often lack obvious HTML brands.
-        gradio_hint = await self._probe_gradio_surface(base, verbose)
-        gradio_endpoints: List[str] = []
-        if isinstance(gradio_hint, dict):
-            html_evidence.extend(gradio_hint.get("evidence", []))
-            gradio_endpoints = list(gradio_hint.get("endpoints", []))
-            for fw in gradio_hint.get("frameworks", []):
-                if fw not in brand_frameworks:
-                    brand_frameworks.append(fw)
-
-        # Prefer framework-specific seeds when brand is already visible in HTML.
         extra_seed_paths = list(extracted_links)
-        for fw in brand_frameworks:
-            for path, _cat in FRAMEWORK_PROBE_PATHS.get(fw, []):
-                extra_seed_paths.append(path)
 
         parallel = await asyncio.gather(
             self._fetch_and_analyse_js(js_urls, base, verbose),
@@ -585,9 +569,9 @@ class AIFingerprintAgent:
         js_r, openapi_r, graphql_r, passive_r, probe_r, header_r = parallel
 
         all_evidence: List[EvidenceItem] = list(html_evidence)
-        ml_endpoints:    List[str]  = list(gradio_endpoints)
+        ml_endpoints:    List[str]  = []
         discovered_paths: List[str] = []
-        all_frameworks:  List[str]  = list(brand_frameworks)
+        all_frameworks:  List[str]  = []
         auth_signals:    List[AuthSignal] = []
         openapi_schema:  Dict       = {}
         graphql_types:   List[str]  = []
@@ -605,10 +589,6 @@ class AIFingerprintAgent:
             js_api_paths = js_r.get("api_paths", [])
             raw_html_js  = js_r.get("raw_js", "")
             discovered_paths.extend(js_api_paths)
-            # JS may reveal a framework brand we missed in HTML.
-            for fw in js_r.get("frameworks", []):
-                if fw in FRAMEWORK_SIGNATURES and fw not in brand_frameworks:
-                    brand_frameworks.append(fw)
 
         if isinstance(openapi_r, dict) and openapi_r.get("found"):
             openapi_schema = openapi_r.get("schema", {})
@@ -618,20 +598,6 @@ class AIFingerprintAgent:
 
         if isinstance(passive_r, dict):
             discovered_paths.extend(passive_r.get("paths", []))
-
-        # Second-pass: probe framework-specific paths once JS/HTML brands are known.
-        fw_hint = brand_frameworks[:]
-        for fw in all_frameworks:
-            if fw in FRAMEWORK_PROBE_PATHS and fw not in fw_hint:
-                fw_hint.append(fw)
-        if fw_hint:
-            fw_probe = await self._probe_framework_paths(
-                base, fw_hint, verbose, spa_catch_all=spa_catch_all)
-            if isinstance(fw_probe, dict):
-                all_evidence.extend(fw_probe.get("evidence", []))
-                ml_endpoints.extend(fw_probe.get("endpoints", []))
-                all_frameworks.extend(fw_probe.get("frameworks", []))
-                auth_signals.extend(fw_probe.get("auth_signals", []))
 
         # Auth-gated AI endpoints are still AI surfaces — track them as endpoints.
         for sig in auth_signals:
@@ -682,7 +648,7 @@ class AIFingerprintAgent:
             deduped_auth.append(sig)
         auth_signals = deduped_auth
 
-        framework_result = self._identify_framework(
+        framework_result = self._identify_protocol(
             page_html, raw_html_js, response_headers,
             ml_endpoints + discovered_paths, all_evidence)
         all_evidence.extend(framework_result.get("evidence", []))
@@ -696,8 +662,6 @@ class AIFingerprintAgent:
         live_from_keys = has_live_surface_evidence(evidence_keys)
         has_live_surface = live_from_paths or live_from_keys
 
-        if not detected_framework and brand_frameworks and has_live_surface:
-            detected_framework = brand_frameworks[0]
         if detected_framework and detected_framework not in all_frameworks:
             all_frameworks.insert(0, detected_framework)
         if detected_protocol and detected_protocol not in all_frameworks:
@@ -722,10 +686,7 @@ class AIFingerprintAgent:
         evidence_keys = [ev.key for ev in all_evidence]
         detection = score_evidence(evidence_keys)
         confidence = detection.confidence
-        ai_brand_only = (
-            (bool(brand_frameworks) or detection.brand_only)
-            and not has_live_surface
-        )
+        ai_brand_only = detection.brand_only and not has_live_surface
         is_ai = has_live_surface
 
         atlas: List[str] = []
@@ -766,10 +727,11 @@ class AIFingerprintAgent:
         else:
             deployment["authentication"] = ["none"]
 
-        INFRA_FRAMEWORKS = {"Ollama", "vLLM", "TGI (HuggingFace)", "OpenAI-compatible",
-                            "Triton", "TorchServe", "SageMaker"}
-        infra_layer = detected_framework if detected_framework in INFRA_FRAMEWORKS else detected_infra
-        app_layer   = detected_framework if detected_framework not in INFRA_FRAMEWORKS else ""
+        PROTOCOL_LABELS = {"OpenAI-compatible", "Generic chat inference API",
+                           "Embedding API", "API schema discovery",
+                           "LLM streaming transport"}
+        infra_layer = detected_framework if detected_framework in PROTOCOL_LABELS else detected_infra
+        app_layer   = ""
 
         meta_desc = ""
         m_desc = re.search(
@@ -816,16 +778,15 @@ class AIFingerprintAgent:
 
     def _analyse_html(
         self, html: str, base: str, headers: Dict
-    ) -> Tuple[List[str], List[EvidenceItem], List[str], str, List[str]]:
-        """Return (js_urls, evidence, links, page_title, brand_frameworks)."""
+    ) -> Tuple[List[str], List[EvidenceItem], List[str], str]:
+        """Return (js_urls, evidence, links, page_title)."""
         evidence: List[EvidenceItem] = []
         js_urls:  List[str]          = []
         links:    List[str]          = []
-        brands:   List[str]          = []
         page_title = ""
 
         if not html:
-            return js_urls, evidence, links, page_title, brands
+            return js_urls, evidence, links, page_title
 
         m_title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
         if m_title:
@@ -837,26 +798,6 @@ class AIFingerprintAgent:
         else:
             title_low = ""
 
-        # Brand / product name signals in title + early HTML (before JS fetch).
-        html_low = html[:80_000].lower()
-        for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-            hit = False
-            for hint in sig.get("title_hints", []):
-                if hint and hint in title_low:
-                    hit = True
-                    break
-            if not hit:
-                for s in sig.get("js_strings", []):
-                    if s.lower() in html_low:
-                        hit = True
-                        break
-            if hit:
-                brands.append(fw_name)
-                evidence.append(EvidenceItem.make(
-                    "html_brand_signal",
-                    f"Brand/product signal for {fw_name}",
-                    "html", framework=fw_name))
-
         for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I):
             src = m.group(1)
             if not src.startswith("http"):
@@ -867,7 +808,6 @@ class AIFingerprintAgent:
                 "/gradio_api/",
             ]):
                 js_urls.append(src)
-            # Also keep any same-origin script that looks like an app bundle.
             elif src.endswith(".js") and (
                 urllib.parse.urlparse(src).netloc == ""
                 or urllib.parse.urlparse(src).netloc == urllib.parse.urlparse(base).netloc
@@ -876,8 +816,7 @@ class AIFingerprintAgent:
 
         for m in re.finditer(
             r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant|'
-            r'flowise|langflow|librechat|open.?webui|ollama|gradio|dify|'
-            r'anythingllm|langchain)[^"\']*)["\']',
+            r'inference|embedding|language model)[^"\']*)["\']',
             html, re.I,
         ):
             evidence.append(EvidenceItem.make(
@@ -917,7 +856,6 @@ class AIFingerprintAgent:
             evidence,
             list(dict.fromkeys(links)),
             page_title,
-            list(dict.fromkeys(brands)),
         )
 
     async def _detect_spa_catch_all(self, base: str) -> bool:
@@ -939,59 +877,6 @@ class AIFingerprintAgent:
         except Exception:
             pass
         return False
-
-    async def _probe_gradio_surface(self, base: str, verbose: bool) -> Dict:
-        """Probe Gradio/Langflow config endpoints that often miss HTML brand signals."""
-        evidence: List[EvidenceItem] = []
-        endpoints: List[str] = []
-        frameworks: List[str] = []
-        loop = asyncio.get_event_loop()
-        paths = [
-            "/config", "/info", "/gradio_api/info", "/gradio_api/config",
-            "/api/v1/flows", "/api/v1/all", "/health",
-        ]
-        for path in paths:
-            url = base + path
-            try:
-                status, headers, body = await loop.run_in_executor(
-                    None, lambda u=url: self._fetch(u, max_bytes=50_000))
-                if status != 200 or not body or _looks_html_body(
-                    headers.get("Content-Type", "") or headers.get("content-type", ""),
-                    body,
-                ):
-                    continue
-                body_l = body.lower()
-                ct = (headers.get("Content-Type") or headers.get("content-type") or "").lower()
-                if "json" not in ct and body.strip()[:1] not in "{[":
-                    continue
-                if any(k in body_l for k in ("gradio", "components", "dependencies")):
-                    evidence.append(EvidenceItem.make(
-                        "ml_endpoint_200",
-                        f"Gradio/config surface at {path}",
-                        "probe", endpoint=url, framework="Gradio"))
-                    endpoints.append(url)
-                    frameworks.append("Gradio")
-                    if verbose:
-                        print(f"    [gradio] {path} confirmed")
-                if "langflow" in body_l or path.startswith("/api/v1/"):
-                    if '"flows"' in body_l or "langflow" in body_l or path in (
-                        "/api/v1/flows", "/api/v1/all",
-                    ):
-                        evidence.append(EvidenceItem.make(
-                            "ml_endpoint_200",
-                            f"Langflow API surface at {path}",
-                            "probe", endpoint=url, framework="Langflow"))
-                        endpoints.append(url)
-                        frameworks.append("Langflow")
-                        if verbose:
-                            print(f"    [langflow] {path} confirmed")
-            except Exception:
-                continue
-        return {
-            "evidence": evidence,
-            "endpoints": list(dict.fromkeys(endpoints)),
-            "frameworks": list(dict.fromkeys(frameworks)),
-        }
 
     async def _fetch_and_analyse_js(
         self, js_urls: List[str], base: str, verbose: bool
@@ -1063,14 +948,6 @@ class AIFingerprintAgent:
                     evidence.append(EvidenceItem.make(
                         "websocket_ai_path", f"WebSocket({path[:50]})",
                         "js_bundle", endpoint=url))
-
-            for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-                for gs in sig.get("js_globals", []):
-                    if gs in js:
-                        evidence.append(EvidenceItem.make(
-                            "js_ai_sdk", f"JS global {gs} -> {fw_name}",
-                            "js_bundle", framework=fw_name))
-                        frameworks.append(fw_name)
 
         return {
             "evidence":  evidence,
@@ -1407,65 +1284,6 @@ class AIFingerprintAgent:
             "auth_signals": auth_signals,
         }
 
-    async def _probe_framework_paths(
-        self,
-        base: str,
-        frameworks: List[str],
-        verbose: bool,
-        spa_catch_all: bool = False,
-    ) -> Dict:
-        evidence: List[EvidenceItem] = []
-        endpoints: List[str] = []
-        fw_hits: List[str] = []
-        auth_signals: List[AuthSignal] = []
-        loop = asyncio.get_event_loop()
-        seen_paths: Set[str] = set()
-
-        async def probe(path: str, category: str):
-            if path in seen_paths:
-                return None
-            seen_paths.add(path)
-            url = base + path
-            try:
-                status, resp_headers, body = await loop.run_in_executor(
-                    None, lambda: self._fetch(url))
-                ct = (resp_headers.get("Content-Type")
-                      or resp_headers.get("content-type") or "")
-                if (status in (404, 405)
-                        or (status == 200 and _looks_html_body(ct, body))
-                        or spa_catch_all):
-                    post_body = _probe_post_body(path, category)
-                    status, resp_headers, body = await loop.run_in_executor(
-                        None,
-                        lambda u=url, d=post_body: self._fetch(u, data=d, method="POST"),
-                    )
-                return self._evaluate_probe_response(
-                    url, path, category, status, resp_headers, body,
-                    auth_signals, spa_catch_all=spa_catch_all)
-            except Exception:
-                return None
-
-        tasks = []
-        for fw in frameworks:
-            for path, cat in FRAMEWORK_PROBE_PATHS.get(fw, []):
-                tasks.append(probe(path, cat))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, dict) and r:
-                evidence.extend(r.get("evidence", []))
-                endpoints.extend(r.get("endpoints", []))
-                fw_hits.extend(r.get("frameworks", []))
-
-        if verbose and endpoints:
-            print(f"    [framework-probe] confirmed {len(endpoints)} path(s)")
-
-        return {
-            "evidence": evidence,
-            "endpoints": list(dict.fromkeys(endpoints)),
-            "frameworks": list(dict.fromkeys(fw_hits)),
-            "auth_signals": auth_signals,
-        }
-
     def _evaluate_probe_response(
         self,
         url: str,
@@ -1527,21 +1345,19 @@ class AIFingerprintAgent:
                     "sse_chunked_transfer",
                     f"Chunked transfer at {path}", "probe", endpoint=url))
 
-            # Gradio /config and similar schema endpoints.
+            # Schema/config endpoints with AI-shaped JSON.
             if category == "schema" and is_json and url not in endpoints:
                 if any(k in body_l for k in (
-                    "gradio", "components", "dependencies", "models",
-                    "chatflows", "flows", "ollama", "openai", "langflow",
+                    "components", "dependencies", "models", "data",
+                    "chatflows", "flows", "choices", "object",
                 )):
                     evidence.append(EvidenceItem.make(
                         "ml_endpoint_200",
                         f"AI schema/config at {path} (HTTP 200)",
                         "probe", endpoint=url))
                     endpoints.append(url)
-                    if "gradio" in body_l:
-                        frameworks.append("Gradio")
-                    if "langflow" in body_l:
-                        frameworks.append("Langflow")
+                    if any(k in body_l for k in ("choices", '"object"', "chat.completion")):
+                        frameworks.append("OpenAI-compatible")
 
         elif status == 200 and _is_inference_path(path) and "json" in ct:
             evidence.append(EvidenceItem.make(
@@ -1799,30 +1615,9 @@ class AIFingerprintAgent:
                     f"{h}: {headers_low[h][:50]}", "header"))
                 break
 
-        server = headers_low.get("server", "") + " " + headers_low.get("x-powered-by", "")
-        for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-            for k, v in (sig.get("headers") or {}).items():
-                if k in headers_low:
-                    if v is None or v.lower() in headers_low.get(k, "").lower():
-                        evidence.append(EvidenceItem.make(
-                            "framework_header",
-                            f"Header {k} matches {fw_name}",
-                            "header", framework=fw_name))
-                        frameworks.append(fw_name)
-
-        cookies = headers_low.get("set-cookie", "")
-        for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-            for cookie_name in sig.get("cookie_names", []):
-                if cookie_name.lower() in cookies.lower():
-                    evidence.append(EvidenceItem.make(
-                        "framework_cookie",
-                        f"Cookie '{cookie_name}' matches {fw_name}",
-                        "header", framework=fw_name))
-                    frameworks.append(fw_name)
-
         return {"evidence": evidence, "frameworks": list(dict.fromkeys(frameworks))}
 
-    def _identify_framework(
+    def _identify_protocol(
         self,
         html: str,
         js: str,
@@ -1830,106 +1625,55 @@ class AIFingerprintAgent:
         known_endpoints: List[str],
         existing_evidence: List[EvidenceItem],
     ) -> Dict:
-        evidence:    List[EvidenceItem] = []
-        headers_low = {k.lower(): v for k, v in headers.items()}
-        combined_text = (html + js).lower()
+        """Score universal protocol packs from live paths/body evidence only."""
+        evidence: List[EvidenceItem] = []
         known_paths = {urllib.parse.urlparse(ep).path for ep in known_endpoints}
+        body_blob = " ".join(ev.detail for ev in existing_evidence)
 
-        scores:          Dict[str, int]       = {}
+        scores: Dict[str, int] = {}
         matched_signals: Dict[str, List[str]] = {}
 
-        for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-            score   = 0
-            signals = []
-
+        for label, sig in PROTOCOL_SIGNATURES.items():
+            score = 0
+            signals: List[str] = []
             for p in sig.get("paths", []):
-                if any(p in kp for kp in known_paths) or p in combined_text:
+                if any(p == kp or kp.endswith(p) for kp in known_paths):
                     score += 3
                     signals.append(f"path:{p}")
-
-            for s in sig.get("js_strings", []):
-                if s.lower() in combined_text:
-                    score += 2
-                    signals.append(f"js:{s}")
-
-            for hint in sig.get("title_hints", []):
-                if hint and hint in combined_text:
-                    score += 4
-                    signals.append(f"title:{hint}")
-                    break
-
-            for k, v in (sig.get("headers") or {}).items():
-                if k in headers_low:
-                    if v is None or v.lower() in headers_low[k].lower():
-                        score += 5
-                        signals.append(f"header:{k}")
-
-            cookie_header = headers_low.get("set-cookie", "")
-            for cn in sig.get("cookie_names", []):
-                if cn.lower() in cookie_header.lower():
-                    score += 3
-                    signals.append(f"cookie:{cn}")
-
             for pat in sig.get("body_patterns", []):
-                for ev in existing_evidence:
-                    if re.search(pat, ev.detail, re.I):
-                        score += 2
-                        signals.append(f"body:{pat[:20]}")
-                        break
-
+                if re.search(pat, body_blob, re.I):
+                    score += 2
+                    signals.append(f"body:{pat[:24]}")
             if score > 0:
-                scores[fw_name]          = score
-                matched_signals[fw_name] = signals
+                scores[label] = score
+                matched_signals[label] = signals
 
-        PROTOCOL_ONLY_LABELS = {"OpenAI-compatible"}
-        MAX_POSSIBLE_SCORE   = 12
-
-        best_fw       = ""
-        best_score    = 0
-        best_protocol = ""
-
-        for fw, sc in scores.items():
-            if fw in PROTOCOL_ONLY_LABELS:
-                if sc > 0:
-                    best_protocol = fw
-                continue
+        best_label = ""
+        best_score = 0
+        for label, sc in scores.items():
             if sc > best_score:
                 best_score = sc
-                best_fw = fw
+                best_label = label
 
-        if not best_fw and best_protocol:
-            best_fw = best_protocol
-            best_protocol = ""
+        fw_confidence = min(best_score / 12.0, 1.0) if best_label else 0.0
+        fw_signals = matched_signals.get(best_label, [])
+        protocol = best_label if best_label == "OpenAI-compatible" else ""
+        framework = best_label
 
-        fw_confidence = min(best_score / MAX_POSSIBLE_SCORE, 1.0) if best_fw else 0.0
-        fw_signals    = matched_signals.get(best_fw, [])
-
-        if best_fw and best_score >= 3:
-            pct = f"{fw_confidence*100:.0f}%"
+        if best_label and best_score >= 3:
             evidence.append(EvidenceItem.make(
                 "framework_identified",
-                f"Framework: {best_fw} confidence={pct} signals={fw_signals[:4]}",
-                "passive", framework=best_fw))
-
-        INFERENCE_SERVER_NAMES = set(FRAMEWORK_SIGNATURES.keys()) - PROTOCOL_ONLY_LABELS
-        infra = ""
-        for fw_name in [best_fw] + sorted(scores.keys(), key=lambda x: scores.get(x,0), reverse=True):
-            sig = FRAMEWORK_SIGNATURES.get(fw_name, {})
-            if sig.get("paths") and any(
-                any(p in kp for kp in known_paths)
-                for p in sig.get("paths", [])
-                if any(x in p for x in ["/api/", "/v1/", "/v2/"])
-            ):
-                infra = fw_name
-                break
+                f"Protocol: {best_label} confidence={fw_confidence*100:.0f}% "
+                f"signals={fw_signals[:4]}",
+                "passive", framework=best_label))
 
         return {
-            "evidence":            evidence,
-            "framework":           best_fw,
+            "evidence":             evidence,
+            "framework":            framework,
             "framework_confidence": fw_confidence,
-            "framework_signals":   fw_signals,
-            "protocol":            best_protocol,
-            "inference_server":    infra or best_fw,
+            "framework_signals":    fw_signals,
+            "protocol":             protocol or framework,
+            "inference_server":     framework,
         }
 
     def _infer_capabilities(
@@ -1942,15 +1686,12 @@ class AIFingerprintAgent:
     ) -> List[str]:
         caps: Set[str] = set()
 
-        if framework and framework in FRAMEWORK_SIGNATURES:
-            caps.update(FRAMEWORK_SIGNATURES[framework].get("capabilities", []))
+        if framework and framework in PROTOCOL_SIGNATURES:
+            caps.update(PROTOCOL_SIGNATURES[framework].get("capabilities", []))
 
-        PROTOCOL_LABELS = {"OpenAI-compatible"}
         for fw in all_frameworks:
-            if fw in PROTOCOL_LABELS:
-                continue
-            if fw in FRAMEWORK_SIGNATURES and fw != framework:
-                caps.update(FRAMEWORK_SIGNATURES[fw].get("capabilities", []))
+            if fw in PROTOCOL_SIGNATURES and fw != framework:
+                caps.update(PROTOCOL_SIGNATURES[fw].get("capabilities", []))
 
         if openapi_schema:
             caps.add("chat")
