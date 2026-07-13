@@ -227,7 +227,11 @@ try:
     )
     logger.info("✓ Threat Modeling Agent initialized")
 except Exception as e:
-    logger.warning(f"Threat Modeling Agent init failed: {e}")
+    logger.error(
+        "Threat Modeling Agent init failed: %s\n%s",
+        e,
+        traceback.format_exc(),
+    )
     threat_modeling_agent = None
 
 logger.info("✓ All agents initialized")
