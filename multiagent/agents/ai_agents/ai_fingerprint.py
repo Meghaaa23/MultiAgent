@@ -12,15 +12,26 @@ import urllib.error
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from multiagent.agents.ai_agents.ai_evidence_scoring import (
-    FEATURE_RATES,
-    LogisticCalibrator,
-    combine_scores,
-    feature_log_lr,
-    has_brand_only_evidence,
-    has_live_surface_evidence,
-    score_evidence_keys,
-)
+try:
+    from multiagent.agents.ai_agents.ai_evidence_scoring import (
+        FEATURE_RATES,
+        LogisticCalibrator,
+        combine_scores,
+        feature_log_lr,
+        has_brand_only_evidence,
+        has_live_surface_evidence,
+        score_evidence_keys,
+    )
+except ImportError:
+    from ai_evidence_scoring import (
+        FEATURE_RATES,
+        LogisticCalibrator,
+        combine_scores,
+        feature_log_lr,
+        has_brand_only_evidence,
+        has_live_surface_evidence,
+        score_evidence_keys,
+    )
 
 logger = logging.getLogger(__name__)
 
