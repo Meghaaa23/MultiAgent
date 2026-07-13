@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import logging
 import ipaddress
@@ -101,6 +102,20 @@ INFERENCE_PATHS = ["/v1/chat/completions", "/v1/completions", "/api/generate",
                    "/api/v1/openai/chat/completions"]
 TRAINING_PATHS = ["/train", "/fine-tune", "/finetune", "/training", "/api/train"]
 
+INFERENCE_PATH_RE = re.compile(
+    r"/(?:v\d+/)?(?:chat/)?completions(?:/|$)"
+    r"|/api/(?:chat|generate|ask|messages|prediction|predict)(?:/|$)"
+    r"|/run(?:/|$)|/invoke(?:/$)",
+    re.I,
+)
+
+OPENAI_CHAT_PROBE = {
+    "model": "gpt-3.5-turbo",
+    "messages": [{"role": "user", "content": "Hi"}],
+    "max_tokens": 1,
+    "stream": False,
+}
+
 # Framework → preferred probe path sets (avoids spraying K8s/Ray paths on SPAs).
 FRAMEWORK_INFRA_PATHS = {
     "ollama": OLLAMA_PATHS + VLLM_PATHS,
@@ -114,7 +129,7 @@ FRAMEWORK_INFRA_PATHS = {
     "gradio": ["/config", "/info", "/queue/join", "/run/predict",
                "/gradio_api/info", "/health"],
     "librechat": ["/api/ask", "/api/messages", "/api/models", "/api/endpoints",
-                  "/api/convos", "/health"],
+                  "/api/convos", "/v1/chat/completions", "/v1/models", "/health"],
     "anythingllm": ["/api/workspace", "/api/chat", "/api/system/env",
                     "/api/v1/openai/chat/completions", "/health"],
     "dify": ["/api/chat-messages", "/api/workflows/run", "/api/apps", "/health"],
@@ -411,18 +426,28 @@ class AIInfraAgent:
         if status in SKIP_STATUS:
             return "skip"
         if status == 200:
-            if catch_all or path in GENERIC_PATHS:
-                # SPA mode: require AI-shaped content, never trust status alone.
-                if not _is_ai_json(body) and not any(
-                    s in (body or "").lower() for s in AI_BODY_SIGNALS
-                ):
-                    return "skip"
             parsed = _json_body(body)
             b = (body or "").strip().lower()
+            is_inference = bool(INFERENCE_PATH_RE.search(path or ""))
+            soft_404 = (
+                b in ("", "{}", "[]", "null")
+                or (isinstance(parsed, dict) and parsed.get("statusCode") in (404, 405))
+            )
+            if catch_all or path in GENERIC_PATHS:
+                ai_shaped = _is_ai_json(body) or any(
+                    s in (body or "").lower() for s in AI_BODY_SIGNALS
+                )
+                # Known inference routes: non-HTML JSON 200 is enough in SPA mode.
+                if not ai_shaped and not (is_inference and parsed is not None and not soft_404):
+                    if not (is_inference and "json" in (ct or "").lower() and not soft_404):
+                        return "skip"
             if parsed is None and b in ("", "null"):
+                if is_inference and "json" in (ct or "").lower():
+                    return "exposed"
                 return "skip"
-            # Non-JSON 200 with no AI signals is not an AI exposure.
             if parsed is None and not any(s in b for s in AI_BODY_SIGNALS):
+                if is_inference and not _looks_html(ct, body):
+                    return "exposed"
                 return "skip"
             return "exposed"
         if status in (400, 422):
@@ -441,7 +466,8 @@ class AIInfraAgent:
                 r = await http.request("DELETE", f"{base}{path}", headers=headers)
                 return r.status_code, (r.text[:400] if r.text else ""), r.headers.get("content-type", "")
             if any(seg in path for seg in ["/chat", "/generate", "/completions"]):
-                r = await http.post(f"{base}{path}", json={}, headers=headers)
+                payload = OPENAI_CHAT_PROBE if "chat" in path or "completions" in path else {}
+                r = await http.post(f"{base}{path}", json=payload, headers=headers)
                 return r.status_code, (r.text[:400] if r.text else ""), r.headers.get("content-type", "")
             r = await http.get(f"{base}{path}", headers=headers)
             if r.status_code == 405:

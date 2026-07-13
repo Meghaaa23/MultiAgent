@@ -209,6 +209,26 @@ UNIVERSAL_OPENAI_PATHS: List[Tuple[str, str]] = [
     ("/api/chat/completions", "chat"),
 ]
 
+OPENAI_CHAT_PROBE = json.dumps({
+    "model": "gpt-3.5-turbo",
+    "messages": [{"role": "user", "content": "Hi"}],
+    "max_tokens": 1,
+    "stream": False,
+}).encode()
+
+OPENAI_COMPLETIONS_PROBE = json.dumps({
+    "model": "gpt-3.5-turbo",
+    "prompt": "Hi",
+    "max_tokens": 1,
+}).encode()
+
+INFERENCE_PATH_RE = re.compile(
+    r"/(?:v\d+/)?(?:chat/)?completions(?:/|$)"
+    r"|/api/(?:chat|generate|ask|messages|prediction|predict)(?:/|$)"
+    r"|/run(?:/|$)|/invoke(?:/$)",
+    re.I,
+)
+
 LLM_RESPONSE_SIGNALS = [
     r"\bI\s+(?:am|can|will|don'?t|cannot|understand)\b",
     r"\bAs\s+an?\s+(?:AI|assistant|language model)\b",
@@ -404,6 +424,38 @@ def _looks_ai_api_json(body: str) -> bool:
     if isinstance(data, list) and data and isinstance(data[0], dict):
         return any(k in data[0] for k in ("id", "object", "model", "created"))
     return False
+
+
+def _is_inference_path(path: str) -> bool:
+    return bool(INFERENCE_PATH_RE.search(path or ""))
+
+
+def _is_soft_404_json(body: str) -> bool:
+    text = (body or "").strip()
+    if text in ("", "{}", "[]", "null"):
+        return True
+    try:
+        data = json.loads(text)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("statusCode") in (404, 405):
+        return True
+    code = str(data.get("code") or data.get("error") or "").lower()
+    if code in ("not_found", "enoent", "404"):
+        return True
+    msg = str(data.get("message") or data.get("msg") or "").lower()
+    return "not found" in msg and len(data) <= 3
+
+
+def _probe_post_body(path: str, category: str) -> bytes:
+    path_l = (path or "").lower()
+    if "completions" in path_l and "chat" not in path_l:
+        return OPENAI_COMPLETIONS_PROBE
+    if category in ("chat", "ml") or _is_inference_path(path):
+        return OPENAI_CHAT_PROBE
+    return b"{}"
 
 
 OPENAPI_SPEC_PATHS = [
@@ -1505,8 +1557,11 @@ class AIFingerprintAgent:
                         "chat", "embedding", "ml", "graphql"))
                 )
                 if needs_post and category in ("chat", "embedding", "ml", "graphql", "schema"):
+                    post_body = _probe_post_body(path, category)
                     status, resp_headers, body = await loop.run_in_executor(
-                        None, lambda: self._fetch(url, data=b"{}", method="POST"))
+                        None,
+                        lambda u=url, d=post_body: self._fetch(u, data=d, method="POST"),
+                    )
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
                     auth_signals, spa_catch_all=spa_catch_all)
@@ -1557,6 +1612,10 @@ class AIFingerprintAgent:
                 endpoints.extend(r.get("endpoints", []))
                 frameworks.extend(r.get("frameworks", []))
                 confirmed += len(r.get("endpoints", []))
+                if verbose and r.get("endpoints"):
+                    print(f"    [openai-probe] open surface {path}")
+                elif verbose:
+                    print(f"    [openai-probe] no surface at {path}")
 
         return {
             "evidence":    evidence,
@@ -1592,8 +1651,11 @@ class AIFingerprintAgent:
                 if (status in (404, 405)
                         or (status == 200 and _looks_html_body(ct, body))
                         or spa_catch_all):
+                    post_body = _probe_post_body(path, category)
                     status, resp_headers, body = await loop.run_in_executor(
-                        None, lambda: self._fetch(url, data=b"{}", method="POST"))
+                        None,
+                        lambda u=url, d=post_body: self._fetch(u, data=d, method="POST"),
+                    )
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
                     auth_signals, spa_catch_all=spa_catch_all)
@@ -1649,17 +1711,26 @@ class AIFingerprintAgent:
 
         if status == 200 and body:
             is_json = "json" in ct or body.strip()[:1] in "{["
-            if is_json and _looks_ai_api_json(body):
-                ev_key = ("chat_endpoint_200" if category == "chat" else
+            ai_shaped = is_json and _looks_ai_api_json(body)
+            inference_live = (
+                _is_inference_path(path)
+                and is_json
+                and not _looks_html_body(ct, body)
+                and not _is_soft_404_json(body)
+            )
+            if ai_shaped or inference_live:
+                ev_key = ("chat_endpoint_200" if category == "chat" or _is_inference_path(path) else
                           "embedding_endpoint_200" if category == "embedding" else
                           "ml_endpoint_200")
+                detail = (
+                    f"AI body at {path} (HTTP 200)"
+                    if ai_shaped else
+                    f"Open inference handler at {path} (HTTP 200 JSON)"
+                )
                 evidence.append(EvidenceItem.make(
-                    ev_key, f"AI body at {path} (HTTP 200)",
-                    "probe", endpoint=url))
+                    ev_key, detail, "probe", endpoint=url))
                 endpoints.append(url)
-                if category in ("chat", "schema") and (
-                    '"object"' in body_l or '"choices"' in body_l or '"data"' in body_l
-                ):
+                if category in ("chat", "schema") or _is_inference_path(path):
                     frameworks.append("OpenAI-compatible")
 
             if "text/event-stream" in ct:
@@ -1688,6 +1759,14 @@ class AIFingerprintAgent:
                         frameworks.append("Gradio")
                     if "langflow" in body_l:
                         frameworks.append("Langflow")
+
+        elif status == 200 and _is_inference_path(path) and "json" in ct:
+            evidence.append(EvidenceItem.make(
+                "chat_endpoint_200",
+                f"Open inference handler at {path} (HTTP 200)",
+                "probe", endpoint=url))
+            endpoints.append(url)
+            frameworks.append("OpenAI-compatible")
 
         if status in (401, 403):
             auth_type = self._detect_auth_type(headers_low, body_l)

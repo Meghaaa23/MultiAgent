@@ -184,3 +184,36 @@ def test_merge_exposed_endpoints_backstop():
         fp, ["http://localhost:3080/v1/chat/completions"])
     assert "http://localhost:3080/v1/chat/completions" in merged["ml_endpoints"]
     assert merged["has_live_surface"] is True
+
+
+def test_inference_path_200_json_without_ai_keys():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    # Opaque JSON 200 on the OpenAI passthrough (no choices/model/object keys)
+    body = '{"status":"ready","detail":"accepted"}'
+    r = agent._evaluate_probe_response(
+        "http://x/v1/chat/completions", "/v1/chat/completions", "chat",
+        200, {"Content-Type": "application/json"}, body, auth, spa_catch_all=True,
+    )
+    assert "http://x/v1/chat/completions" in r["endpoints"]
+    assert any(e.key == "chat_endpoint_200" for e in r["evidence"])
+
+
+def test_inference_path_ignores_soft_404_json():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    r = agent._evaluate_probe_response(
+        "http://x/v1/chat/completions", "/v1/chat/completions", "chat",
+        200, {"Content-Type": "application/json"}, "{}", auth, spa_catch_all=True,
+    )
+    assert r.get("endpoints", []) == []
+
+
+def test_infra_classify_inference_passthrough():
+    from multiagent.agents.ai_agents.Ai_Infra_agent import AIInfraAgent
+    agent = AIInfraAgent(timeout=3)
+    verdict = agent._classify(
+        200, '{"message":"ok"}', "application/json",
+        "/v1/chat/completions", True, catch_all=True,
+    )
+    assert verdict == "exposed"
