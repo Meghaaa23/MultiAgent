@@ -319,6 +319,66 @@ def test_vuln_framework_endpoint_fallback():
     assert langflow == ["http://localhost:7860/api/v1/run"]
 
 
+def test_normalize_derives_live_surface_from_endpoints():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    fp = t._normalize_ai_fingerprint({
+        "framework": "Open WebUI",
+        "ml_endpoints": ["http://localhost:3001/api/chat"],
+    })
+    assert fp["has_live_surface"] is True
+    assert fp["is_ai_powered"] is True
+
+
+def test_normalize_brand_only_clears_ai_flag():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    fp = t._normalize_ai_fingerprint({
+        "framework": "Flowise",
+        "is_ai_powered": True,
+        "ml_endpoints": [],
+        "auth_required_paths": [],
+    })
+    assert fp["has_live_surface"] is False
+    assert fp["is_ai_powered"] is False
+
+
+@pytest.mark.asyncio
+async def test_vuln_tester_skips_brand_only_framework():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    result = await t.test_all(
+        {
+            "framework": "Flowise",
+            "is_ai_powered": True,
+            "ml_endpoints": [],
+            "auth_required_paths": [],
+        },
+        "http://localhost:3100",
+        verbose=False,
+    )
+    assert result["confirmed_ai_vulns"] == []
+    assert result["potential_ai_vulns"] == []
+    assert result["requests_sent"] == 0
+
+
+@pytest.mark.asyncio
+async def test_vuln_tester_auth_gated_still_reported():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    result = await t.test_all(
+        {
+            "framework": "Open WebUI",
+            "ml_endpoints": [],
+            "auth_required_paths": [
+                {"endpoint": "http://localhost:3001/api/chat",
+                 "auth_type": "bearer", "status_code": 401, "detail": "auth"},
+            ],
+        },
+        "http://localhost:3001",
+        verbose=False,
+    )
+    assert result["confirmed_ai_vulns"] == []
+    assert len(result["potential_ai_vulns"]) == 1
+    assert "auth-gated" in result["potential_ai_vulns"][0]["type"]
+
+
 def test_app_detect_framework_shortcuts():
     assert detect_application_type(
         {"framework": "Ollama", "ml_endpoints": []}
