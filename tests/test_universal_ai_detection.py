@@ -12,8 +12,6 @@ import pytest
 
 from multiagent.agents.ai_agents.ai_fingerprint import (
     AIFingerprintAgent,
-    SEED_ENDPOINT_RANKING,
-    UNIVERSAL_INJECTION_PATHS,
     _looks_html_body,
     classify_endpoint,
 )
@@ -101,11 +99,11 @@ class SpaOpenWebUIHandler(BaseHTTPRequestHandler):
 
 
 class SpaLangflowHandler(BaseHTTPRequestHandler):
-    """Simulates Langflow/Gradio-style UI with real /api/v1/flows JSON."""
+    """Simulates Langflow-style UI with JS-declared API paths."""
 
     SHELL = (
         "<!DOCTYPE html><html><head><title>Langflow</title></head>"
-        "<body>langflow</body></html>"
+        "<body>langflow<script src='/assets/index.js'></script></body></html>"
     )
 
     def _html(self):
@@ -126,6 +124,17 @@ class SpaLangflowHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         path = self.path.split("?")[0]
+        if path.startswith("/assets/"):
+            body = (
+                b'fetch("/api/v1/flows"); fetch("/api/v1/run"); '
+                b'fetch("/api/v1/components");'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/v1/flows":
             self._json(200, {"flows": [{"id": "1", "name": "demo"}]})
             return
@@ -249,14 +258,13 @@ def test_classify_endpoint_segment_boundaries():
     assert agents.endpoint_type == "agentic"
 
 
-def test_universal_seed_paths_cover_common_surfaces():
-    ranked = {p for p, _ in SEED_ENDPOINT_RANKING}
-    for path in (
-        "/api/chat", "/api/v1/prediction", "/api/v1/run",
-        "/api/v1/flows", "/v1/chat/completions", "/run/predict",
-    ):
-        assert path in ranked
-    assert UNIVERSAL_INJECTION_PATHS
+def test_discovery_extracts_js_routes_without_catalog():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    paths = agent._extract_api_paths_from_js(
+        'const WEBUI_NAME="x"; fetch("/api/chat"); fetch("/api/models");'
+    )
+    assert "/api/chat" in paths
+    assert "/api/models" in paths
 
 
 # ---------------------------------------------------------------------------
@@ -304,15 +312,19 @@ def test_infra_select_paths_spa_avoids_k8s():
 # Unit: vuln tester universal fallbacks
 # ---------------------------------------------------------------------------
 
-def test_vuln_universal_endpoint_fallback():
+def test_vuln_uses_discovered_paths_only():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
-    eps = t._build_endpoint_list([], [], "http://localhost:3100", {})
-    paths = {e.split("://", 1)[-1].split("/", 1)[-1] and
-             "/" + e.split("://", 1)[-1].split("/", 1)[-1] for e in eps}
-    # Simpler: check path suffixes
+    eps = t._build_endpoint_list(
+        [],
+        [],
+        "http://localhost:3100",
+        {"discovered_paths": ["/api/v1/prediction", "/api/v1/run", "/health"]},
+    )
     path_list = [e[len("http://localhost:3100"):] for e in eps]
-    assert "/v1/chat/completions" in path_list or "/api/chat" in path_list
     assert "/api/v1/prediction" in path_list
+    assert "/api/v1/run" in path_list
+    # Catalog spray must not invent paths the app never exposed.
+    assert "/v1/chat/completions" not in path_list
 
 
 def test_normalize_derives_live_surface_from_endpoints():

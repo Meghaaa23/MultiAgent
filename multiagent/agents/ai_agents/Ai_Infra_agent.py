@@ -330,13 +330,15 @@ class AIInfraAgent:
         if any(p in confirmed_paths for p in ["/v2/models", "/v2/health/ready"]):
             paths_to_probe += TRITON_PATHS
 
-        # Always include confirmed fingerprint endpoints + a small universal set.
+        # Always include confirmed fingerprint endpoints.
         paths_to_probe += confirmed_paths
-        paths_to_probe += ["/health", "/openapi.json", "/v1/models", "/v1/chat/completions"]
 
         # Avoid spraying K8s/Ray/management probes onto SPA frontends — massive FP source.
         if not catch_all:
-            paths_to_probe += UNIVERSAL_PATHS + MANAGEMENT_PATHS
+            # Only expand management/K8s when already confirmed on this host.
+            for p in MANAGEMENT_PATHS:
+                if p in confirmed_paths:
+                    paths_to_probe.append(p)
             if any(p.startswith("/api/v1/namespaces") or p == "/apis" for p in confirmed_paths):
                 paths_to_probe += KUBERNETES_PATHS
         else:

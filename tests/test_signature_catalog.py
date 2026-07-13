@@ -1,31 +1,22 @@
-"""Universal signature packs — no product naming catalogs."""
+"""Discovery-first detection — no endpoint path catalogs."""
 from multiagent.agents.ai_agents.ai_evidence_scoring import Detection, score_evidence
 from multiagent.agents.ai_agents.ai_fingerprint import (
+    AIFingerprintAgent,
+    GRAPHQL_BOOTSTRAP_PATHS,
     PROTOCOL_SIGNATURES,
-    SEED_ENDPOINT_RANKING,
-    UNIVERSAL_INJECTION_PATHS,
-    UNIVERSAL_OPENAI_PATHS,
+    SPEC_BOOTSTRAP_PATHS,
 )
-from multiagent.agents.ai_agents.signature_loader import (
-    get_signature_catalog,
-    load_signature_catalog,
-)
+from multiagent.agents.ai_agents.signature_loader import load_signature_catalog
 
 
-def test_catalog_loads_universal_only():
+def test_catalog_body_patterns_only_for_protocol_labels():
     cat = load_signature_catalog()
     assert len(cat.universal) >= 4
-    assert not hasattr(cat, "naming") or not getattr(cat, "naming", None)
-    ids = {s.id for s in cat.universal}
-    assert "openai_compatible" in ids
-    assert "chat_inference" in ids
-    assert not (cat.__dict__.get("naming"))
+    assert "OpenAI-compatible" in PROTOCOL_SIGNATURES
 
 
-def test_no_naming_directory_required():
-    cat = get_signature_catalog()
+def test_no_product_brand_labels():
     labels = set(PROTOCOL_SIGNATURES)
-    # Protocol labels only — never product brands.
     for banned in (
         "Open WebUI", "LibreChat", "Flowise", "Langflow",
         "Gradio", "Ollama", "Dify", "AnythingLLM",
@@ -33,28 +24,34 @@ def test_no_naming_directory_required():
         assert banned not in labels
 
 
-def test_openai_compatible_always_probe_paths():
-    paths = {p for p, _ in UNIVERSAL_OPENAI_PATHS}
-    assert "/v1/chat/completions" in paths
-    assert "/v1/models" in paths
-    assert "/api/chat/completions" in paths
-    assert "/api/v1/prediction" not in paths
+def test_spec_bootstrap_is_meta_only():
+    """Bootstrap finds API maps — not AI chat endpoints."""
+    assert "/openapi.json" in SPEC_BOOTSTRAP_PATHS
+    assert "/v1/chat/completions" not in SPEC_BOOTSTRAP_PATHS
+    assert "/api/chat" not in SPEC_BOOTSTRAP_PATHS
+    assert "/graphql" in GRAPHQL_BOOTSTRAP_PATHS
 
 
-def test_seed_ranking_covers_chat_and_schema_surfaces():
-    ranked = {p for p, _ in SEED_ENDPOINT_RANKING}
-    for path in (
-        "/v1/chat/completions", "/api/chat", "/api/v1/prediction",
-        "/api/v1/run", "/api/v1/flows", "/config", "/api/ask",
-    ):
-        assert path in ranked
-    ranked_list = [p for p, _ in SEED_ENDPOINT_RANKING]
-    assert ranked_list.index("/v1/chat/completions") < ranked_list.index("/api/chat")
+def test_js_path_extraction_finds_app_routes():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    paths = agent._extract_api_paths_from_js(
+        'fetch("/api/chat"); axios.get("/internal/llm/query"); '
+        'const x = "/assets/app.js";'
+    )
+    assert "/api/chat" in paths
+    assert "/internal/llm/query" in paths
+    assert "/assets/app.js" not in paths
 
 
-def test_injection_paths_from_universal():
-    assert "/v1/chat/completions" in UNIVERSAL_INJECTION_PATHS
-    assert "/api/v1/prediction" in UNIVERSAL_INJECTION_PATHS
+def test_normalize_candidates_dedupes_and_caps():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    out = agent._normalize_candidate_paths([
+        "/api/chat", "http://x/api/chat", "/api/chat?x=1",
+        "/v1/chat/completions", "/logo.png",
+    ])
+    assert out.count("/api/chat") == 1
+    assert "/logo.png" not in out
+    assert "/v1/chat/completions" in out
 
 
 def test_unknown_openai_surface_confirmed_without_product_name():
