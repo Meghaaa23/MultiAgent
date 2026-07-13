@@ -12,19 +12,27 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 try:
-    from multiagent.agents.ai_agents.ai_evidence_scoring import (
+    from .ai_evidence_scoring import (
         classify_evidence,
         evidence_weight,
         has_live_surface_evidence,
         score_evidence,
     )
-except ImportError:
-    from ai_evidence_scoring import (
-        classify_evidence,
-        evidence_weight,
-        has_live_surface_evidence,
-        score_evidence,
-    )
+except ImportError:  # script / flat import (e.g. dev_ai_scan.py)
+    try:
+        from multiagent.agents.ai_agents.ai_evidence_scoring import (
+            classify_evidence,
+            evidence_weight,
+            has_live_surface_evidence,
+            score_evidence,
+        )
+    except ImportError:
+        from ai_evidence_scoring import (
+            classify_evidence,
+            evidence_weight,
+            has_live_surface_evidence,
+            score_evidence,
+        )
 
 logger = logging.getLogger(__name__)
 
