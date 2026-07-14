@@ -745,3 +745,137 @@ def test_js_path_evidence_requires_inference_shape():
     )
     assert any(_is_inference_path(p) for p in mixed)
     assert "/api/chat" in mixed
+
+
+def test_inference_path_segment_not_substring():
+    """Shape gate: segment match only — no endpoint catalog, no substring FPs."""
+    from multiagent.agents.ai_agents.ai_fingerprint import (
+        _is_inference_path,
+        _looks_non_api_document,
+    )
+
+    # App-discovered inference handlers (must keep working).
+    assert _is_inference_path("/api/chat")
+    assert _is_inference_path("/api/messages")
+    assert _is_inference_path("/v1/chat/completions")
+    assert _is_inference_path("/api/v1/run")
+    assert _is_inference_path("/api/v1/prediction")
+    assert _is_inference_path("/ollama/api/generate")
+
+    # Marketing / SEO substrings must not count (Picsart-style).
+    assert not _is_inference_path("/llms.txt")
+    assert not _is_inference_path("/compare-models/kling-vs-runway/")
+    assert not _is_inference_path("/compare-models/runway-gen-4-vs-veo-3/")
+    assert not _is_inference_path("/ai-models/runway-gen-4/")
+    assert not _is_inference_path("/fonts/grunge/")
+    assert not _is_inference_path("/features/")
+    assert not _is_inference_path("/create/")
+
+    assert _looks_non_api_document("/llms.txt")
+    assert _looks_non_api_document("/sitemap.xml")
+    assert not _looks_non_api_document("/api/chat")
+
+
+def test_chunked_transfer_alone_does_not_confirm():
+    """Bare Transfer-Encoding: chunked must not create live-surface / confirm."""
+    from multiagent.agents.ai_agents.ai_evidence_scoring import (
+        Detection,
+        classify_evidence,
+        EvidenceClass,
+        score_evidence,
+    )
+
+    assert classify_evidence("sse_chunked_transfer") == EvidenceClass.PASSIVE_HINT
+    result = score_evidence([
+        "sse_chunked_transfer",
+        "robots_ai_path",
+        "page_title_ai",
+    ])
+    assert result.detection != Detection.CONFIRMED
+    assert result.has_live_surface is False
+    assert result.is_ai is False
+
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    r = agent._evaluate_probe_response(
+        "http://x/llms.txt", "/llms.txt", "schema",
+        200,
+        {"Content-Type": "text/plain", "Transfer-Encoding": "chunked"},
+        "User-Agent rules for LLMs",
+        [],
+    )
+    keys = [e.key for e in r.get("evidence", [])]
+    assert "sse_chunked_transfer" not in keys
+    assert r.get("endpoints", []) == []
+
+
+@pytest.mark.asyncio
+async def test_picsart_style_marketing_not_confirmed():
+    """Chunked /llms.txt + runway sitemap noise must not confirm AI."""
+    port = _free_port()
+
+    class PicsartStyleHandler(BaseHTTPRequestHandler):
+        PAGE = (
+            "<!DOCTYPE html><html><head>"
+            "<title>Picsart: The AI Creative Platform</title>"
+            "<meta name='description' content='generative AI tools'>"
+            "</head><body><div aria-label='AI Image menu'>x</div></body></html>"
+        )
+
+        def _send(self, status, body, ctype):
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Transfer-Encoding", "chunked")
+            # Avoid real chunk framing complexity — body as Content-Length instead
+            # when not using chunk encoder; header alone is what we used to mis-key on.
+            data = body if isinstance(body, bytes) else body.encode()
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?")[0]
+            if path == "/robots.txt":
+                body = (
+                    "User-agent: *\n"
+                    "Disallow: /llms.txt\n"
+                    "Sitemap: http://127.0.0.1:%d/sitemap.xml\n" % self.server.server_address[1]
+                )
+                return self._send(200, body, "text/plain")
+            if path == "/sitemap.xml":
+                p = self.server.server_address[1]
+                body = (
+                    '<?xml version="1.0"?><urlset>'
+                    f"<url><loc>http://127.0.0.1:{p}/compare-models/kling-vs-runway/</loc></url>"
+                    f"<url><loc>http://127.0.0.1:{p}/fonts/grunge/</loc></url>"
+                    f"<url><loc>http://127.0.0.1:{p}/llms.txt</loc></url>"
+                    "</urlset>"
+                )
+                return self._send(200, body, "application/xml")
+            if path == "/llms.txt":
+                return self._send(200, "# LLMs\n", "text/plain")
+            if path in ("/", "/index.html"):
+                return self._send(200, self.PAGE, "text/html")
+            return self._send(404, "no", "text/plain")
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            return self._send(404, "no", "text/plain")
+
+        def log_message(self, *args):
+            pass
+
+    srv = _run_server(PicsartStyleHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["has_live_surface"] is False
+        assert result["is_ai_powered"] is False
+        assert result["detection"] != "confirmed"
+        assert result["ml_endpoints"] == []
+        keys = {e.get("key") for e in (result.get("evidence_items") or [])
+                if isinstance(e, dict)}
+        assert "sse_chunked_transfer" not in keys
+        assert "robots_ai_path" not in keys  # /llms.txt not inference-shaped
+    finally:
+        srv.shutdown()

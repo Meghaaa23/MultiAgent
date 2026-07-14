@@ -189,13 +189,44 @@ def _is_soft_404_json(body: str) -> bool:
     return "not found" in msg and len(data) <= 3
 
 
+def _looks_non_api_document(path: str) -> bool:
+    """True for static/doc file shapes — never inference APIs.
+
+    Shape filter only (extensions / well-known doc basenames). Does not
+    invent or prioritize application endpoints to probe.
+    """
+    pl = (path or "").lower().split("?")[0].split("#")[0]
+    if not pl:
+        return True
+    if pl.endswith((
+        ".txt", ".xml", ".html", ".htm", ".md", ".pdf", ".csv",
+        ".css", ".js", ".map", ".ico", ".png", ".jpg", ".jpeg", ".svg", ".webp",
+    )):
+        return True
+    return False
+
+
+# Path *segments* that look like inference handlers. Exact segment match only —
+# never substring (`run` must not match `runway` / `grunge`).
+_INFERENCE_SEGMENTS = frozenset({
+    "chat", "completion", "completions",
+    "generate", "predict", "prediction",
+    "ask", "message", "messages",
+    "run", "invoke", "llm", "inference",
+    "embedding", "embeddings",
+})
+
+
 def _is_inference_path(path: str) -> bool:
-    """Soft prioritization for already-discovered paths — never invents URLs."""
-    p = (path or "").lower()
-    return any(tok in p for tok in (
-        "completion", "chat", "generate", "predict", "ask", "message",
-        "run", "invoke", "llm", "inference",
-    ))
+    """True when a discovered path's segments look like an inference handler.
+
+    Does not invent URLs — only classifies paths already found on the app.
+    """
+    p = (path or "").lower().split("?")[0].split("#")[0]
+    if not p or _looks_non_api_document(p):
+        return False
+    segments = [s for s in p.strip("/").split("/") if s]
+    return any(seg in _INFERENCE_SEGMENTS for seg in segments)
 
 
 def _probe_post_body(
@@ -1476,10 +1507,8 @@ class AIFingerprintAgent:
                     f"SSE at {path}", "probe", endpoint=url))
                 endpoints.append(url)
 
-            if "chunked" in headers_low.get("transfer-encoding", ""):
-                evidence.append(EvidenceItem.make(
-                    "sse_chunked_transfer",
-                    f"Chunked transfer at {path}", "probe", endpoint=url))
+            # NOTE: bare Transfer-Encoding: chunked is CDN/static noise and must
+            # NOT emit live-surface evidence (Picsart /llms.txt false confirm).
 
             # Schema/config endpoints with AI-shaped JSON only.
             if (category == "schema" and ai_shaped and url not in endpoints):

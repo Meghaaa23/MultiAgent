@@ -39,8 +39,10 @@ _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
     (re.compile(r"_endpoint_(?:200|401_403|405)$"), EvidenceClass.LIVE_SURFACE),
     (re.compile(r"_ai_(?:endpoint|field)$"), EvidenceClass.LIVE_SURFACE),
     (re.compile(
-        r"^(?:sse_streaming_header|sse_chunked_transfer|ai_response_header)$"
+        r"^(?:sse_streaming_header|ai_response_header)$"
     ), EvidenceClass.LIVE_SURFACE),
+    # Chunked transfer alone is not AI live surface (kept as hint if ever emitted).
+    (re.compile(r"^sse_chunked_transfer$"), EvidenceClass.PASSIVE_HINT),
     # Product/framework headers and cookies are brand signals only —
     # they must not escalate detection without a live API/behavior surface.
     (re.compile(r"^framework_header$"), EvidenceClass.BRAND),
