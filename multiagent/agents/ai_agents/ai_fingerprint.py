@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import json
-import html
+import html as html_lib
 import hashlib
 import asyncio
 import logging
@@ -156,7 +156,7 @@ def _is_meaningful_ai_meta_content(content: str) -> bool:
     Rejects og:url / og:image style values where 'ai' only appears in a
     hostname (e.g. https://wink.ai/logo.png).
     """
-    text = html.unescape((content or "").strip())
+    text = html_lib.unescape((content or "").strip())
     if len(text) < 8:
         return False
     low = text.lower()
@@ -923,7 +923,7 @@ class AIFingerprintAgent:
 
         m_title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
         if m_title:
-            page_title = re.sub(r"\s+", " ", html.unescape(m_title.group(1))).strip()
+            page_title = re.sub(r"\s+", " ", html_lib.unescape(m_title.group(1))).strip()
             title_low = page_title.lower()
             if any(kw in title_low for kw in AI_TITLE_KEYWORDS):
                 evidence.append(EvidenceItem.make(
