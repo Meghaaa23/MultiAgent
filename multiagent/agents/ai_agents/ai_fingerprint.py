@@ -593,8 +593,11 @@ class AIFingerprintAgent:
         if isinstance(js_r, dict):
             js_api_paths = js_r.get("api_paths", [])
             raw_html_js  = js_r.get("raw_js", "")
-            discovered_paths.extend(js_api_paths)
-            candidates.extend(js_api_paths)
+            # Report every JS-discovered path; only probe inference-shaped ones.
+            for path in js_api_paths:
+                discovered_paths.append(path)
+                if _is_inference_path(path):
+                    candidates.append(path)
 
         if isinstance(passive_r, dict):
             # Always record discovered paths for reporting; only probe
@@ -617,12 +620,12 @@ class AIFingerprintAgent:
         surface_blob = "\n".join([
             page_html or "",
             raw_html_js or "",
-            "\n".join(candidates),
+            "\n".join(discovered_paths),
         ])
         spec_refs = self._extract_spec_refs(surface_blob)
         graphql_refs = self._extract_graphql_refs(surface_blob)
-        # Also treat discovered candidates that look like specs/graphql.
-        for path in candidates:
+        # Also treat discovered paths that look like specs/graphql.
+        for path in discovered_paths:
             pl = path.lower()
             if any(x in pl for x in ("openapi", "swagger", "api-docs")):
                 spec_refs.append(path)
@@ -744,7 +747,17 @@ class AIFingerprintAgent:
         evidence_keys = [ev.key for ev in all_evidence]
         detection = score_evidence(evidence_keys)
         confidence = detection.confidence
-        ai_brand_only = detection.brand_only and not has_live_surface
+        classes = detection.classes or {}
+        # Brand-only: marketing/brand signals with no live surface and no
+        # structural/hint AI discovery (junk robots/JS hints are no longer emitted).
+        ai_brand_only = (
+            not has_live_surface
+            and bool(classes.get("brand"))
+            and not classes.get("behavioral")
+            and not classes.get("live_surface")
+            and not classes.get("passive_structural")
+            and not classes.get("passive_hint")
+        )
         is_ai = has_live_surface
 
         atlas: List[str] = []
@@ -961,7 +974,11 @@ class AIFingerprintAgent:
             raw_js_combined += js[:50_000]
 
             if verbose:
-                print(f"    [js] {url[-60:]} ({len(js)} bytes)")
+                if len(url) > 72:
+                    label = url[:32] + "…" + url[-32:]
+                else:
+                    label = url
+                print(f"    [js] {label} ({len(js)} bytes)")
 
             for sdk_name, patterns in ML_LIBRARY_JS_SIGNATURES.items():
                 for pat in patterns:
@@ -974,10 +991,12 @@ class AIFingerprintAgent:
 
             extracted = self._extract_api_paths_from_js(js)
             api_paths.extend(extracted)
-            if extracted:
+            # Hint evidence only when at least one path is inference-shaped.
+            ai_shaped = [p for p in extracted if _is_inference_path(p)]
+            if ai_shaped:
                 evidence.append(EvidenceItem.make(
                     "js_api_path_extracted",
-                    f"{len(extracted)} AI API path(s) in JS bundle",
+                    f"{len(ai_shaped)} inference-shaped path(s) in JS bundle",
                     "js_bundle", endpoint=url))
 
             for m in re.finditer(
@@ -1317,11 +1336,15 @@ class AIFingerprintAgent:
                     if line.lower().startswith("disallow:") or line.lower().startswith("allow:"):
                         path = line.split(":", 1)[1].strip()
                         if path and path != "/" and self._looks_api_candidate(path):
-                            evidence.append(EvidenceItem.make(
-                                "robots_ai_path",
-                                f"robots.txt {line[:60]}",
-                                "passive"))
-                            paths.append(self._to_path(path))
+                            norm = self._to_path(path)
+                            paths.append(norm)
+                            # Hint evidence only for inference-shaped paths
+                            # (/404, /features/, etc. are discovery noise).
+                            if _is_inference_path(norm):
+                                evidence.append(EvidenceItem.make(
+                                    "robots_ai_path",
+                                    f"robots.txt AI-shaped path: {norm[:60]}",
+                                    "passive"))
                     if line.lower().startswith("sitemap:"):
                         sitemap_url = line.split(":", 1)[1].strip()
                         try:
@@ -1331,11 +1354,13 @@ class AIFingerprintAgent:
                                 url = m.group(1).strip()
                                 parsed = urllib.parse.urlparse(url)
                                 if parsed.path and self._looks_api_candidate(parsed.path):
-                                    evidence.append(EvidenceItem.make(
-                                        "sitemap_ai_path",
-                                        f"sitemap: {parsed.path[:60]}",
-                                        "passive"))
-                                    paths.append(self._to_path(parsed.path))
+                                    norm = self._to_path(parsed.path)
+                                    paths.append(norm)
+                                    if _is_inference_path(norm):
+                                        evidence.append(EvidenceItem.make(
+                                            "sitemap_ai_path",
+                                            f"sitemap AI-shaped path: {norm[:60]}",
+                                            "passive"))
                         except Exception:
                             pass
         except Exception:

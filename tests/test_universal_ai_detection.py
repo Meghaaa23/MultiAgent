@@ -654,11 +654,15 @@ async def test_marketing_site_status_codes_do_not_confirm_ai():
         assert result["detection"] in ("possible", "probable")
         assert result["detection"] != "confirmed"
         assert result["ml_endpoints"] == []
+        # Junk robots/marketing paths must not emit AI hint evidence.
         keys = {e.get("key") for e in (result.get("evidence_items") or [])
                 if isinstance(e, dict)}
-        # No live-surface status keys on marketing paths.
         assert "ml_endpoint_405" not in keys
         assert "ml_endpoint_401_403" not in keys
+        assert "robots_ai_path" not in keys
+        assert "sitemap_ai_path" not in keys
+        # Brand/meta only → brand-only marketing site.
+        assert result["ai_brand_only"] is True
     finally:
         srv.shutdown()
 
@@ -697,3 +701,47 @@ def test_normalize_ignores_non_inference_endpoints():
     })
     assert fp["has_live_surface"] is False
     assert fp["is_ai_powered"] is False
+
+
+@pytest.mark.asyncio
+async def test_robots_junk_path_not_hint_evidence():
+    """Disallow: /404 must not become robots_ai_path; /api/chat may."""
+    from multiagent.agents.ai_agents.ai_fingerprint import _is_inference_path
+
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    body = (
+        "User-agent: *\n"
+        "Disallow: /404\n"
+        "Disallow: /features/\n"
+        "Disallow: /api/chat\n"
+    )
+    agent._fetch = lambda url, **kw: (
+        200, {}, body if str(url).endswith("robots.txt") else ""
+    )
+    result = await agent._fetch_robots_sitemap("http://x", False)
+    keys = [e.key for e in result["evidence"]]
+    assert keys == ["robots_ai_path"]
+    assert any("/api/chat" in e.detail for e in result["evidence"])
+    assert not any("/404" in e.detail for e in result["evidence"])
+    assert not any("/features" in e.detail for e in result["evidence"])
+    assert "/404" in result["paths"]
+    assert "/features/" in result["paths"] or "/features" in result["paths"]
+    assert "/api/chat" in result["paths"]
+    assert _is_inference_path("/api/chat")
+
+
+def test_js_path_evidence_requires_inference_shape():
+    from multiagent.agents.ai_agents.ai_fingerprint import _is_inference_path
+
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    paths = agent._extract_api_paths_from_js(
+        'fetch("/pricing"); fetch("/features/"); fetch("/about");'
+    )
+    assert paths
+    assert not any(_is_inference_path(p) for p in paths)
+
+    mixed = agent._extract_api_paths_from_js(
+        'fetch("/pricing"); fetch("/api/chat"); fetch("/v1/chat/completions");'
+    )
+    assert any(_is_inference_path(p) for p in mixed)
+    assert "/api/chat" in mixed

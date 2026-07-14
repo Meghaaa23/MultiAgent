@@ -32,9 +32,9 @@ async def main():
     fp_agent = AIFingerprintAgent(timeout=8)
     ai_fingerprint = await fp_agent.fingerprint(
         target_url           = target_url,
-        discovered_endpoints = [],   
-        page_html            = "",   
-        response_headers     = {},   
+        discovered_endpoints = [],
+        page_html            = "",
+        response_headers     = {},
         verbose              = True,
     )
     print("\n========== RAW FINGERPRINT ==========")
@@ -48,8 +48,9 @@ async def main():
             print(f"{k}: {v}")
 
     print(f"\n  AI detected : {ai_fingerprint['is_ai_powered']} [{ai_fingerprint['confidence']}]")
+    print(f"  Live surface: {ai_fingerprint.get('has_live_surface')}")
+    print(f"  Brand only  : {ai_fingerprint.get('ai_brand_only')}")
     print(f"  ML endpoints: {ai_fingerprint['ml_endpoints']}")
-    #print(f"  Evidence    : {ai_fingerprint['evidence']}")
     print("\nEvidence:")
 
     for item in ai_fingerprint["evidence_items"]:
@@ -62,12 +63,20 @@ async def main():
     if args.agent == "fingerprint":
         return
 
-   
+    has_live = bool(ai_fingerprint.get("has_live_surface"))
+    if not has_live and args.agent in ("infra", "vuln", "all"):
+        print(
+            "\n  No live AI surface — skipping infra / vuln escalation "
+            "(use --agent avid if you still want AVID on brand-only)."
+        )
+        if args.agent != "avid":
+            return
+
     if args.agent in ("infra", "all"):
         infra_agent = AIInfraAgent(openai_client=get_openai_client(), timeout=15)
         infra_result = await infra_agent.scan(
             target_url = target_url,
-            ai_stack   = ai_fingerprint,  
+            ai_stack   = ai_fingerprint,
         )
         print(f"\n  Infra threats: {len(infra_result.threats)}")
         for t in infra_result.threats:
@@ -78,7 +87,6 @@ async def main():
                 ai_fingerprint, infra_result.exposed_endpoints)
             print(f"  Merged exposed endpoints: {infra_result.exposed_endpoints}")
 
-    
     if args.agent in ("vuln", "all"):
         vuln_agent = AIVulnerabilityTester(timeout=10)
         vuln_result = await vuln_agent.test_all(
@@ -89,7 +97,6 @@ async def main():
         print(f"\n  Confirmed: {len(vuln_result['confirmed_ai_vulns'])}")
         print(f"  Potential: {len(vuln_result['potential_ai_vulns'])}")
 
-  
     if args.agent in ("avid", "all"):
         ml_stack = ai_fingerprint.get("ml_libraries", [])
         avid_agent = AVIDLookupAgent(timeout=15)
