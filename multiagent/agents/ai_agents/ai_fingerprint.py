@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import html
 import hashlib
 import asyncio
 import logging
@@ -147,6 +148,38 @@ _GRAPHQL_REF_RE = re.compile(
 def _looks_html_body(ct: str, body: str) -> bool:
     b = (body or "").strip().lower()
     return "html" in (ct or "").lower() or b.startswith(("<!doctype", "<html"))
+
+
+def _is_meaningful_ai_meta_content(content: str) -> bool:
+    """True when meta content is real AI product copy, not a URL/domain hit.
+
+    Rejects og:url / og:image style values where 'ai' only appears in a
+    hostname (e.g. https://wink.ai/logo.png).
+    """
+    text = html.unescape((content or "").strip())
+    if len(text) < 8:
+        return False
+    low = text.lower()
+    # Pure URL / asset meta — never brand evidence.
+    if re.match(r"^https?://", low):
+        return False
+    if any(low.endswith(ext) for ext in (
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".js", ".css",
+    )):
+        return False
+    # Strip URLs and *.ai hostnames so domain TLD/brand hosts don't count.
+    scrubbed = re.sub(r"https?://\S+", " ", low)
+    scrubbed = re.sub(r"\b[\w-]+\.ai\b", " ", scrubbed)
+    if re.search(
+        r"(?<![a-z0-9])(ai|llm|gpt|chatbot|assistant|inference|embedding|"
+        r"language\s+model)(?![a-z0-9])",
+        scrubbed,
+        re.I,
+    ):
+        return True
+    if re.search(r"\bai[-/]", scrubbed) or re.search(r"[-/]ai\b", scrubbed):
+        return True
+    return False
 
 
 def _looks_ai_api_json(body: str) -> bool:
@@ -890,7 +923,7 @@ class AIFingerprintAgent:
 
         m_title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
         if m_title:
-            page_title = re.sub(r"\s+", " ", m_title.group(1)).strip()
+            page_title = re.sub(r"\s+", " ", html.unescape(m_title.group(1))).strip()
             title_low = page_title.lower()
             if any(kw in title_low for kw in AI_TITLE_KEYWORDS):
                 evidence.append(EvidenceItem.make(
@@ -923,8 +956,11 @@ class AIFingerprintAgent:
             r'inference|embedding|language model)[^"\']*)["\']',
             html, re.I,
         ):
+            content = m.group(1)
+            if not _is_meaningful_ai_meta_content(content):
+                continue
             evidence.append(EvidenceItem.make(
-                "meta_ai_tag", f"AI meta tag: {m.group(1)[:60]}", "html"))
+                "meta_ai_tag", f"AI meta tag: {content[:60]}", "html"))
 
         for pattern in AI_DOM_PATTERNS:
             m = re.search(pattern, html, re.I)

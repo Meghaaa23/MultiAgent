@@ -176,6 +176,41 @@ def test_html_generic_ai_title():
     assert any(e.key == "page_title_ai" for e in ev)
 
 
+def test_meta_ai_tag_ignores_url_and_domain_noise():
+    from multiagent.agents.ai_agents.ai_fingerprint import _is_meaningful_ai_meta_content
+
+    assert not _is_meaningful_ai_meta_content("https://wink.ai")
+    assert not _is_meaningful_ai_meta_content("https://wink.ai/logo-big.png")
+    assert not _is_meaningful_ai_meta_content("https://remini.ai/og.png")
+    assert _is_meaningful_ai_meta_content(
+        "Wink AI video & image enhancer sharpens blurry clips"
+    )
+    assert _is_meaningful_ai_meta_content(
+        "wink ai, wink app, ai video editor, video enhancer"
+    )
+
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    html_doc = """
+    <html><head>
+      <title>Wink: AI Video and Image Enhancer &amp; Editor</title>
+      <meta content="https://wink.ai">
+      <meta content="https://wink.ai/logo-big.png">
+      <meta content="Wink AI video enhancer sharpens blurry clips">
+      <meta content="wink ai, ai video editor">
+    </head><body></body></html>
+    """
+    _, ev, _, title = agent._analyse_html(html_doc, "https://wink.ai", {})
+    assert "&" in title and "&amp;" not in title
+    meta = [e for e in ev if e.key == "meta_ai_tag"]
+    details = " ".join(e.detail for e in meta)
+    assert "logo-big.png" not in details
+    assert "https://wink.ai\"" not in details and not any(
+        e.detail.strip().endswith("https://wink.ai") for e in meta
+    )
+    assert any("video enhancer" in e.detail.lower() or "video editor" in e.detail.lower()
+               for e in meta)
+
+
 def test_html_no_product_brand_matching():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     _, ev, _, title = agent._analyse_html(
