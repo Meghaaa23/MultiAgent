@@ -142,6 +142,31 @@ ML_LIBRARY_JS_SIGNATURES: Dict[str, List[str]] = {
 
 SPA_CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
 
+# JS chunks that almost never carry app API route strings (LibreChat/Vite/Rolldown).
+_JS_VENDOR_SKIP_TOKENS = (
+    "mermaid", "codemirror", "monaco", "highlight", "prism",
+    "katex", "mathjax", "animations", "framer", "lottie",
+    "react-vtree", "query-devtools", "devtools",
+    "fontawesome", "tippy", "leaflet", "mapbox", "xlsx",
+    "pdfjs", "pdf.worker", "emoji-", "driver", "sortable",
+    "recharts", "chart.js", "echarts", "quill", "tinymce",
+)
+
+# Filename tokens suggesting app/data/API code rather than UI chrome.
+_JS_API_PRIORITY_TOKENS = (
+    "data-provider", "data-service", "api-endpoint", "endpoints",
+    "http-client", "request", "messages", "message", "chat",
+    "agents", "agent", "conversation", "convo", "librechat",
+    "openapi", "graphql", "inference", "completion",
+    "provider", "service", "queries", "mutations", "hooks",
+    "api.", "api-",
+)
+
+_JS_LOW_PRIORITY_TOKENS = (
+    "runtime", "registersw", "service-worker", "polyfill",
+    "i18n", "locale", "lang-", "icons", "svg",
+)
+
 AI_TITLE_KEYWORDS = [
     "ai", "llm", "gpt", "chat", "assistant", "bot", "inference", "embedding",
 ]
@@ -572,7 +597,7 @@ class AIFingerprintAgent:
     def __init__(
         self,
         timeout: int = 8,
-        max_js_bundles: int = 12,
+        max_js_bundles: int = 20,
         max_js_bundle_bytes: int = 1_500_000,
         run_behavioral_probes: bool = True,
         probe_prompt: str = "In one sentence, describe the ocean.",
@@ -741,7 +766,13 @@ class AIFingerprintAgent:
         if verbose:
             print(f"    [discover] {len(candidates)} candidate path(s) from app surface")
             if not candidates:
-                sample = list(dict.fromkeys(discovered_paths))[:12]
+                uniq = list(dict.fromkeys(discovered_paths))
+                api_like = [
+                    p for p in uniq
+                    if p.startswith("/api/") or p.startswith("/v1/")
+                    or p.startswith("/v2/") or "/ollama/" in p
+                ]
+                sample = (api_like or uniq)[:12]
                 if sample:
                     print(
                         "    [discover] non-probe paths seen: "
@@ -1044,7 +1075,11 @@ class AIFingerprintAgent:
         loop = asyncio.get_event_loop()
         queue: List[str] = list(dict.fromkeys(js_urls))
         seen_urls: Set[str] = set()
+        skipped_vendor = 0
         processed = 0
+        # Soft budget; extend when still hunting inference-shaped /api paths.
+        budget = self.max_js_bundles
+        extended_budget = max(self.max_js_bundles * 2, 24)
 
         async def fetch_js(url: str) -> Tuple[str, str]:
             try:
@@ -1054,14 +1089,41 @@ class AIFingerprintAgent:
             except Exception:
                 return url, ""
 
-        while queue and processed < self.max_js_bundles:
-            batch = []
-            while queue and len(batch) < 4 and processed + len(batch) < self.max_js_bundles:
+        def _has_inference() -> bool:
+            return any(_is_inference_path(p) for p in api_paths)
+
+        def _refill_batch() -> List[str]:
+            nonlocal skipped_vendor, queue
+            # Re-rank every round so API-likely chunks beat mermaid/vendor.
+            ranked: List[Tuple[int, str]] = []
+            kept: List[str] = []
+            for u in queue:
+                if u in seen_urls:
+                    continue
+                pri = self._js_chunk_priority(u)
+                if pri < 0:
+                    seen_urls.add(u)
+                    skipped_vendor += 1
+                    continue
+                ranked.append((pri, u))
+            ranked.sort(key=lambda t: t[0], reverse=True)
+            queue = [u for _, u in ranked]
+            batch: List[str] = []
+            while queue and len(batch) < 4 and processed + len(batch) < budget:
                 u = queue.pop(0)
                 if u in seen_urls:
                     continue
                 seen_urls.add(u)
                 batch.append(u)
+            return batch
+
+        while True:
+            if processed >= budget:
+                if _has_inference() or budget >= extended_budget:
+                    break
+                # Still no inference routes — spend remaining budget on next-best chunks.
+                budget = min(extended_budget, budget + 8)
+            batch = _refill_batch()
             if not batch:
                 break
 
@@ -1069,7 +1131,7 @@ class AIFingerprintAgent:
                 *[fetch_js(u) for u in batch], return_exceptions=True)
 
             for item in bundles:
-                if processed >= self.max_js_bundles:
+                if processed >= budget:
                     break
                 if isinstance(item, Exception) or not isinstance(item, tuple):
                     continue
@@ -1143,10 +1205,18 @@ class AIFingerprintAgent:
                     if chunk not in seen_urls:
                         queue.append(chunk)
 
+            if _has_inference() and processed >= min(6, self.max_js_bundles):
+                # Found inference routes; stop burning budget on UI chrome.
+                break
+
         if verbose and processed:
+            api_like = [p for p in dict.fromkeys(api_paths) if "/api/" in p or "/v1/" in p]
+            infer = [p for p in api_like if _is_inference_path(p)]
             print(
                 f"    [js] analysed {processed} bundle(s); "
-                f"{len(list(dict.fromkeys(api_paths)))} path(s) extracted"
+                f"{len(list(dict.fromkeys(api_paths)))} path(s) extracted "
+                f"({len(api_like)} api-like, {len(infer)} inference); "
+                f"skipped {skipped_vendor} vendor chunk(s)"
             )
 
         return {
@@ -1155,6 +1225,29 @@ class AIFingerprintAgent:
             "frameworks": list(dict.fromkeys(frameworks)),
             "raw_js":    raw_js_combined,
         }
+
+    @staticmethod
+    def _js_chunk_priority(url: str) -> int:
+        """Higher = fetch sooner. Negative = skip (UI vendor chrome)."""
+        name = urllib.parse.urlparse(url or "").path.lower().rsplit("/", 1)[-1]
+        if not name:
+            return 0
+        if any(tok in name for tok in _JS_VENDOR_SKIP_TOKENS):
+            return -100
+        score = 0
+        if name.startswith("index.") or ".index." in name:
+            score += 80
+        for tok in _JS_API_PRIORITY_TOKENS:
+            if tok in name:
+                score += 50
+                break
+        if "vendor" in name:
+            score -= 30
+        for tok in _JS_LOW_PRIORITY_TOKENS:
+            if tok in name:
+                score -= 15
+                break
+        return score
 
     @staticmethod
     def _abs_url(base: str, src: str) -> str:

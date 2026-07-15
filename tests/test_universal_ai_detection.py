@@ -361,6 +361,27 @@ def test_js_chunk_url_extraction_follows_vite_assets():
     assert any("Messages.xyz.js" in c for c in chunks)
 
 
+def test_js_chunk_priority_skips_vendor_ui_and_prefers_api():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    assert agent._js_chunk_priority(
+        "http://localhost:3080/assets/mermaid.CpNRA-E5.js"
+    ) < 0
+    assert agent._js_chunk_priority(
+        "http://localhost:3080/assets/codemirror-core.DCeggAsc.js"
+    ) < 0
+    http_pri = agent._js_chunk_priority(
+        "http://localhost:3080/assets/http-client.D1qXypdn.js"
+    )
+    vendor_pri = agent._js_chunk_priority(
+        "http://localhost:3080/assets/vendor.DGyZakcu.js"
+    )
+    index_pri = agent._js_chunk_priority(
+        "http://localhost:3080/assets/index.BSLuV95c.js"
+    )
+    assert http_pri > vendor_pri
+    assert index_pri > http_pri
+
+
 # ---------------------------------------------------------------------------
 # Unit: infra classify / k8s
 # ---------------------------------------------------------------------------
@@ -851,6 +872,45 @@ async def test_follows_vite_chunk_for_librechat_api_paths():
         assert "/api/ask" in paths
         assert result["has_live_surface"] is True
         assert result["is_ai_powered"] is True
+    finally:
+        srv.shutdown()
+
+
+class LibreChatCrowdedChunkHandler(LibreChatChunkedBundleHandler):
+    """API chunk buried behind mermaid/vendor noise in the import graph."""
+
+    ENTRY = (
+        b'import("./assets/mermaid.BIG.js");'
+        b'import("./assets/vendor.BIG.js");'
+        b'import("./assets/codemirror-core.BIG.js");'
+        b'import("./assets/http-client.OK.js");'
+        b'import("./assets/data-provider.OK.js");'
+    )
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path.endswith("/assets/index.BSLuV95c.js"):
+            return self._send(200, self.ENTRY, "application/javascript")
+        if path.endswith("/assets/data-provider.OK.js"):
+            return self._send(200, self.CHUNK, "application/javascript")
+        if path.endswith(".js"):
+            # Vendor noise — must not block discovery of data-provider.
+            return self._send(200, b'console.log("vendor");', "application/javascript")
+        return super().do_GET()
+
+
+@pytest.mark.asyncio
+async def test_skips_vendor_chunks_to_reach_api_routes():
+    port = _free_port()
+    srv = _run_server(LibreChatCrowdedChunkHandler, port)
+    try:
+        agent = AIFingerprintAgent(
+            timeout=3, run_behavioral_probes=False, max_js_bundles=4,
+        )
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        paths = result.get("discovered_paths") or []
+        assert "/api/messages" in paths
+        assert result["has_live_surface"] is True
     finally:
         srv.shutdown()
 
