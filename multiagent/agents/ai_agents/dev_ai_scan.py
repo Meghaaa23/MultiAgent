@@ -24,10 +24,15 @@ async def main():
     parser.add_argument("target", help="Live target URL ")
     parser.add_argument("--agent", choices=["fingerprint","infra","vuln","avid","all"], default="all")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument(
+        "--cookie",
+        default="",
+        help="Session cookie (session=...) or Bearer token (Bearer ...) supplied up front",
+    )
     args = parser.parse_args()
 
     target_url = args.target.rstrip("/")
-
+    auth_cookie = args.cookie or ""
 
     fp_agent = AIFingerprintAgent(timeout=8)
     ai_fingerprint = await fp_agent.fingerprint(
@@ -36,6 +41,7 @@ async def main():
         page_html            = "",
         response_headers     = {},
         verbose              = True,
+        auth_cookie          = auth_cookie,
     )
     print("\n========== RAW FINGERPRINT ==========")
 
@@ -50,6 +56,7 @@ async def main():
     print(f"\n  AI detected : {ai_fingerprint['is_ai_powered']} [{ai_fingerprint['confidence']}]")
     print(f"  Live surface: {ai_fingerprint.get('has_live_surface')}")
     print(f"  Brand only  : {ai_fingerprint.get('ai_brand_only')}")
+    print(f"  Auth cookie : {'yes' if auth_cookie else 'no'}")
     print(f"  ML endpoints: {ai_fingerprint['ml_endpoints']}")
     print("\nEvidence:")
 
@@ -74,6 +81,7 @@ async def main():
 
     if args.agent in ("infra", "all"):
         infra_agent = AIInfraAgent(openai_client=get_openai_client(), timeout=15)
+        infra_agent.auth_cookie = auth_cookie
         infra_result = await infra_agent.scan(
             target_url = target_url,
             ai_stack   = ai_fingerprint,
@@ -93,9 +101,11 @@ async def main():
             ai_fingerprint = ai_fingerprint,
             target_url     = target_url,
             verbose        = args.verbose,
+            auth_cookie    = auth_cookie,
         )
         print(f"\n  Confirmed: {len(vuln_result['confirmed_ai_vulns'])}")
         print(f"  Potential: {len(vuln_result['potential_ai_vulns'])}")
+        print(f"  Authenticated requests: {vuln_result.get('authenticated')}")
 
     if args.agent in ("avid", "all"):
         ml_stack = ai_fingerprint.get("ml_libraries", [])

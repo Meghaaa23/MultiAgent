@@ -175,13 +175,19 @@ class WebScannerAgent:
             target_url = target_url.split("#")[0].rstrip("/")
 
         target_url = _resolve_docker_url(target_url, verbose=verbose)
-        self.vuln_tester.auth_cookie = auth_cookie or ""
+        cred = auth_cookie or ""
+        self.vuln_tester.auth_cookie = cred
+        self.browser.auth_cookie = cred
+        self.ai_fingerprinter.auth_cookie = cred
+        self.ai_vuln_tester.auth_cookie = cred
+        if hasattr(self, "ai_infra_agent"):
+            self.ai_infra_agent.auth_cookie = cred
 
         if verbose:
             print(f"\n{'='*70}")
             print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
-            if auth_cookie:
-                print(f"  Auth   : Session cookie provided (authenticated scan)")
+            if cred:
+                print(f"  Auth   : Session credential provided (authenticated scan)")
             print(f"  Target : {target_url}")
             print(f"  Budget : {max_time_minutes} minutes")
             print(f"{'='*70}\n")
@@ -197,10 +203,12 @@ class WebScannerAgent:
         if verbose:
             print(" Technology Fingerprinting...")
         try:
-            page            = await self.browser.capture_page(target_url)
+            page            = await self.browser.capture_page(target_url, auth_cookie=cred)
             html            = page.get("html", "")
             elements        = page.get("elements", [])
-            initial_headers, headers_capture_failed = await self._get_real_headers(target_url, verbose=verbose)
+            initial_headers, headers_capture_failed = await self._get_real_headers(
+                target_url, verbose=verbose, auth_cookie=cred
+            )
             stack           = await self.fingerprinter.fingerprint(
                 target_url=target_url, page_html=html,
                 response_headers=initial_headers, verbose=verbose
@@ -310,6 +318,7 @@ class WebScannerAgent:
                 page_html            = html,
                 response_headers     = initial_headers,
                 verbose              = verbose,
+                auth_cookie          = cred,
             )
 
             has_live_surface = bool(
@@ -361,7 +370,8 @@ class WebScannerAgent:
                 if verbose:
                     print("  Running AI-specific vulnerability tests...")
                 ai_vuln_results = await self.ai_vuln_tester.test_all(
-                    ai_fingerprint=ai_fingerprint, target_url=target_url, verbose=verbose,
+                    ai_fingerprint=ai_fingerprint, target_url=target_url,
+                    verbose=verbose, auth_cookie=cred,
                 )
                 if verbose:
                     c = len(ai_vuln_results.get("confirmed_ai_vulns", []))
@@ -665,7 +675,8 @@ class WebScannerAgent:
             "headers_capture_failed": headers_capture_failed,
         }
 
-    async def _get_real_headers(self, url: str, verbose: bool = False) -> tuple:
+    async def _get_real_headers(self, url: str, verbose: bool = False,
+                                auth_cookie: str = "") -> tuple:
         """
         Fetch the target's response headers once, to be shared as ground
         truth across the AI fingerprinter, STRIDE builder, and Action Agent.
@@ -676,7 +687,9 @@ class WebScannerAgent:
         mystery three call-layers later.
         """
         loop = asyncio.get_event_loop()
-        headers, error = await loop.run_in_executor(None, lambda: self._sync_headers(url))
+        headers, error = await loop.run_in_executor(
+            None, lambda: self._sync_headers(url, auth_cookie=auth_cookie)
+        )
         if not headers:
             logger.warning(
                 "Header capture failed for %s — downstream header-based "
@@ -688,11 +701,18 @@ class WebScannerAgent:
             return {}, True
         return headers, False
 
-    def _sync_headers(self, url: str) -> tuple:
+    def _sync_headers(self, url: str, auth_cookie: str = "") -> tuple:
         try:
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "Mozilla/5.0 (SecurityScanner)"}
-            )
+            try:
+                from ..auth_support import request_auth_headers
+            except ImportError:
+                from multiagent.agents.auth_support import request_auth_headers
+            cred = auth_cookie or getattr(self.vuln_tester, "auth_cookie", "")
+            headers = {
+                "User-Agent": "Mozilla/5.0 (SecurityScanner)",
+                **request_auth_headers(cred),
+            }
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return {k.lower(): v for k, v in resp.headers.items()}, None
         except urllib.error.HTTPError as e:

@@ -35,6 +35,19 @@ except ImportError:  # script / flat import (e.g. dev_ai_scan.py)
             score_evidence,
         )
 
+try:
+    from ..auth_support import request_auth_headers
+except ImportError:
+    try:
+        from multiagent.agents.auth_support import request_auth_headers
+    except ImportError:
+        import sys
+        from pathlib import Path
+        _agents_dir = Path(__file__).resolve().parents[1]
+        if str(_agents_dir) not in sys.path:
+            sys.path.insert(0, str(_agents_dir))
+        from auth_support import request_auth_headers
+
 logger = logging.getLogger(__name__)
 
 
@@ -577,6 +590,7 @@ class AIFingerprintAgent:
         self.nondeterminism_samples = nondeterminism_samples
         self.nondeterminism_low     = nondeterminism_low
         self.nondeterminism_high    = nondeterminism_high
+        self.auth_cookie            = ""
 
     async def fingerprint(
         self,
@@ -585,7 +599,10 @@ class AIFingerprintAgent:
         page_html: str = "",
         response_headers: Dict = None,
         verbose: bool = False,
+        auth_cookie: str = "",
     ) -> Dict:
+        if auth_cookie:
+            self.auth_cookie = auth_cookie
         report = await self._fingerprint_internal(
             target_url, discovered_endpoints or [],
             page_html, response_headers or {}, verbose)
@@ -1986,13 +2003,15 @@ class AIFingerprintAgent:
         data: Optional[bytes] = None,
     ) -> Tuple[int, Dict, str]:
         def _once(target: str) -> Tuple[int, Dict, str]:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; AISecurityScanner/1.0)",
+                "Accept":     "text/html,application/json,application/xhtml+xml,*/*;q=0.8",
+                **({"Content-Type": "application/json"} if data else {}),
+                **request_auth_headers(self.auth_cookie),
+            }
             req = urllib.request.Request(
                 target, data=data,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; AISecurityScanner/1.0)",
-                    "Accept":     "text/html,application/json,application/xhtml+xml,*/*;q=0.8",
-                    **({"Content-Type": "application/json"} if data else {}),
-                },
+                headers=headers,
                 method=method,
             )
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
