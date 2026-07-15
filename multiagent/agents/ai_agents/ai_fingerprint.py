@@ -159,12 +159,28 @@ _JS_API_PRIORITY_TOKENS = (
     "agents", "agent", "conversation", "convo", "librechat",
     "openapi", "graphql", "inference", "completion",
     "provider", "service", "queries", "mutations", "hooks",
-    "api.", "api-",
+    "api.", "api-", "framework", "main.", "p_home", "p_layout",
 )
 
 _JS_LOW_PRIORITY_TOKENS = (
     "runtime", "registersw", "service-worker", "polyfill",
     "i18n", "locale", "lang-", "icons", "svg",
+)
+
+# Cross-origin script hosts that are analytics/ads — never fetch for discovery.
+_JS_TRACKER_HOST_TOKENS = (
+    "googletagmanager", "google-analytics", "googlesyndication",
+    "googleadservices", "doubleclick", "facebook.net", "hotjar",
+    "segment.com", "segment.io", "sentry.io", "newrelic",
+    "datadoghq", "clarity.ms", "mixpanel", "amplitude",
+    "fullstory", "heap-api", "intercom.io", "zendesk",
+)
+
+# Static asset CDNs — fetch JS from here, but do not probe them as API bases.
+_STATIC_CDN_HOST_TOKENS = (
+    "alicdn.com", "cloudfront.net", "unpkg.com", "jsdelivr.net",
+    "cdnjs.cloudflare.com", "bootstrapcdn.com", "gstatic.com",
+    "googleapis.com", "assets.vercel", "static.cloudflareinsights",
 )
 
 AI_TITLE_KEYWORDS = [
@@ -696,13 +712,15 @@ class AIFingerprintAgent:
                 all_evidence.extend(r.get("evidence", []))
                 all_frameworks.extend(r.get("frameworks", []))
 
+        related_bases: List[str] = []
         if isinstance(js_r, dict):
             js_api_paths = js_r.get("api_paths", [])
             raw_html_js  = js_r.get("raw_js", "")
-            # Report every JS-discovered path; only probe inference-shaped ones.
+            related_bases.extend(js_r.get("api_bases", []) or [])
+            # Report every JS-discovered path/URL; only probe inference-shaped ones.
             for path in js_api_paths:
                 discovered_paths.append(path)
-                if _is_inference_path(path):
+                if self._candidate_is_inference(path):
                     candidates.append(path)
 
         if isinstance(passive_r, dict):
@@ -710,17 +728,42 @@ class AIFingerprintAgent:
             # inference-shaped ones (status codes on /features/ are noise).
             for path in passive_r.get("paths", []) or []:
                 discovered_paths.append(path)
-                if _is_inference_path(path):
+                if self._candidate_is_inference(path):
                     candidates.append(path)
 
         for ep in discovered_endpoints or []:
             url = ep.get("url", "") if isinstance(ep, dict) else str(ep)
             if not url:
                 continue
-            path = urllib.parse.urlparse(url).path if "://" in url else url
-            if path:
-                candidates.append(path)
-                discovered_paths.append(path)
+            if "://" in url:
+                candidates.append(url)
+                discovered_paths.append(url)
+            else:
+                candidates.append(url)
+                discovered_paths.append(url)
+
+        # Related API hosts referenced in app JS (e.g. qwen.ai → chat.qwen.ai).
+        related_bases = self._normalize_api_bases(related_bases, page_base=base)
+        if related_bases:
+            hop_r = await self._discover_related_bases(
+                related_bases, page_base=base, verbose=verbose)
+            if isinstance(hop_r, dict):
+                all_evidence.extend(hop_r.get("evidence", []))
+                for path in hop_r.get("api_paths", []) or []:
+                    discovered_paths.append(path)
+                    if self._candidate_is_inference(path):
+                        candidates.append(path)
+                related_bases.extend(hop_r.get("api_bases", []) or [])
+                related_bases = self._normalize_api_bases(related_bases, page_base=base)
+
+        # Relative inference paths also apply on JS-discovered API hosts only.
+        relative_infer = [
+            p for p in discovered_paths
+            if p.startswith("/") and _is_inference_path(p)
+        ]
+        for api_base in related_bases:
+            for path in relative_infer:
+                candidates.append(api_base.rstrip("/") + path)
 
         # Spec / GraphQL refs only if this app's HTML/JS/discovery mentioned them.
         surface_blob = "\n".join([
@@ -734,9 +777,9 @@ class AIFingerprintAgent:
         for path in discovered_paths:
             pl = path.lower()
             if any(x in pl for x in ("openapi", "swagger", "api-docs")):
-                spec_refs.append(path)
+                spec_refs.append(path if path.startswith("/") else urllib.parse.urlparse(path).path)
             if "graphql" in pl or "graphiql" in pl:
-                graphql_refs.append(path)
+                graphql_refs.append(path if path.startswith("/") else urllib.parse.urlparse(path).path)
 
         openapi_r = await self._probe_openapi(
             base, self._normalize_candidate_paths(spec_refs), verbose)
@@ -765,12 +808,18 @@ class AIFingerprintAgent:
         candidates = self._normalize_candidate_paths(candidates)
         if verbose:
             print(f"    [discover] {len(candidates)} candidate path(s) from app surface")
+            if related_bases:
+                print(
+                    "    [discover] related API host(s) from JS: "
+                    + ", ".join(related_bases[:6])
+                )
             if not candidates:
                 uniq = list(dict.fromkeys(discovered_paths))
                 api_like = [
                     p for p in uniq
-                    if p.startswith("/api/") or p.startswith("/v1/")
+                    if "/api/" in p or p.startswith("/v1/")
                     or p.startswith("/v2/") or "/ollama/" in p
+                    or p.startswith("http")
                 ]
                 sample = (api_like or uniq)[:12]
                 if sample:
@@ -993,7 +1042,8 @@ class AIFingerprintAgent:
 
         for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I):
             src = self._abs_url(base, m.group(1))
-            if self._looks_js_asset_url(src, base):
+            # Page-referenced bundles may live on a CDN (qwen.ai → alicdn).
+            if self._looks_js_asset_url(src, base, allow_cross_origin=True):
                 js_urls.append(src)
 
         # Vite/webpack often preload route chunks that hold API path strings.
@@ -1006,7 +1056,7 @@ class AIFingerprintAgent:
             if not href_m:
                 continue
             href = self._abs_url(base, href_m.group(1))
-            if self._looks_js_asset_url(href, base):
+            if self._looks_js_asset_url(href, base, allow_cross_origin=True):
                 js_urls.append(href)
 
         for m in re.finditer(
@@ -1069,6 +1119,7 @@ class AIFingerprintAgent:
     ) -> Dict:
         evidence:   List[EvidenceItem] = []
         api_paths:  List[str]          = []
+        api_bases:  List[str]          = []
         frameworks: List[str]          = []
         raw_js_combined = ""
 
@@ -1090,7 +1141,7 @@ class AIFingerprintAgent:
                 return url, ""
 
         def _has_inference() -> bool:
-            return any(_is_inference_path(p) for p in api_paths)
+            return any(self._candidate_is_inference(p) for p in api_paths)
 
         def _refill_batch() -> List[str]:
             nonlocal skipped_vendor, queue
@@ -1164,8 +1215,9 @@ class AIFingerprintAgent:
 
                 extracted = self._extract_api_paths_from_js(js)
                 api_paths.extend(extracted)
+                api_bases.extend(self._extract_api_bases_from_js(js))
                 # Hint evidence only when at least one path is inference-shaped.
-                ai_shaped = [p for p in extracted if _is_inference_path(p)]
+                ai_shaped = [p for p in extracted if self._candidate_is_inference(p)]
                 if ai_shaped:
                     evidence.append(EvidenceItem.make(
                         "js_api_path_extracted",
@@ -1200,8 +1252,8 @@ class AIFingerprintAgent:
                             f"WebSocket({(raw_ws or '')[:50]})",
                             "js_bundle", endpoint=url))
 
-                # Follow Vite/webpack chunk graph — API strings often live off-entry.
-                for chunk in self._extract_js_chunk_urls(js, base):
+                # Follow Vite/webpack chunk graph — resolve relative to this bundle URL.
+                for chunk in self._extract_js_chunk_urls(js, base, source_url=url):
                     if chunk not in seen_urls:
                         queue.append(chunk)
 
@@ -1209,9 +1261,19 @@ class AIFingerprintAgent:
                 # Found inference routes; stop burning budget on UI chrome.
                 break
 
+        # Only promote origins from absolute URLs that already look like APIs.
+        for p in api_paths:
+            if p.startswith("http://") or p.startswith("https://"):
+                if self._looks_absolute_api_url(p):
+                    parsed = urllib.parse.urlparse(p)
+                    api_bases.append(f"{parsed.scheme}://{parsed.netloc}")
+
         if verbose and processed:
-            api_like = [p for p in dict.fromkeys(api_paths) if "/api/" in p or "/v1/" in p]
-            infer = [p for p in api_like if _is_inference_path(p)]
+            api_like = [
+                p for p in dict.fromkeys(api_paths)
+                if "/api/" in p or "/v1/" in p or p.startswith("http")
+            ]
+            infer = [p for p in api_like if self._candidate_is_inference(p)]
             print(
                 f"    [js] analysed {processed} bundle(s); "
                 f"{len(list(dict.fromkeys(api_paths)))} path(s) extracted "
@@ -1222,6 +1284,7 @@ class AIFingerprintAgent:
         return {
             "evidence":  evidence,
             "api_paths": list(dict.fromkeys(api_paths)),
+            "api_bases": list(dict.fromkeys(api_bases)),
             "frameworks": list(dict.fromkeys(frameworks)),
             "raw_js":    raw_js_combined,
         }
@@ -1257,37 +1320,81 @@ class AIFingerprintAgent:
         return urllib.parse.urljoin(base.rstrip("/") + "/", s)
 
     @staticmethod
-    def _looks_js_asset_url(url: str, base: str) -> bool:
+    def _is_tracker_js_url(url: str) -> bool:
+        low = (url or "").lower()
+        return any(tok in low for tok in _JS_TRACKER_HOST_TOKENS)
+
+    @staticmethod
+    def _is_static_cdn_host(url_or_host: str) -> bool:
+        low = (url_or_host or "").lower()
+        return any(tok in low for tok in _STATIC_CDN_HOST_TOKENS)
+
+    @classmethod
+    def _looks_js_asset_url(
+        cls, url: str, base: str, *, allow_cross_origin: bool = False,
+        source_url: str = "",
+    ) -> bool:
         if not url or not url.lower().split("?", 1)[0].endswith(".js"):
+            return False
+        if cls._is_tracker_js_url(url):
             return False
         u = urllib.parse.urlparse(url)
         b = urllib.parse.urlparse(base)
-        if u.netloc and b.netloc and u.netloc != b.netloc:
-            return False
+        s = urllib.parse.urlparse(source_url) if source_url else None
+        cross = bool(u.netloc and b.netloc and u.netloc != b.netloc)
+        if cross:
+            if not allow_cross_origin:
+                return False
+            # Chunk continuum: same host as the parent bundle we already accepted.
+            if s and s.netloc and u.netloc == s.netloc:
+                pass
+            elif not cls._looks_app_bundle_path(u.path):
+                return False
         path = u.path.lower()
         if any(x in path for x in (
             "/assets/", "/static/", "/dist/", "/js/", "/build/",
             "/_next/", ".bundle.", "chunk", "main.", "app.", "index.",
-            "/gradio_api/", "vendor", "data-provider",
+            "/gradio_api/", "vendor", "data-provider", "framework",
+            "qwenweb", "qwen-ai",
         )):
             return True
         return path.endswith(".js")
 
-    def _extract_js_chunk_urls(self, js: str, base: str) -> List[str]:
-        """Discover additional same-origin JS chunks referenced by a bundle."""
+    @staticmethod
+    def _looks_app_bundle_path(path: str) -> bool:
+        pl = (path or "").lower()
+        return any(x in pl for x in (
+            "/assets/", "/static/", "/dist/", "/js/", "/build/",
+            "/_next/", "chunk", "main.", "app.", "index.",
+            "framework", "vendor", "qwenweb", "qwen-ai",
+        ))
+
+    def _extract_js_chunk_urls(
+        self, js: str, base: str, source_url: str = "",
+    ) -> List[str]:
+        """Discover additional JS chunks referenced by a bundle.
+
+        Relative imports resolve against the bundle URL (CDN-safe), not only
+        the page origin.
+        """
         if not js:
             return []
         text = self._unescape_js_strings(js)
+        resolve_base = source_url or base
         found: List[str] = []
         patterns = (
             r'import\s*\(\s*["\']([^"\']+\.js(?:\?[^"\']*)?)["\']',
             r'["\']([^"\']*assets/[^"\']+\.js(?:\?[^"\']*)?)["\']',
             r'["\'](\.?/?assets/[^"\']+\.js(?:\?[^"\']*)?)["\']',
+            # Numeric hashed chunks relative to a CDN bundle directory.
+            r'["\'](\./(?:p_)?[a-zA-Z0-9_-]+\.js)["\']',
         )
         for pat in patterns:
             for m in re.finditer(pat, text):
-                url = self._abs_url(base, m.group(1))
-                if self._looks_js_asset_url(url, base):
+                url = self._abs_url(resolve_base, m.group(1))
+                if self._looks_js_asset_url(
+                    url, base, allow_cross_origin=True, source_url=source_url or resolve_base,
+                ):
                     found.append(url)
         return list(dict.fromkeys(found))
 
@@ -1318,6 +1425,7 @@ class AIFingerprintAgent:
           BASE_URL + "/api/ask"
           "\\/api\\/messages" (minified escaped slashes)
           request.get(`${baseUrl}/v1/chat/completions`)
+          https://chat.example.com/api/chat (absolute, host from app JS)
         """
         found: Set[str] = set()
         js = self._unescape_js_strings(js)
@@ -1325,7 +1433,20 @@ class AIFingerprintAgent:
         def _add(raw: str) -> None:
             if not raw:
                 return
-            path = self._to_path(raw.split("?")[0].split("#")[0])
+            raw = raw.split("?")[0].split("#")[0].strip()
+            if raw.startswith("http://") or raw.startswith("https://"):
+                if self._looks_api_candidate(raw):
+                    parsed = urllib.parse.urlparse(raw)
+                    if not parsed.path or parsed.path == "/":
+                        return  # bare origins collected separately as api_bases
+                    if self._is_static_cdn_host(parsed.netloc):
+                        return
+                    found.add(
+                        f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+                        or raw
+                    )
+                return
+            path = self._to_path(raw)
             if path and self._looks_api_candidate(path):
                 found.add(path.rstrip("/") or path)
 
@@ -1354,6 +1475,12 @@ class AIFingerprintAgent:
 
         # Quoted absolute paths (covers BASE_URL + "/api/messages").
         for m in re.finditer(r'["\'](/[a-zA-Z0-9_\-./]{2,120})["\']', js):
+            _add(m.group(1))
+
+        # Quoted absolute http(s) API URLs.
+        for m in re.finditer(
+            r'["\'](https?://[^"\']{8,180})["\']', js, re.I,
+        ):
             _add(m.group(1))
 
         # Template / concat fragments: `${BASE_URL}/api/messages` or
@@ -1394,9 +1521,110 @@ class AIFingerprintAgent:
 
         return list(found)
 
+    def _extract_api_bases_from_js(self, js: str) -> List[str]:
+        """Origins referenced in app JS that may host APIs (not static CDNs)."""
+        if not js:
+            return []
+        text = self._unescape_js_strings(js)
+        found: List[str] = []
+        for m in re.finditer(r'https?://[a-zA-Z0-9._:-]+(?::\d+)?', text):
+            origin = m.group(0).rstrip("/")
+            host = urllib.parse.urlparse(origin).netloc.lower()
+            if not host or self._is_tracker_js_url(origin):
+                continue
+            if self._is_static_cdn_host(host):
+                continue
+            # Only keep hosts that look like API/product backends (still from JS).
+            if any(x in host for x in (
+                "docs.", "github.io", "alibabacloud.com", "cloud.google",
+                "microsoft.com", "twitter.com", "linkedin.com",
+            )):
+                continue
+            if any(x in host for x in (
+                "api.", "api-", "-api", "chat.", "chat-",
+                "llm", "openai", "inference", "model", "qwen",
+                "dashscope", "groq", "anthropic", "together",
+                "ollama", "openrouter", "deepseek",
+            )):
+                found.append(origin)
+        return list(dict.fromkeys(found))
+
+    @staticmethod
+    def _candidate_is_inference(candidate: str) -> bool:
+        if not candidate:
+            return False
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            return _is_inference_path(urllib.parse.urlparse(candidate).path)
+        return _is_inference_path(candidate)
+
+    def _normalize_api_bases(self, bases: List[str], page_base: str) -> List[str]:
+        page = urllib.parse.urlparse(page_base)
+        page_origin = f"{page.scheme}://{page.netloc}".rstrip("/")
+        out: List[str] = []
+        seen = set()
+        for raw in bases or []:
+            if not raw:
+                continue
+            p = urllib.parse.urlparse(raw if "://" in raw else "https://" + raw)
+            if not p.scheme or not p.netloc:
+                continue
+            origin = f"{p.scheme}://{p.netloc}".rstrip("/")
+            if origin in seen or origin == page_origin:
+                continue
+            if self._is_static_cdn_host(p.netloc) or self._is_tracker_js_url(origin):
+                continue
+            seen.add(origin)
+            out.append(origin)
+        return out[:6]
+
+    async def _discover_related_bases(
+        self, bases: List[str], page_base: str, verbose: bool,
+    ) -> Dict:
+        """One-hop: fetch JS-discovered API hosts' HTML for more app routes."""
+        evidence: List[EvidenceItem] = []
+        api_paths: List[str] = []
+        api_bases: List[str] = []
+        loop = asyncio.get_event_loop()
+
+        for origin in bases[:3]:
+            try:
+                status, headers, html = await loop.run_in_executor(
+                    None, lambda u=origin: self._fetch(u, max_bytes=200_000))
+            except Exception:
+                continue
+            if status == 0 or not html:
+                continue
+            evidence.append(EvidenceItem.make(
+                "related_api_host",
+                f"JS-referenced API host {origin}",
+                "js_bundle", endpoint=origin))
+            if verbose:
+                print(f"    [discover] one-hop related host {origin}")
+            js_urls, html_ev, links, _title = self._analyse_html(
+                html, origin, headers or {})
+            evidence.extend(html_ev)
+            for link in links:
+                api_paths.append(link)
+            old_budget = self.max_js_bundles
+            self.max_js_bundles = min(8, old_budget)
+            try:
+                hop_js = await self._fetch_and_analyse_js(js_urls, origin, verbose)
+            finally:
+                self.max_js_bundles = old_budget
+            if isinstance(hop_js, dict):
+                api_paths.extend(hop_js.get("api_paths", []) or [])
+                api_bases.extend(hop_js.get("api_bases", []) or [])
+                evidence.extend(hop_js.get("evidence", []) or [])
+
+        return {
+            "evidence": evidence,
+            "api_paths": list(dict.fromkeys(api_paths)),
+            "api_bases": list(dict.fromkeys(api_bases)),
+        }
+
     @staticmethod
     def _paths_from_template_expression(raw: str) -> List[str]:
-        """Pull routable path(s) out of a JS template-literal body."""
+        """Pull routable path(s) or absolute API URLs out of a template body."""
         if not raw:
             return []
         out: List[str] = []
@@ -1408,13 +1636,22 @@ class AIFingerprintAgent:
         # `/api/chat/${id}` or plain `/api/models` before any interpolation.
         head = raw.split("${", 1)[0].rstrip("/")
         if head.startswith("http://") or head.startswith("https://"):
-            head = urllib.parse.urlparse(head).path.rstrip("/")
+            # Keep absolute API URL when the host is part of the template.
+            parsed = urllib.parse.urlparse(head)
+            if parsed.path and parsed.path != "/":
+                out.append(f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/"))
+            head = parsed.path.rstrip("/")
         if head.startswith("/") and len(head) >= 2:
             out.append(head)
         # After removing all ${...}, a leftover absolute path/URL.
         stripped = re.sub(r"\$\{[^}]*\}", "", raw).split("?")[0].strip()
         if stripped.startswith("http://") or stripped.startswith("https://"):
-            stripped = urllib.parse.urlparse(stripped).path
+            parsed = urllib.parse.urlparse(stripped)
+            if parsed.path and parsed.path != "/":
+                out.append(
+                    f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+                )
+            stripped = parsed.path
         stripped = stripped.rstrip("/")
         if stripped.startswith("/") and len(stripped) >= 2:
             out.append(stripped)
@@ -1429,8 +1666,39 @@ class AIFingerprintAgent:
             p = "/" + p.lstrip("/")
         return p.split("?")[0].split("#")[0] or "/"
 
-    @staticmethod
-    def _looks_api_candidate(path: str) -> bool:
+    @classmethod
+    def _looks_absolute_api_url(cls, url: str) -> bool:
+        """True for absolute URLs that look like API endpoints (not docs/SVG/CDN)."""
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            return False
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").lower()
+        if not host or not path or path == "/":
+            return False
+        if cls._is_static_cdn_host(host) or cls._is_tracker_js_url(url):
+            return False
+        if any(x in host for x in (
+            "w3.org", "reactjs.org", "github.com", "githubusercontent",
+            "wikipedia.org", "mozilla.org", "schema.org", "googleapis.com",
+            "gstatic.com", "twitter.com", "x.com", "linkedin.com",
+            "discord.com", "facebook.com", "youtube.com",
+        )):
+            return False
+        if any(path.endswith(ext) for ext in (
+            ".js", ".css", ".map", ".png", ".jpg", ".svg", ".html", ".md",
+            ".tgz", ".dtd", ".woff", ".woff2",
+        )):
+            return False
+        return bool(re.search(
+            r"/(?:api|v1|v2|v3|ollama|graphql|openai|chat|completions?|"
+            r"generate|messages?|embeddings?|inference|ask)(?:/|$)",
+            path,
+        ))
+
+    @classmethod
+    def _looks_api_candidate(cls, path: str) -> bool:
         """Heuristic: keep likely API/route strings; drop static assets."""
         p = (path or "").strip()
         if not p or len(p) > 180:
@@ -1446,8 +1714,10 @@ class AIFingerprintAgent:
             "webpack", "chunk",
         )):
             return False
+        if pl.startswith("http://") or pl.startswith("https://"):
+            return cls._looks_absolute_api_url(p)
         # Prefer paths that look routable / API-like.
-        if pl.startswith("/") or pl.startswith("http"):
+        if pl.startswith("/"):
             return True
         return False
 
@@ -1473,14 +1743,28 @@ class AIFingerprintAgent:
 
     @staticmethod
     def _normalize_candidate_paths(paths: List[str]) -> List[str]:
+        """Normalize candidates; preserve absolute URLs discovered in app JS."""
         out: List[str] = []
         seen = set()
         for raw in paths:
             if not raw:
                 continue
+            if raw.startswith("http://") or raw.startswith("https://"):
+                parsed = urllib.parse.urlparse(raw.split("#")[0])
+                path = (parsed.path or "").split("?")[0]
+                if not path or path == "/":
+                    continue
+                if any(path.lower().endswith(ext) for ext in (
+                    ".js", ".css", ".map", ".png", ".jpg", ".svg", ".ico",
+                )):
+                    continue
+                norm = f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                out.append(norm)
+                continue
             path = raw
-            if "://" in path:
-                path = urllib.parse.urlparse(path).path
             path = path if path.startswith("/") else "/" + path.lstrip("/")
             path = path.split("?")[0].split("#")[0]
             if not path or path == "/" or path in seen:
@@ -1742,24 +2026,32 @@ class AIFingerprintAgent:
         spa_catch_all: bool = False,
         openapi_schema: Optional[Dict] = None,
     ) -> Dict:
-        """Probe application-discovered paths only — no catalog spray."""
+        """Probe application-discovered paths/URLs only — no catalog spray."""
         evidence:    List[EvidenceItem] = []
         endpoints:   List[str]          = []
         frameworks:  List[str]          = []
         auth_signals: List[AuthSignal]  = []
         loop = asyncio.get_event_loop()
 
-        async def probe(path: str, category: str):
-            url = base + path
+        async def probe(candidate: str, category: str):
+            if candidate.startswith("http://") or candidate.startswith("https://"):
+                url = candidate
+                path = urllib.parse.urlparse(candidate).path or "/"
+            else:
+                url = base + candidate
+                path = candidate
+            # Cross-origin probes only for hosts discovered via app JS candidates.
             try:
                 status, resp_headers, body = await loop.run_in_executor(
                     None, lambda: self._fetch(url))
                 ct = (resp_headers.get("Content-Type")
                       or resp_headers.get("content-type") or "")
+                # SPA catch-all applies to the page origin, not related API hosts.
+                use_spa = spa_catch_all and url.startswith(base)
                 needs_post = (
                     status in (404, 405)
                     or (status == 200 and _looks_html_body(ct, body))
-                    or (spa_catch_all and status == 200 and category in (
+                    or (use_spa and status == 200 and category in (
                         "chat", "embedding", "ml", "graphql", "schema"))
                 )
                 if needs_post:
@@ -1770,12 +2062,14 @@ class AIFingerprintAgent:
                     )
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
-                    auth_signals, spa_catch_all=spa_catch_all)
+                    auth_signals, spa_catch_all=use_spa)
             except Exception:
                 return None
 
         tasks = [
-            probe(path, self._guess_probe_category(path))
+            probe(path, self._guess_probe_category(
+                urllib.parse.urlparse(path).path if path.startswith("http") else path
+            ))
             for path in candidates
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -915,6 +915,116 @@ async def test_skips_vendor_chunks_to_reach_api_routes():
         srv.shutdown()
 
 
+def test_cross_origin_app_js_allowed_trackers_rejected():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    page = "https://qwen.ai"
+    cdn = "https://g.alicdn.com/qwenweb/qwen-ai-fe/0.0.69/js/main.js"
+    tracker = "https://www.googletagmanager.com/gtag/js"
+    assert agent._looks_js_asset_url(cdn, page, allow_cross_origin=True) is True
+    assert agent._looks_js_asset_url(cdn, page, allow_cross_origin=False) is False
+    assert agent._looks_js_asset_url(tracker, page, allow_cross_origin=True) is False
+
+
+def test_extract_api_bases_and_absolute_urls_from_js():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    js = r'''
+        const CHAT = "https://chat.qwen.ai";
+        fetch("https://chat.qwen.ai/api/agents/chat");
+        const skip = "https://g.alicdn.com/qwenweb/x.js";
+        const docs = "https://pre-docs.qwenlm.ai/guide";
+        const xmlns = "http://www.w3.org/2000/svg";
+        const react = "https://reactjs.org/docs/error-decoder.html";
+    '''
+    bases = agent._extract_api_bases_from_js(js)
+    assert "https://chat.qwen.ai" in bases
+    assert not any("alicdn.com" in b for b in bases)
+    assert not any("docs" in b for b in bases)
+    paths = agent._extract_api_paths_from_js(js)
+    assert "https://chat.qwen.ai/api/agents/chat" in paths
+    assert not any("w3.org" in p for p in paths)
+    assert not any("reactjs.org" in p for p in paths)
+
+
+@pytest.mark.asyncio
+async def test_cdn_js_absolute_api_url_is_probed():
+    """qwen.ai-style: page loads CDN JS that references an absolute API URL."""
+    api_port = _free_port()
+    cdn_port = _free_port()
+    page_port = _free_port()
+
+    class ApiHandler(BaseHTTPRequestHandler):
+        def _send(self, code: int, body: bytes, ctype: str):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802
+            if self.path.startswith("/api/agents/chat"):
+                return self._send(401, b'{"detail":"auth"}', "application/json")
+            return self._send(404, b"no", "text/plain")
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            return self.do_GET()
+
+        def log_message(self, *args):
+            pass
+
+    class CdnHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = (
+                f'fetch("http://127.0.0.1:{api_port}/api/agents/chat");'
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    class PageHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            page = (
+                "<!DOCTYPE html><html><head><title>Qwen</title>"
+                '<meta name="description" content="Qwen Studio chatbot AI models"/>'
+                "</head><body>"
+                f'<script src="http://127.0.0.1:{cdn_port}/qwenweb/js/main.js"></script>'
+                "</body></html>"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+
+        def log_message(self, *args):
+            pass
+
+    api_srv = _run_server(ApiHandler, api_port)
+    cdn_srv = _run_server(CdnHandler, cdn_port)
+    page_srv = _run_server(PageHandler, page_port)
+    try:
+        agent = AIFingerprintAgent(
+            timeout=3, run_behavioral_probes=False, max_js_bundles=4,
+        )
+        result = await agent.fingerprint(
+            f"http://127.0.0.1:{page_port}", verbose=False,
+        )
+        assert result["has_live_surface"] is True
+        assert result["is_ai_powered"] is True
+        eps = " ".join(result.get("ml_endpoints") or [])
+        assert f"127.0.0.1:{api_port}/api/agents/chat" in eps
+    finally:
+        api_srv.shutdown()
+        cdn_srv.shutdown()
+        page_srv.shutdown()
+
+
 def test_normalize_ignores_non_inference_endpoints():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
     fp = t._normalize_ai_fingerprint({
