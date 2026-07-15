@@ -57,6 +57,7 @@ async def main():
     print(f"  Live surface: {ai_fingerprint.get('has_live_surface')}")
     print(f"  Brand only  : {ai_fingerprint.get('ai_brand_only')}")
     print(f"  Auth cookie : {'yes' if auth_cookie else 'no'}")
+    print(f"  Allowed hosts: {ai_fingerprint.get('allowed_api_hosts') or []}")
     print(f"  ML endpoints: {ai_fingerprint['ml_endpoints']}")
     print("\nEvidence:")
 

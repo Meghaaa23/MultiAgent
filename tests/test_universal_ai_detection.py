@@ -1019,9 +1019,96 @@ async def test_cdn_js_absolute_api_url_is_probed():
         assert result["is_ai_powered"] is True
         eps = " ".join(result.get("ml_endpoints") or [])
         assert f"127.0.0.1:{api_port}/api/agents/chat" in eps
+        allowed = result.get("allowed_api_hosts") or []
+        assert f"127.0.0.1:{api_port}" in allowed
     finally:
         api_srv.shutdown()
         cdn_srv.shutdown()
+        page_srv.shutdown()
+
+
+def test_vuln_scope_allows_fingerprint_related_hosts():
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    fp = {
+        "allowed_api_hosts": ["www.qwencloud.com", "chat.qwen.ai"],
+        "ml_endpoints": ["https://www.qwencloud.com/try-ai/chat"],
+    }
+    hosts = t._build_scope_hosts("https://qwen.ai", fp)
+    assert "qwen.ai" in hosts
+    assert "www.qwencloud.com" in hosts
+    assert "chat.qwen.ai" in hosts
+    t._scope_hosts = hosts
+    t._scope_host = "qwen.ai"
+    assert t._in_scope("https://www.qwencloud.com/try-ai/chat") is True
+    assert t._in_scope("https://evil.example/api/chat") is False
+    # Foreign ml_endpoints without allowlist must not expand scope.
+    hosts2 = t._build_scope_hosts(
+        "https://qwen.ai",
+        {"ml_endpoints": ["https://evil.example/api/chat"]},
+    )
+    assert "evil.example" not in hosts2
+
+
+@pytest.mark.asyncio
+async def test_infra_probes_allowlisted_cross_origin_url():
+    """Infra must hit the related host URL, not rewrite onto the page origin."""
+    api_port = _free_port()
+    page_port = _free_port()
+    hit = {"urls": []}
+
+    class ApiHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            hit["urls"].append(self.path)
+            body = b'{"detail":"auth"}'
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802
+            return self.do_POST()
+
+        def log_message(self, *args):
+            pass
+
+    class PageHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b"<html><title>Qwen</title></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    api_srv = _run_server(ApiHandler, api_port)
+    page_srv = _run_server(PageHandler, page_port)
+    try:
+        cross = f"http://127.0.0.1:{api_port}/try-ai/chat"
+        fp = {
+            "ml_endpoints": [cross],
+            "allowed_api_hosts": [f"127.0.0.1:{api_port}"],
+            "auth_required_paths": [],
+            "spa_catch_all": False,
+            "capabilities": [],
+            "evidence": [],
+        }
+        agent = AIInfraAgent(timeout=3)
+        result = await agent.scan(f"http://127.0.0.1:{page_port}", ai_stack=fp)
+        assert "/try-ai/chat" in hit["urls"]
+        assert any(cross in e for e in (result.auth_protected_endpoints or []))
+        # Must not invent the path on the page origin as exposed.
+        assert not any(
+            f"127.0.0.1:{page_port}/try-ai/chat" in e
+            for e in (result.exposed_endpoints or [])
+        )
+    finally:
+        api_srv.shutdown()
         page_srv.shutdown()
 
 

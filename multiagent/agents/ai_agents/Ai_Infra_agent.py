@@ -275,7 +275,10 @@ class AIInfraAgent:
             exposed, auth_hits, catch_all = await self._probe_ai_endpoints(target_url, ai_stack)
             result.catch_all_detected = catch_all
             result.exposed_endpoints = [
-                f"{target_url}{path}" for path, meta in exposed.items()
+                (meta or {}).get("url") or (
+                    key if str(key).startswith("http") else f"{target_url}{key}"
+                )
+                for key, meta in exposed.items()
                 if (meta or {}).get("verdict") == "exposed"
                 or (meta or {}).get("status") == 200
             ]
@@ -358,6 +361,20 @@ class AIInfraAgent:
 
         return list(dict.fromkeys(p for p in paths_to_probe if p))
 
+    def _allowed_hosts(self, base_url: str, ai_stack: Optional[dict]) -> set:
+        """Hosts infra may probe: page origin + fingerprint JS allowlist only."""
+        hosts = set()
+        page_host = urlparse(base_url).netloc
+        if page_host:
+            hosts.add(page_host)
+        stack = ai_stack or {}
+        for h in stack.get("allowed_api_hosts") or []:
+            if isinstance(h, str) and h.strip():
+                host = urlparse(h if "://" in h else f"https://{h}").netloc or h.strip()
+                if host:
+                    hosts.add(host)
+        return hosts
+
     async def _probe_ai_endpoints(self, base_url: str, ai_stack: Optional[dict]) -> Tuple[dict, list, bool]:
         is_catch_all = await self._detect_catch_all(base_url)
         if not is_catch_all and (ai_stack or {}).get("spa_catch_all"):
@@ -368,36 +385,82 @@ class AIInfraAgent:
         for sig in (ai_stack or {}).get("auth_required_paths") or []:
             if isinstance(sig, dict) and sig.get("endpoint"):
                 confirmed.append(sig["endpoint"])
-        confirmed_paths = [urlparse(e).path for e in confirmed if e]
-        paths_to_probe  = self._select_paths(confirmed_paths, ai_stack, catch_all=is_catch_all)
+
+        page_host = urlparse(base_url).netloc
+        allowed = self._allowed_hosts(base_url, ai_stack)
+
+        # Catalog expansion only on the page origin — never spray related hosts.
+        same_origin_paths: list = []
+        # (origin, path, full_url) for allowlisted cross-origin confirmed endpoints.
+        cross_targets: list = []
+        for e in confirmed:
+            if not e:
+                continue
+            if e.startswith("http://") or e.startswith("https://"):
+                parsed = urlparse(e)
+                path = parsed.path or "/"
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                if parsed.netloc == page_host:
+                    same_origin_paths.append(path)
+                elif parsed.netloc in allowed:
+                    cross_targets.append((origin, path, f"{origin}{path}"))
+                else:
+                    logger.info(
+                        "[AIInfraAgent] skip cross-origin not allowlisted: %s", e)
+            else:
+                same_origin_paths.append(e if e.startswith("/") else "/" + e)
+
+        paths_to_probe = self._select_paths(
+            list(dict.fromkeys(same_origin_paths)), ai_stack, catch_all=is_catch_all)
+
+        # Dedupe cross-origin confirmed URLs (no catalog expansion on them).
+        seen_cross = set()
+        cross_unique = []
+        for origin, path, full in cross_targets:
+            if full in seen_cross:
+                continue
+            seen_cross.add(full)
+            cross_unique.append((origin, path, full))
 
         exposed: dict = {}
         auth_hits: list = []
+        # Work items: (probe_base, path, full_url, use_spa, same_origin)
+        work = [
+            (base_url, p, base_url + p, is_catch_all, True) for p in paths_to_probe
+        ] + [
+            (origin, path, full, False, False)
+            for origin, path, full in cross_unique
+        ]
 
         async with httpx.AsyncClient(timeout=self.timeout, verify=False, follow_redirects=True) as http:
-            tasks   = [self._probe_path(http, base_url, p) for p in paths_to_probe]
+            tasks   = [self._probe_path(http, b, p) for b, p, _, _, _ in work]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for path, res in zip(paths_to_probe, results):
+        for (_b, path, full_url, use_spa, same_origin), res in zip(work, results):
             if isinstance(res, Exception):
                 continue
             status, body, ct = res
             verdict = self._classify(
-                status, body, ct, path, bool(confirmed_paths), catch_all=is_catch_all)
+                status, body, ct, path, bool(same_origin_paths or cross_unique),
+                catch_all=use_spa)
             if verdict == "auth":
-                url = base_url + path
-                if url not in auth_hits:
-                    auth_hits.append(url)
-                logger.info("[AIInfraAgent] AUTH-PROTECTED -> %s [%d]", path, status)
+                if full_url not in auth_hits:
+                    auth_hits.append(full_url)
+                logger.info("[AIInfraAgent] AUTH-PROTECTED -> %s [%d]", full_url, status)
                 continue
             if verdict == "skip":
                 continue
             # Defense in depth: never mark non-success/validation statuses as exposed.
             if status in SKIP_STATUS or status in (401, 403):
                 continue
-            exposed[path] = {"status": status, "body": body, "verdict": verdict}
-            tag = "content-verified" if is_catch_all else "reached"
-            logger.info("[AIInfraAgent] EXPOSED (%s) -> %s [%d]", tag, path, status)
+            # Same-origin keyed by path (threat heuristics); cross-origin by full URL.
+            key = path if same_origin else full_url
+            exposed[key] = {
+                "status": status, "body": body, "verdict": verdict,
+                "path": path, "url": full_url,
+            }
+            tag = "content-verified" if use_spa else "reached"
+            logger.info("[AIInfraAgent] EXPOSED (%s) -> %s [%d]", tag, full_url, status)
 
         return exposed, auth_hits, is_catch_all
 

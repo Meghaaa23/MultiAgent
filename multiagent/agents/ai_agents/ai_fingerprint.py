@@ -499,6 +499,8 @@ class FingerprintReport:
     classified_endpoints:   List[EndpointRecord] = field(default_factory=list)
     discovered_paths:       List[str]         = field(default_factory=list)
     auth_required_paths:    List[AuthSignal]  = field(default_factory=list)
+    # JS-discovered API hosts (netlocs) allowed for infra/vuln probing.
+    allowed_api_hosts:      List[str]         = field(default_factory=list)
 
     frameworks_detected: List[str] = field(default_factory=list)
     openapi_schema:      Dict       = field(default_factory=dict)
@@ -535,6 +537,7 @@ class FingerprintReport:
             "model_reported":         self.model_reported,
             "capabilities":           self.capabilities,
             "ml_endpoints":           self.ml_endpoints,
+            "allowed_api_hosts":      self.allowed_api_hosts,
             "classified_endpoints": [
                 {"url": e.url, "path": e.path, "type": e.endpoint_type,
                  "risk": e.risk, "auth_required": e.auth_required,
@@ -986,6 +989,13 @@ class AIFingerprintAgent:
         if m_desc:
             meta_desc = m_desc.group(1)[:240]
 
+        allowed_api_hosts = self._collect_allowed_api_hosts(
+            page_base=base,
+            related_bases=related_bases,
+            ml_endpoints=ml_endpoints,
+            auth_signals=auth_signals,
+        )
+
         return FingerprintReport(
             is_ai_powered         = is_ai,
             confidence            = confidence,
@@ -1002,6 +1012,7 @@ class AIFingerprintAgent:
             classified_endpoints  = classified,
             discovered_paths      = discovered_paths,
             auth_required_paths   = auth_signals,
+            allowed_api_hosts     = allowed_api_hosts,
             frameworks_detected   = all_frameworks,
             openapi_schema        = openapi_schema,
             graphql_types         = graphql_types,
@@ -1576,6 +1587,31 @@ class AIFingerprintAgent:
             seen.add(origin)
             out.append(origin)
         return out[:6]
+
+    def _collect_allowed_api_hosts(
+        self,
+        page_base: str,
+        related_bases: List[str],
+        ml_endpoints: List[str],
+        auth_signals: List[AuthSignal],
+    ) -> List[str]:
+        """Netlocs the scanner may probe beyond the page origin (JS-derived)."""
+        hosts: List[str] = []
+        page_host = urllib.parse.urlparse(page_base).netloc
+        if page_host:
+            hosts.append(page_host)
+        for origin in related_bases or []:
+            h = urllib.parse.urlparse(origin).netloc
+            if h and not self._is_static_cdn_host(h):
+                hosts.append(h)
+        for ep in list(ml_endpoints or []) + [
+            s.endpoint for s in (auth_signals or []) if getattr(s, "endpoint", None)
+        ]:
+            if isinstance(ep, str) and ep.startswith("http"):
+                h = urllib.parse.urlparse(ep).netloc
+                if h and not self._is_static_cdn_host(h):
+                    hosts.append(h)
+        return list(dict.fromkeys(hosts))
 
     async def _discover_related_bases(
         self, bases: List[str], page_base: str, verbose: bool,
