@@ -572,8 +572,8 @@ class AIFingerprintAgent:
     def __init__(
         self,
         timeout: int = 8,
-        max_js_bundles: int = 3,
-        max_js_bundle_bytes: int = 200_000,
+        max_js_bundles: int = 12,
+        max_js_bundle_bytes: int = 1_500_000,
         run_behavioral_probes: bool = True,
         probe_prompt: str = "In one sentence, describe the ocean.",
         probe_model: str = "gpt-3.5-turbo",
@@ -740,11 +740,18 @@ class AIFingerprintAgent:
         candidates = self._normalize_candidate_paths(candidates)
         if verbose:
             print(f"    [discover] {len(candidates)} candidate path(s) from app surface")
-            if not candidates and self.auth_cookie:
-                print(
-                    "    [discover] auth credentials present but no inference-shaped "
-                    "paths found in HTML/JS/robots — nothing to probe yet"
-                )
+            if not candidates:
+                sample = list(dict.fromkeys(discovered_paths))[:12]
+                if sample:
+                    print(
+                        "    [discover] non-probe paths seen: "
+                        + ", ".join(sample)
+                    )
+                if self.auth_cookie:
+                    print(
+                        "    [discover] auth credentials present but no inference-shaped "
+                        "paths found in HTML/JS/robots — nothing to probe yet"
+                    )
 
         # Phase 2 — probe only what this application exposed.
         if candidates:
@@ -954,24 +961,22 @@ class AIFingerprintAgent:
             title_low = ""
 
         for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I):
-            src = m.group(1)
-            if src.startswith("http://") or src.startswith("https://"):
-                pass
-            elif src.startswith("/"):
-                src = base.rstrip("/") + src
-            else:
-                src = base.rstrip("/") + "/" + src
-            if any(x in src for x in [
-                "/assets/", "/static/", "/dist/", "/js/", "/build/",
-                "/_next/", ".bundle.", "chunk", "main.", "app.", "index.",
-                "/gradio_api/",
-            ]):
+            src = self._abs_url(base, m.group(1))
+            if self._looks_js_asset_url(src, base):
                 js_urls.append(src)
-            elif src.endswith(".js") and (
-                urllib.parse.urlparse(src).netloc == ""
-                or urllib.parse.urlparse(src).netloc == urllib.parse.urlparse(base).netloc
-            ):
-                js_urls.append(src)
+
+        # Vite/webpack often preload route chunks that hold API path strings.
+        for m in re.finditer(
+            r'<link[^>]+rel=["\'](?:modulepreload|preload)["\'][^>]*>',
+            html, re.I,
+        ):
+            tag = m.group(0)
+            href_m = re.search(r'href=["\']([^"\']+)["\']', tag, re.I)
+            if not href_m:
+                continue
+            href = self._abs_url(base, href_m.group(1))
+            if self._looks_js_asset_url(href, base):
+                js_urls.append(href)
 
         for m in re.finditer(
             r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant|'
@@ -1037,6 +1042,9 @@ class AIFingerprintAgent:
         raw_js_combined = ""
 
         loop = asyncio.get_event_loop()
+        queue: List[str] = list(dict.fromkeys(js_urls))
+        seen_urls: Set[str] = set()
+        processed = 0
 
         async def fetch_js(url: str) -> Tuple[str, str]:
             try:
@@ -1046,72 +1054,100 @@ class AIFingerprintAgent:
             except Exception:
                 return url, ""
 
-        bundles = await asyncio.gather(
-            *[fetch_js(u) for u in js_urls[: self.max_js_bundles * 3]],
-            return_exceptions=True)
-
-        processed = 0
-        for item in bundles:
-            if processed >= self.max_js_bundles:
+        while queue and processed < self.max_js_bundles:
+            batch = []
+            while queue and len(batch) < 4 and processed + len(batch) < self.max_js_bundles:
+                u = queue.pop(0)
+                if u in seen_urls:
+                    continue
+                seen_urls.add(u)
+                batch.append(u)
+            if not batch:
                 break
-            if isinstance(item, Exception) or not isinstance(item, tuple):
-                continue
-            url, js = item
-            if not js:
-                continue
-            processed += 1
-            raw_js_combined += js[:50_000]
 
-            if verbose:
-                if len(url) > 72:
-                    label = url[:32] + "…" + url[-32:]
-                else:
-                    label = url
-                print(f"    [js] {label} ({len(js)} bytes)")
+            bundles = await asyncio.gather(
+                *[fetch_js(u) for u in batch], return_exceptions=True)
 
-            for sdk_name, patterns in ML_LIBRARY_JS_SIGNATURES.items():
-                for pat in patterns:
-                    if pat.lower() in js.lower():
-                        evidence.append(EvidenceItem.make(
-                            "js_ai_sdk", f"SDK: {sdk_name}", "js_bundle",
-                            endpoint=url, framework=sdk_name))
-                        frameworks.append(sdk_name)
-                        break
+            for item in bundles:
+                if processed >= self.max_js_bundles:
+                    break
+                if isinstance(item, Exception) or not isinstance(item, tuple):
+                    continue
+                url, js = item
+                if not js:
+                    continue
+                processed += 1
+                raw_js_combined += js[:50_000]
 
-            extracted = self._extract_api_paths_from_js(js)
-            api_paths.extend(extracted)
-            # Hint evidence only when at least one path is inference-shaped.
-            ai_shaped = [p for p in extracted if _is_inference_path(p)]
-            if ai_shaped:
-                evidence.append(EvidenceItem.make(
-                    "js_api_path_extracted",
-                    f"{len(ai_shaped)} inference-shaped path(s) in JS bundle",
-                    "js_bundle", endpoint=url))
+                if verbose:
+                    trunc = (
+                        len(js) >= self.max_js_bundle_bytes
+                        and self.max_js_bundle_bytes > 0
+                    )
+                    if len(url) > 72:
+                        label = url[:32] + "…" + url[-32:]
+                    else:
+                        label = url
+                    flag = " truncated" if trunc else ""
+                    print(f"    [js] {label} ({len(js)} bytes{flag})")
 
-            for m in re.finditer(
-                r'new\s+EventSource\s*\(\s*(?:`([^`]+)`|["\']([^"\']+)["\'])',
-                js, re.I,
-            ):
-                raw_es = m.group(1) if m.group(1) is not None else m.group(2)
-                for path in self._paths_from_template_expression(raw_es):
-                    if self._looks_api_candidate(path):
-                        norm = self._to_path(path)
-                        evidence.append(EvidenceItem.make(
-                            "sse_in_js", f"EventSource({norm[:50]})",
-                            "js_bundle", endpoint=url))
-                        api_paths.append(norm)
+                for sdk_name, patterns in ML_LIBRARY_JS_SIGNATURES.items():
+                    for pat in patterns:
+                        if pat.lower() in js.lower():
+                            evidence.append(EvidenceItem.make(
+                                "js_ai_sdk", f"SDK: {sdk_name}", "js_bundle",
+                                endpoint=url, framework=sdk_name))
+                            frameworks.append(sdk_name)
+                            break
 
-            for m in re.finditer(
-                r'new\s+WebSocket\s*\(\s*(?:`([^`]+)`|["\']([^"\']+)["\'])',
-                js, re.I,
-            ):
-                raw_ws = m.group(1) if m.group(1) is not None else m.group(2)
-                if any(x in (raw_ws or "") for x in (
-                    "/chat", "/ws", "/stream", "/agent",
-                )):
+                extracted = self._extract_api_paths_from_js(js)
+                api_paths.extend(extracted)
+                # Hint evidence only when at least one path is inference-shaped.
+                ai_shaped = [p for p in extracted if _is_inference_path(p)]
+                if ai_shaped:
                     evidence.append(EvidenceItem.make(
-                        "websocket_ai_path", f"WebSocket({(raw_ws or '')[:50]})",
+                        "js_api_path_extracted",
+                        f"{len(ai_shaped)} inference-shaped path(s) in JS bundle",
                         "js_bundle", endpoint=url))
+
+                for m in re.finditer(
+                    r'new\s+EventSource\s*\(\s*(?:`([^`]+)`|["\']([^"\']+)["\'])',
+                    js, re.I,
+                ):
+                    raw_es = m.group(1) if m.group(1) is not None else m.group(2)
+                    for path in self._paths_from_template_expression(
+                        self._unescape_js_strings(raw_es or "")
+                    ):
+                        if self._looks_api_candidate(path):
+                            norm = self._to_path(path)
+                            evidence.append(EvidenceItem.make(
+                                "sse_in_js", f"EventSource({norm[:50]})",
+                                "js_bundle", endpoint=url))
+                            api_paths.append(norm)
+
+                for m in re.finditer(
+                    r'new\s+WebSocket\s*\(\s*(?:`([^`]+)`|["\']([^"\']+)["\'])',
+                    js, re.I,
+                ):
+                    raw_ws = m.group(1) if m.group(1) is not None else m.group(2)
+                    if any(x in (raw_ws or "") for x in (
+                        "/chat", "/ws", "/stream", "/agent",
+                    )):
+                        evidence.append(EvidenceItem.make(
+                            "websocket_ai_path",
+                            f"WebSocket({(raw_ws or '')[:50]})",
+                            "js_bundle", endpoint=url))
+
+                # Follow Vite/webpack chunk graph — API strings often live off-entry.
+                for chunk in self._extract_js_chunk_urls(js, base):
+                    if chunk not in seen_urls:
+                        queue.append(chunk)
+
+        if verbose and processed:
+            print(
+                f"    [js] analysed {processed} bundle(s); "
+                f"{len(list(dict.fromkeys(api_paths)))} path(s) extracted"
+            )
 
         return {
             "evidence":  evidence,
@@ -1120,6 +1156,66 @@ class AIFingerprintAgent:
             "raw_js":    raw_js_combined,
         }
 
+    @staticmethod
+    def _abs_url(base: str, src: str) -> str:
+        s = (src or "").strip()
+        if not s:
+            return ""
+        return urllib.parse.urljoin(base.rstrip("/") + "/", s)
+
+    @staticmethod
+    def _looks_js_asset_url(url: str, base: str) -> bool:
+        if not url or not url.lower().split("?", 1)[0].endswith(".js"):
+            return False
+        u = urllib.parse.urlparse(url)
+        b = urllib.parse.urlparse(base)
+        if u.netloc and b.netloc and u.netloc != b.netloc:
+            return False
+        path = u.path.lower()
+        if any(x in path for x in (
+            "/assets/", "/static/", "/dist/", "/js/", "/build/",
+            "/_next/", ".bundle.", "chunk", "main.", "app.", "index.",
+            "/gradio_api/", "vendor", "data-provider",
+        )):
+            return True
+        return path.endswith(".js")
+
+    def _extract_js_chunk_urls(self, js: str, base: str) -> List[str]:
+        """Discover additional same-origin JS chunks referenced by a bundle."""
+        if not js:
+            return []
+        text = self._unescape_js_strings(js)
+        found: List[str] = []
+        patterns = (
+            r'import\s*\(\s*["\']([^"\']+\.js(?:\?[^"\']*)?)["\']',
+            r'["\']([^"\']*assets/[^"\']+\.js(?:\?[^"\']*)?)["\']',
+            r'["\'](\.?/?assets/[^"\']+\.js(?:\?[^"\']*)?)["\']',
+        )
+        for pat in patterns:
+            for m in re.finditer(pat, text):
+                url = self._abs_url(base, m.group(1))
+                if self._looks_js_asset_url(url, base):
+                    found.append(url)
+        return list(dict.fromkeys(found))
+
+    @staticmethod
+    def _unescape_js_strings(text: str) -> str:
+        """Decode common JS string escapes so path scanners see real slashes."""
+        if not text:
+            return ""
+        out = text.replace("\\/", "/")
+        out = re.sub(
+            r"\\u([0-9a-fA-F]{4})",
+            lambda m: chr(int(m.group(1), 16)),
+            out,
+        )
+        out = re.sub(
+            r"\\x([0-9a-fA-F]{2})",
+            lambda m: chr(int(m.group(1), 16)),
+            out,
+        )
+        return out
+
     def _extract_api_paths_from_js(self, js: str) -> List[str]:
         """Discover app API routes from JS without a hardcoded endpoint catalog.
 
@@ -1127,9 +1223,11 @@ class AIFingerprintAgent:
           fetch("/api/chat")
           `${BASE_URL}/api/messages`
           BASE_URL + "/api/ask"
+          "\\/api\\/messages" (minified escaped slashes)
           request.get(`${baseUrl}/v1/chat/completions`)
         """
         found: Set[str] = set()
+        js = self._unescape_js_strings(js)
 
         def _add(raw: str) -> None:
             if not raw:
@@ -1179,6 +1277,27 @@ class AIFingerprintAgent:
         for m in re.finditer(r'`([^`]{2,180})`', js):
             for path in self._paths_from_template_expression(m.group(1)):
                 _add(path)
+
+        # Token scan for API-shaped paths left after minify/escape normalize.
+        # Still app-derived (must appear in bundle); not a probe catalog.
+        for m in re.finditer(
+            r'(?<![A-Za-z0-9_])(/(?:api|v1|v2|v3|ollama|graphql|openai)'
+            r'(?:/[a-zA-Z0-9_\-.]+){1,6})',
+            js,
+        ):
+            _add(m.group(1))
+
+        # Minifiers sometimes split: "/api/" + "messages" or "/api" + "/messages".
+        for m in re.finditer(
+            r'["\'](/(?:api|v1|v2|v3)/?)["\']\s*\+\s*["\'](/?[a-zA-Z0-9_\-]+)["\']',
+            js,
+        ):
+            left, right = m.group(1), m.group(2)
+            if not right.startswith("/") and not left.endswith("/"):
+                joined = left + "/" + right
+            else:
+                joined = left.rstrip("/") + "/" + right.lstrip("/")
+            _add(joined)
 
         return list(found)
 

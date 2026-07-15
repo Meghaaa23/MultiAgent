@@ -337,6 +337,30 @@ def test_discovery_extracts_base_url_template_and_concat_paths():
     assert "/ollama/api/generate" not in paths
 
 
+def test_discovery_extracts_escaped_and_split_api_paths():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    escaped = r'const root="\/api\/messages"; const chat="\/api\/agents\/chat\/active";'
+    paths = agent._extract_api_paths_from_js(escaped)
+    assert "/api/messages" in paths
+    assert "/api/agents/chat/active" in paths
+
+    split = r'const p="/api/"+"messages"; const q="/api"+"/ask";'
+    split_paths = agent._extract_api_paths_from_js(split)
+    assert "/api/messages" in split_paths
+    assert "/api/ask" in split_paths
+
+
+def test_js_chunk_url_extraction_follows_vite_assets():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    js = r'''
+        import("./assets/data-provider.AbCdEf.js");
+        const deps=["assets/Messages.xyz.js","assets/index.BSLuV95c.js"];
+    '''
+    chunks = agent._extract_js_chunk_urls(js, "http://localhost:3080")
+    assert any("data-provider.AbCdEf.js" in c for c in chunks)
+    assert any("Messages.xyz.js" in c for c in chunks)
+
+
 # ---------------------------------------------------------------------------
 # Unit: infra classify / k8s
 # ---------------------------------------------------------------------------
@@ -737,6 +761,61 @@ async def test_marketing_site_status_codes_do_not_confirm_ai():
         srv.shutdown()
 
 
+class LibreChatChunkedBundleHandler(BaseHTTPRequestHandler):
+    """Entry bundle has no API strings; Vite chunk holds escaped LibreChat paths."""
+
+    PAGE = (
+        "<!DOCTYPE html><html><head><title>LibreChat</title>"
+        '<meta name="description" content="LibreChat - An open source chat '
+        'application with support for multiple AI models"/>'
+        "</head><body><div id='root'></div>"
+        '<script type="module" src="./assets/index.BSLuV95c.js"></script>'
+        "</body></html>"
+    )
+    ENTRY = b'import("./assets/data-provider.AbCd.js");'
+    CHUNK = (
+        b'const BASE_URL="";'
+        b'const messagesRoot=`${BASE_URL}/api/messages`;'
+        b'const active=()=>`${BASE_URL}/api/agents/chat/active`;'
+        b'const esc="\\/api\\/ask";'
+    )
+
+    def _send(self, status: int, body: bytes, ctype: str):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path.endswith("/assets/index.BSLuV95c.js"):
+            return self._send(200, self.ENTRY, "application/javascript")
+        if path.endswith("/assets/data-provider.AbCd.js"):
+            return self._send(200, self.CHUNK, "application/javascript")
+        if path in (
+            "/api/messages",
+            "/api/agents/chat/active",
+            "/api/ask",
+            "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route",
+        ):
+            if "canary" in path:
+                return self._send(200, self.PAGE.encode(), "text/html")
+            return self._send(401, b'{"detail":"Unauthorized"}', "application/json")
+        return self._send(200, self.PAGE.encode(), "text/html")
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        path = self.path.split("?")[0]
+        if path in ("/api/messages", "/api/agents/chat/active", "/api/ask"):
+            return self._send(401, b'{"detail":"Unauthorized"}', "application/json")
+        return self._send(404, b"not found", "text/plain")
+
+    def log_message(self, *args):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_auth_gated_inference_still_confirms():
     """LibreChat regression: 401 on inference paths must still confirm AI."""
@@ -754,6 +833,24 @@ async def test_auth_gated_inference_still_confirms():
             any(seg in e for seg in ("/api/chat", "/api/messages", "/v1/chat/completions"))
             for e in all_eps
         )
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_follows_vite_chunk_for_librechat_api_paths():
+    """Entry index.js may not contain routes; follow import() chunks."""
+    port = _free_port()
+    srv = _run_server(LibreChatChunkedBundleHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        paths = result.get("discovered_paths") or []
+        assert "/api/messages" in paths
+        assert any("/api/agents/chat" in p for p in paths)
+        assert "/api/ask" in paths
+        assert result["has_live_surface"] is True
+        assert result["is_ai_powered"] is True
     finally:
         srv.shutdown()
 
