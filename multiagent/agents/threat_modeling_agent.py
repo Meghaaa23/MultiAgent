@@ -1430,25 +1430,52 @@ Answer:"""
             "total_findings": kb_findings + user_findings,
         }
 
+    @staticmethod
+    def _count_or_len(value, default: int = 0) -> int:
+        """Accept either a list or a pre-computed int count."""
+        if value is None:
+            return default
+        if isinstance(value, int):
+            return value
+        try:
+            return len(value)
+        except TypeError:
+            return default
+
     def _summarize_scan_results(self, scan_results: Optional[Dict]) -> Optional[Dict]:
         if not scan_results:
             return None
-        vulns     = scan_results.get("vulnerabilities", [])
-        endpoints = scan_results.get("endpoints_discovered", [])
+        vulns     = scan_results.get("vulnerabilities", []) or []
+        if not isinstance(vulns, list):
+            vulns = []
+        endpoints = scan_results.get("endpoints_discovered", []) or []
+        if not isinstance(endpoints, list):
+            endpoints = []
         return {
             "stack":                     (scan_results.get("stack") or {}).get("stack_summary", "Unknown"),
             "endpoints_found":           len(endpoints),
-            "endpoints_interesting":     sum(1 for e in endpoints if e.get("interesting")),
-            "verified_cves":             len(scan_results.get("verified_cves") or []),
-            "confirmed_vulns":           sum(1 for v in vulns if v.get("status") == "Confirmed"),
-            "potential_vulns":           sum(1 for v in vulns if v.get("status") == "Potential"),
+            "endpoints_interesting":     sum(
+                1 for e in endpoints if isinstance(e, dict) and e.get("interesting")
+            ),
+            "verified_cves":             self._count_or_len(scan_results.get("verified_cves") or []),
+            "confirmed_vulns":           sum(
+                1 for v in vulns if isinstance(v, dict) and v.get("status") == "Confirmed"
+            ),
+            "potential_vulns":           sum(
+                1 for v in vulns if isinstance(v, dict) and v.get("status") == "Potential"
+            ),
             "tasks_generated":           scan_results.get("tasks_generated", 0),
             "tasks_executed":            scan_results.get("tasks_executed",  0),
             "forms_discovered":          scan_results.get("forms_discovered", 0),
             "urls_discovered":           scan_results.get("urls_discovered",  0),
             "scan_duration":             scan_results.get("scan_duration",    0),
             "is_ai_powered":             scan_results.get("is_ai_powered", False),
-            "avid_findings":             len(scan_results.get("avid_findings", [])),
-            "strategic_recommendations": len(scan_results.get("strategic_recommendations", [])),
+            # Raw scan stores lists; summarized payloads may already be ints.
+            "avid_findings":             self._count_or_len(
+                scan_results.get("avid_findings", [])
+            ),
+            "strategic_recommendations": self._count_or_len(
+                scan_results.get("strategic_recommendations", [])
+            ),
             "vulnerabilities":           vulns,
         }

@@ -10,6 +10,35 @@ export const appConfig: ApplicationConfig = {
   providers: [importProvidersFrom(HttpClientModule)]
 };
 
+/**
+ * Backend base URL.
+ * Prefer direct FastAPI (avoids broken ng-proxy loops). Override anytime with:
+ *   localStorage.setItem('multiagent_api_base', 'http://HOST:PORT')
+ */
+function resolveApiBase(): string {
+  try {
+    const stored = localStorage.getItem('multiagent_api_base');
+    if (stored && stored.trim()) return stored.trim().replace(/\/$/, '');
+  } catch {
+    /* ignore */
+  }
+  const params = new URLSearchParams(window.location.search);
+  const fromQuery = params.get('api_base');
+  if (fromQuery) {
+    const cleaned = fromQuery.replace(/\/$/, '');
+    try {
+      localStorage.setItem('multiagent_api_base', cleaned);
+    } catch {
+      /* ignore */
+    }
+    return cleaned;
+  }
+  return 'http://localhost:8000';
+}
+
+const API_BASE = resolveApiBase();
+console.log('API base:', API_BASE);
+
 // =============================================================================
 // Interfaces
 // =============================================================================
@@ -79,9 +108,15 @@ type StreamEvent =
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private sessionId: string = '';
+  readonly apiBase = API_BASE;
 
   constructor(private http: HttpClient, private ngZone: NgZone) {
     this.generateSessionId();
+  }
+
+  private url(path: string): string {
+    const p = path.startsWith('/') ? path : `/${path}`;
+    return `${this.apiBase}${p}`;
   }
 
   private generateSessionId(): string {
@@ -101,9 +136,19 @@ export class ApiService {
     this.generateSessionId();
   }
 
+  /** Quick reachability check used at startup / on failure. */
+  async pingHealth(): Promise<boolean> {
+    try {
+      const res = await fetch(this.url('/health'), { method: 'GET' });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   getDocuments(): Promise<{ total_documents: number; documents: Document[] }> {
     return firstValueFrom(
-      this.http.get<{ total_documents: number; documents: Document[] }>('/api/documents')
+      this.http.get<{ total_documents: number; documents: Document[] }>(this.url('/documents'))
     );
   }
 
@@ -111,7 +156,7 @@ export class ApiService {
     const fd = new FormData();
     const fileArray = Array.from(files) as File[];
     fileArray.forEach((file: File) => fd.append('files', file));
-    return firstValueFrom(this.http.post<any>('/api/uploadfile/', fd));
+    return firstValueFrom(this.http.post<any>(this.url('/uploadfile/'), fd));
   }
 
   // Original non-streaming query (kept as fallback)
@@ -132,7 +177,7 @@ export class ApiService {
     };
     if (authCookie) payload.auth_cookie = authCookie;
     return firstValueFrom(
-      this.http.post<any>('/api/query/', payload, {
+      this.http.post<any>(this.url('/query/'), payload, {
         headers: { 'Content-Type': 'application/json' }
       })
     );
@@ -160,7 +205,7 @@ export class ApiService {
     };
     if (authCookie) payload.auth_cookie = authCookie;
 
-    this.consumeSSE('/api/query/stream', payload, subject);
+    this.consumeSSE(this.url('/query/stream'), payload, subject);
     return subject.asObservable();
   }
 
@@ -238,16 +283,16 @@ export class ApiService {
 
   clearSession(sessionId?: string): Promise<any> {
     const sid = sessionId || this.getSessionId();
-    return firstValueFrom(this.http.post<any>(`/api/clear-session/${sid}`, {}));
+    return firstValueFrom(this.http.post<any>(this.url(`/clear-session/${sid}`), {}));
   }
 
   getModelSettings(): Promise<any> {
-    return firstValueFrom(this.http.get<any>('/api/settings/model'));
+    return firstValueFrom(this.http.get<any>(this.url('/settings/model')));
   }
 
   switchProvider(provider: 'local' | 'azure'): Promise<any> {
     return firstValueFrom(
-      this.http.post<any>('/api/settings/model', { provider }, {
+      this.http.post<any>(this.url('/settings/model'), { provider }, {
         headers: { 'Content-Type': 'application/json' }
       })
     );
@@ -586,6 +631,17 @@ export class AppComponent {
   constructor(private apiService: ApiService) {
     this.loadDocuments();
     this.loadModelSettings();
+    void this.checkBackend();
+  }
+
+  private async checkBackend(): Promise<void> {
+    const ok = await this.apiService.pingHealth();
+    if (!ok) {
+      this.uploadError.set(
+        `FastAPI not reachable at ${this.apiService.apiBase}. ` +
+          `Run: cd multiagent && python3 main.py`
+      );
+    }
   }
 
   @ViewChild('promptInput') promptInputRef?: ElementRef<HTMLTextAreaElement>;
@@ -909,7 +965,14 @@ export class AppComponent {
       });
     } catch (fallbackErr: any) {
       this.isLoading.set(false);
-      const errorMessage = fallbackErr?.error?.detail || fallbackErr?.message || 'Unknown error';
+      let errorMessage = fallbackErr?.error?.detail || fallbackErr?.message || 'Unknown error';
+      // Status 0 = browser never got a response (backend down, bad proxy, CORS, reset)
+      if (fallbackErr?.status === 0) {
+        errorMessage =
+          `Cannot reach FastAPI at ${this.apiService.apiBase}. ` +
+          'Start it with: cd multiagent && python3 main.py  ' +
+          '(override with localStorage multiagent_api_base or ?api_base=...)';
+      }
       this.uploadError.set(errorMessage);
       this.appendMessage({ sender: 'agent', text: ` Error: ${errorMessage}` });
     }

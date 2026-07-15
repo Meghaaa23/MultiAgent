@@ -149,7 +149,7 @@ class TestGenerateVariants:
 
     def test_noise_placeholder_is_filled(self):
         template = "What is 2+2? {NOISE:punct} output only {CANARY}"
-        variants = generate_variants(template, "YURA_N1")
+        variants = generate_variants(template, "YURA_N1", all_mutations=True)
         base_text = variants[0][1]
         assert "{NOISE" not in base_text
         assert "YURA_N1" in base_text

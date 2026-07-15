@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import html as html_lib
 import hashlib
 import asyncio
 import logging
@@ -11,191 +12,63 @@ import urllib.error
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+try:
+    from .ai_evidence_scoring import (
+        classify_evidence,
+        evidence_weight,
+        has_live_surface_evidence,
+        score_evidence,
+    )
+except ImportError:  # script / flat import (e.g. dev_ai_scan.py)
+    try:
+        from multiagent.agents.ai_agents.ai_evidence_scoring import (
+            classify_evidence,
+            evidence_weight,
+            has_live_surface_evidence,
+            score_evidence,
+        )
+    except ImportError:
+        from ai_evidence_scoring import (
+            classify_evidence,
+            evidence_weight,
+            has_live_surface_evidence,
+            score_evidence,
+        )
+
+try:
+    from ..auth_support import request_auth_headers
+except ImportError:
+    try:
+        from multiagent.agents.auth_support import request_auth_headers
+    except ImportError:
+        import sys
+        from pathlib import Path
+        _agents_dir = Path(__file__).resolve().parents[1]
+        if str(_agents_dir) not in sys.path:
+            sys.path.insert(0, str(_agents_dir))
+        from auth_support import request_auth_headers
+
 logger = logging.getLogger(__name__)
 
 
-EVIDENCE_WEIGHTS: Dict[str, int] = {
-    "openapi_schema":           18,
-    "openapi_ai_endpoint":      14,
-    "graphql_schema":           14,
-    "graphql_ai_field":         12,
-
-    "framework_identified":     30,
-    "framework_header":         15,
-    "framework_cookie":         10,
-
-    "behavior_llm_response":    22,
-    "behavior_model_reported":  20,
-    "behavior_streaming":       14,
-
-    "chat_endpoint_200":        14,
-    "embedding_endpoint_200":   10,
-    "tool_endpoint_200":        10,
-    "ml_endpoint_200":           8,
-    "ml_endpoint_401_403":       6,
-    "ml_endpoint_405":           5,
-
-    "error_openai_format":      12,
-    "error_missing_messages":   10,
-    "error_missing_model":       8,
-    "error_triton_format":       8,
-    "error_huggingface_format":  7,
-    "error_generic_validation":  4,
-
-    "sse_streaming_header":     10,
-    "sse_chunked_transfer":      8,
-    "sse_in_js":                 6,
-    "websocket_ai_path":         6,
-
-    "ai_response_header":        7,
-
-    "js_ai_sdk":                 7,
-    "js_api_path_extracted":     5,
-
-    "robots_ai_path":            5,
-    "sitemap_ai_path":           4,
-    "csp_ai_domain":             6,
-    "meta_ai_tag":               4,
-    "favicon_known_framework":   5,
-
-    "dom_assistant_role":        3,
-    "html_ai_form":              3,
-}
-
-CONFIDENCE_BANDS = [
-    (100, "very_high"),
-    ( 65, "high"),
-    ( 40, "medium"),
-    ( 20, "low"),
-    (  0, "none"),
-]
-
-
-def score_to_confidence(score: int) -> str:
-    for threshold, label in CONFIDENCE_BANDS:
-        if score >= threshold:
-            return label
-    return "none"
-
-
-FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
-    "Open WebUI": {
-        "headers":     {"x-open-webui": None},
-        "paths":       ["/api/chat", "/api/models", "/api/chat/completions"],
-        "js_strings":  ["open-webui", "OpenWebUI", "webui-logo"],
-        "js_globals":  ["WEBUI_NAME", "WEBUI_URL"],
-        "cookie_names":["webui-session"],
-        "capabilities": ["chat", "rag", "tool_calling", "image_generation", "web_search"],
-    },
-    "Flowise": {
-        "paths":       ["/api/v1/prediction", "/api/v1/chatflows", "/api/v1/nodes"],
-        "js_strings":  ["flowise", "Flowise", "FlowiseAI"],
-        "js_globals":  ["FLOWISE_URL"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow"],
-    },
-    "Langflow": {
-        "paths":       ["/api/v1/flows", "/api/v1/run", "/api/v1/components"],
-        "js_strings":  ["langflow", "Langflow"],
-        "js_globals":  ["LANGFLOW_AUTO_LOGIN"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow", "multi_agent"],
-    },
-    "Dify": {
-        "paths":       ["/api/chat-messages", "/api/workflows/run", "/api/apps"],
-        "js_strings":  ["dify.ai", "Dify", "difyChatbot"],
-        "cookie_names":["dify_session"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow", "image_generation"],
-    },
-    "AnythingLLM": {
-        "paths":       ["/api/workspace", "/api/chat", "/api/system/env"],
-        "js_strings":  ["anythingllm", "AnythingLLM", "mintplex"],
-        "capabilities": ["chat", "rag", "memory"],
-    },
-    "LibreChat": {
-        "paths":       ["/api/messages", "/api/ask", "/api/convos"],
-        "js_strings":  ["librechat", "LibreChat"],
-        "cookie_names":["refreshToken"],
-        "capabilities": ["chat", "tool_calling", "image_generation", "web_search"],
-    },
-    "LobeChat": {
-        "paths":       ["/api/chat", "/api/openai"],
-        "js_strings":  ["lobe-chat", "LobeChat", "@lobehub"],
-        "capabilities": ["chat", "tool_calling", "image_generation"],
-    },
-    "OpenHands": {
-        "paths":       ["/api/conversations", "/api/submit-feedback", "/api/options/config"],
-        "js_strings":  ["OpenHands", "opendevin", "openhands"],
-        "capabilities": ["code_execution", "shell", "filesystem", "browser", "multi_agent"],
-    },
-    "CrewAI": {
-        "paths":       ["/api/crews", "/api/kickoff", "/api/agents"],
-        "js_strings":  ["crewai", "CrewAI"],
-        "capabilities": ["multi_agent", "tool_calling", "workflow"],
-    },
-    "AutoGen": {
-        "paths":       ["/api/messages", "/api/agents", "/api/run"],
-        "js_strings":  ["autogen", "AutoGen", "pyautogen"],
-        "capabilities": ["multi_agent", "code_execution", "tool_calling"],
-    },
-    "LangGraph": {
-        "paths":       ["/runs", "/threads", "/assistants", "/store"],
-        "js_strings":  ["langgraph", "LangGraph", "@langchain/langgraph"],
-        "capabilities": ["multi_agent", "memory", "workflow", "tool_calling"],
-    },
-    "Haystack": {
-        "paths":       ["/query", "/pipeline", "/document-store"],
-        "js_strings":  ["haystack", "deepset"],
-        "capabilities": ["rag", "chat", "tool_calling"],
-    },
-    "Ollama": {
-        "paths":       ["/api/chat", "/api/generate", "/api/tags", "/api/version",
-                        "/api/show", "/api/pull", "/api/delete", "/api/copy"],
-        "headers":     {"x-ollama-version": None},
-        "js_strings":  ["ollama", "Ollama"],
-        "body_patterns": [r'"done_reason"', r'"total_duration"', r'"eval_count"'],
-        "capabilities": ["chat", "embedding"],
-    },
-    "vLLM": {
-        "paths":       ["/v1/chat/completions", "/v1/completions", "/v1/models"],
-        "headers":     {"server": "vllm"},
-        "body_patterns": [r'"object"\s*:\s*"chat\.completion"'],
-        "capabilities": ["chat", "embedding"],
-    },
-    "TGI (HuggingFace)": {
-        "paths":       ["/generate", "/generate_stream", "/v1/chat/completions"],
-        "headers":     {"server": "text-generation-inference"},
-        "body_patterns": [r'"generated_text"', r'"details".*"finish_reason"'],
-        "capabilities": ["chat", "embedding"],
-    },
-    "OpenAI-compatible": {
-        "paths":       ["/v1/chat/completions", "/v1/completions", "/v1/models",
-                        "/v1/embeddings"],
-        "body_patterns": [r'"choices"\s*:\s*\[', r'"object"\s*:\s*"chat\.completion"',
-                          r'"finish_reason"'],
-        "capabilities": ["chat", "embedding", "image_generation"],
-    },
-}
+# Evidence classifiers (response shape) — not endpoint path catalogs.
 
 MODEL_NAME_PATTERNS = [
     r'\b(gpt-?4|gpt-?3\.5|gpt-?4o)\b',
-    r'\b(claude-?3|claude-?3\.5|claude-?sonnet|claude-?opus|claude-?haiku)\b',
-    r'\b(llama-?[23]|llama-?\d)',
-    r'\b(mistral|mixtral)\b',
-    r'\b(gemma|gemini)\b',
-    r'\b(qwen\d?|qwen-?\d)',
-    r'\b(phi-?\d|phi-?3)\b',
-    r'\b(deepseek)\b',
-    r'\b(command-?r)\b',
+    r'\b(claude-?\d|claude-?(?:sonnet|opus|haiku))\b',
+    r'\b(llama-?\d)',
+    r'\b(mistral|mixtral|gemma|gemini|qwen|phi-?\d|deepseek)\b',
 ]
 
-EXTENDED_CAPABILITIES = [
+# Capability vocabulary used when labeling observed behavior / OpenAPI props.
+KNOWN_CAPABILITIES = {
     "chat", "rag", "tool_calling", "memory", "code_execution",
     "email_send", "web_search", "browser", "sql", "filesystem",
     "shell", "python", "image_generation", "vision", "speech",
-    "audio", "calendar", "slack", "github", "vector_db",
-    "mcp", "workflow", "multi_agent", "embedding", "terminal",
-    "cloud", "image_input",
-]
+    "audio", "embedding", "multi_agent", "mcp", "workflow",
+}
 
+# Structural LLM / inference JSON shapes (product-agnostic).
 AI_RESPONSE_BODY_PATTERNS = [
     r'"choices"\s*:\s*\[',
     r'"prompt_tokens"\s*:',
@@ -204,34 +77,41 @@ AI_RESPONSE_BODY_PATTERNS = [
     r'"usage"\s*:\s*\{',
     r'"model"\s*:\s*"[^"]{2,}"',
     r'"models"\s*:\s*\[',
-    r'"logits"\s*:',
     r'"embeddings"\s*:',
-    r'"probabilities"\s*:',
-    r'"predictions"\s*:',
-    r'"done"\s*:\s*(?:true|false)',
-    r'"done_reason"\s*:',
-    r'"total_duration"\s*:',
-    r'"eval_count"\s*:',
     r'"object"\s*:\s*"(?:model|list|chat\.completion|text_completion)',
-    r'"chatId"\s*:',
-    r'"sourceDocuments"\s*:',
-    r'"agentReasoning"\s*:',
     r'"tool_calls"\s*:',
     r'"function_call"\s*:',
     r'"input_tokens"\s*:',
     r'"output_tokens"\s*:',
-    r'"chunk"\s*:',
-    r'"retrieval"\s*:',
     r'"generated_text"\s*:',
+    r'"done"\s*:\s*(?:true|false)',
 ]
+
+OPENAI_JSON_KEYS = (
+    "choices", "model", "object", "data", "message", "response",
+    "usage", "models", "generated_text", "error",
+)
+
+# Generic probe bodies — used only after a URL is discovered.
+# Prefer OpenAPI-derived bodies when a schema is available for that path.
+GENERIC_CHAT_PROBE = json.dumps({
+    "messages": [{"role": "user", "content": "Hi"}],
+    "max_tokens": 1,
+    "stream": False,
+}).encode()
+
+GENERIC_PROMPT_PROBE = json.dumps({
+    "prompt": "Hi",
+    "input": "Hi",
+    "query": "Hi",
+    "text": "Hi",
+    "max_tokens": 1,
+}).encode()
 
 LLM_RESPONSE_SIGNALS = [
     r"\bI\s+(?:am|can|will|don'?t|cannot|understand)\b",
     r"\bAs\s+an?\s+(?:AI|assistant|language model)\b",
-    r"\bI'?m\s+(?:here|happy|glad|sorry)\b",
     r"\bHow\s+(?:can|may)\s+I\s+(?:help|assist)\b",
-    r"\bThank\s+you\s+for\b",
-    r"\bIs\s+there\s+anything\b",
 ]
 
 ERROR_FINGERPRINTS: List[Tuple[re.Pattern, str, str]] = [
@@ -241,77 +121,348 @@ ERROR_FINGERPRINTS: List[Tuple[re.Pattern, str, str]] = [
      "error_missing_messages", "chat_api"),
     (re.compile(r'"model"\s*.*?(required|missing|must be)', re.I),
      "error_missing_model", "OpenAI-compatible"),
-    (re.compile(r'"error"\s*:\s*"Request for unknown model', re.I),
-     "error_triton_format", "Triton"),
-    (re.compile(r'"error"\s*:\s*"Input validation error', re.I),
-     "error_huggingface_format", "HuggingFace-TGI"),
     (re.compile(r'"detail"\s*:.*?"msg"\s*:', re.S),
-     "error_generic_validation", "FastAPI/Pydantic"),
+     "error_generic_validation", "api_validation"),
 ]
 
 AI_RESPONSE_HEADERS = [
     "x-model-version", "x-model-id", "x-inference-time", "x-ai-backend",
-    "x-ml-model", "x-openai-model", "x-anthropic-model", "openai-model",
-    "openai-version", "x-inference-id", "x-model-name", "x-prediction-id",
-    "x-ollama-version",
+    "x-ml-model", "x-openai-model", "openai-model", "openai-version",
+    "x-inference-id", "x-model-name", "x-prediction-id",
 ]
 
-AI_CSP_DOMAINS = [
-    "api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com",
-    "api.cohere.ai", "api.mistral.ai", "api.groq.com", "api.together.xyz",
-    "api.replicate.com", "api.perplexity.ai", "api.huggingface.co",
-]
-
+# JS SDK string hits are passive discovery aids only (never set is_ai alone).
 ML_LIBRARY_JS_SIGNATURES: Dict[str, List[str]] = {
     "OpenAI JS SDK":    ["openai.min.js", "from 'openai'", 'from "openai"', "new OpenAI("],
     "Anthropic JS SDK": ["@anthropic-ai/sdk", "new Anthropic("],
-    "Cohere JS":        ["cohere-ai", "new CohereClient"],
     "LangChain JS":     ["langchain", "@langchain/core"],
     "Transformers.js":  ["@xenova/transformers", "transformers.js"],
-    "TensorFlow.js":    ["@tensorflow/tfjs", "tf.tensor"],
-    "ONNX Runtime":     ["onnxruntime-web", "ort.InferenceSession"],
-    "Replicate JS":     ["replicate", "new Replicate("],
-    "Groq JS":          ["groq-sdk", "new Groq("],
-    "Mistral JS":       ["@mistralai/mistralai", "new MistralClient"],
     "Vercel AI SDK":    ["ai/react", "useChat(", "useCompletion("],
 }
 
-SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
-    ("/openapi.json",         "schema"),
-    ("/swagger.json",         "schema"),
-    ("/api-docs",             "schema"),
-    ("/api/openapi.json",     "schema"),
-    ("/graphql",              "graphql"),
-    ("/api/graphql",          "graphql"),
-    ("/v1/chat/completions",  "chat"),
-    ("/api/chat/completions", "chat"),
-    ("/api/chat",             "chat"),
-    ("/v1/completions",       "chat"),
-    ("/v1/embeddings",        "embedding"),
-    ("/api/embeddings",       "embedding"),
-    ("/api/v1/prediction",    "chat"),
-    ("/api/generate",         "chat"),
-    ("/api/tags",             "schema"),
-    ("/v1/models",            "schema"),
-    ("/api/models",           "schema"),
-    ("/v2/health/ready",      "schema"),
-    ("/v2/models",            "schema"),
-    ("/api/predict",          "ml"),
-    ("/predict",              "ml"),
-    ("/invocations",          "ml"),
-    ("/predictions",          "ml"),
-    ("/runs",                 "chat"),
-    ("/threads",              "chat"),
+SPA_CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
+
+# JS chunks that almost never carry app API route strings (LibreChat/Vite/Rolldown).
+_JS_VENDOR_SKIP_TOKENS = (
+    "mermaid", "codemirror", "monaco", "highlight", "prism",
+    "katex", "mathjax", "animations", "framer", "lottie",
+    "react-vtree", "query-devtools", "devtools",
+    "fontawesome", "tippy", "leaflet", "mapbox", "xlsx",
+    "pdfjs", "pdf.worker", "emoji-", "driver", "sortable",
+    "recharts", "chart.js", "echarts", "quill", "tinymce",
+)
+
+# Filename tokens suggesting app/data/API code rather than UI chrome.
+_JS_API_PRIORITY_TOKENS = (
+    "data-provider", "data-service", "api-endpoint", "endpoints",
+    "http-client", "request", "messages", "message", "chat",
+    "agents", "agent", "conversation", "convo", "librechat",
+    "openapi", "graphql", "inference", "completion",
+    "provider", "service", "queries", "mutations", "hooks",
+    "api.", "api-", "framework", "main.", "p_home", "p_layout",
+)
+
+_JS_LOW_PRIORITY_TOKENS = (
+    "runtime", "registersw", "service-worker", "polyfill",
+    "i18n", "locale", "lang-", "icons", "svg",
+)
+
+# Cross-origin script hosts that are analytics/ads — never fetch for discovery.
+_JS_TRACKER_HOST_TOKENS = (
+    "googletagmanager", "google-analytics", "googlesyndication",
+    "googleadservices", "doubleclick", "facebook.net", "hotjar",
+    "segment.com", "segment.io", "sentry.io", "newrelic",
+    "datadoghq", "clarity.ms", "mixpanel", "amplitude",
+    "fullstory", "heap-api", "intercom.io", "zendesk",
+)
+
+# Static asset CDNs — fetch JS from here, but do not probe them as API bases.
+_STATIC_CDN_HOST_TOKENS = (
+    "alicdn.com", "cloudfront.net", "unpkg.com", "jsdelivr.net",
+    "cdnjs.cloudflare.com", "bootstrapcdn.com", "gstatic.com",
+    "googleapis.com", "assets.vercel", "static.cloudflareinsights",
+)
+
+AI_TITLE_KEYWORDS = [
+    "ai", "llm", "gpt", "chat", "assistant", "bot", "inference", "embedding",
 ]
 
-OPENAPI_SPEC_PATHS = [
-    "/openapi.json", "/openapi.yaml",
-    "/swagger.json", "/swagger.yaml",
-    "/api-docs", "/api/docs",
-    "/api/openapi.json", "/api/openapi.yaml",
-    "/v1/openapi.json", "/v3/api-docs",
-    "/docs/openapi.json",
-]
+# Filename / URL tokens that suggest an API map reference in HTML/JS.
+_SPEC_REF_RE = re.compile(
+    r"""(?P<path>/[^\s"'<>]*(?:openapi|swagger)[^\s"'<>]*\.(?:json|yaml|yml)|"""
+    r"""/[^\s"'<>]*(?:api-docs|api/docs|v3/api-docs)[^\s"'<>]*)""",
+    re.I,
+)
+_GRAPHQL_REF_RE = re.compile(
+    r"""(?P<path>/[^\s"'<>]*(?:graphql|graphiql)[^\s"'<>]*)""",
+    re.I,
+)
+
+
+def _looks_html_body(ct: str, body: str) -> bool:
+    b = (body or "").strip().lower()
+    return "html" in (ct or "").lower() or b.startswith(("<!doctype", "<html"))
+
+
+def _looks_static_storage_error(ct: str, body: str) -> bool:
+    """True for CDN/object-store errors (Aliyun OSS, S3, etc.) — not app APIs."""
+    b = (body or "").strip()
+    if not b:
+        return False
+    bl = b.lower()
+    ct_l = (ct or "").lower()
+    xmlish = (
+        "xml" in ct_l
+        or bl.startswith("<?xml")
+        or bl.startswith("<error")
+        or "<error>" in bl[:200]
+    )
+    if xmlish and any(x in bl for x in (
+        "methodnotallowed", "accessdenied", "nosuchkey", "invalidaccesskey",
+        "nosuchbucket", "allaccessdisabled", "<code>",
+    )):
+        return True
+    if any(x in bl for x in (
+        "oss-accelerate", "aliyuncs.com", "s3.amazonaws.com",
+        "s3-website", "blob.core.windows.net",
+    )):
+        return True
+    return False
+
+
+def _looks_api_method_rejection(
+    ct: str, body: str, headers: Optional[Dict] = None,
+) -> bool:
+    """True when HTTP 405 still looks like an application API handler.
+
+    Rejects static OSS/S3 XML and HTML shells. Accepts JSON APIs and
+    responses that advertise an Allow header.
+    """
+    if _looks_html_body(ct, body):
+        return False
+    if _looks_static_storage_error(ct, body):
+        return False
+    headers = headers or {}
+    headers_low = {str(k).lower(): v for k, v in headers.items()}
+    allow = str(headers_low.get("allow") or "")
+    if allow and re.search(r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b", allow, re.I):
+        return True
+    ct_l = (ct or "").lower()
+    b = (body or "").strip()
+    if "json" in ct_l or (b[:1] in "{["):
+        return True
+    if ct_l.startswith("application/") and "xml" not in ct_l:
+        return True
+    if headers_low.get("www-authenticate"):
+        return True
+    return False
+
+
+def _looks_api_auth_rejection(
+    ct: str, body: str, headers: Optional[Dict] = None,
+) -> bool:
+    """True when 401/403 looks like an application API auth gate (not CDN/HTML)."""
+    if _looks_html_body(ct, body):
+        return False
+    if _looks_static_storage_error(ct, body):
+        return False
+    headers = headers or {}
+    headers_low = {str(k).lower(): v for k, v in headers.items()}
+    if headers_low.get("www-authenticate"):
+        return True
+    ct_l = (ct or "").lower()
+    b = (body or "").strip()
+    jsonish = "json" in ct_l or (b[:1] in "{[")
+    if not jsonish:
+        return False
+    if not b:
+        # Empty body with JSON content-type is still an API auth signal.
+        return "json" in ct_l
+    bl = b.lower()
+    if any(x in bl for x in (
+        "auth", "unauthorized", "forbidden", "token", "login",
+        "credential", "permission", "detail", "error", "message",
+        "denied", "unauthenticated",
+    )):
+        return True
+    try:
+        data = json.loads(b)
+    except Exception:
+        return False
+    return isinstance(data, (dict, list))
+
+
+def _is_meaningful_ai_meta_content(content: str) -> bool:
+    """True when meta content is real AI product copy, not a URL/domain hit.
+
+    Rejects og:url / og:image style values where 'ai' only appears in a
+    hostname (e.g. https://wink.ai/logo.png).
+    """
+    text = html_lib.unescape((content or "").strip())
+    if len(text) < 8:
+        return False
+    low = text.lower()
+    # Pure URL / asset meta — never brand evidence.
+    if re.match(r"^https?://", low):
+        return False
+    if any(low.endswith(ext) for ext in (
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".js", ".css",
+    )):
+        return False
+    # Strip URLs and *.ai hostnames so domain TLD/brand hosts don't count.
+    scrubbed = re.sub(r"https?://\S+", " ", low)
+    scrubbed = re.sub(r"\b[\w-]+\.ai\b", " ", scrubbed)
+    if re.search(
+        r"(?<![a-z0-9])(ai|llm|gpt|chatbot|assistant|inference|embedding|"
+        r"language\s+model)(?![a-z0-9])",
+        scrubbed,
+        re.I,
+    ):
+        return True
+    if re.search(r"\bai[-/]", scrubbed) or re.search(r"[-/]ai\b", scrubbed):
+        return True
+    return False
+
+
+def _looks_ai_api_json(body: str) -> bool:
+    text = (body or "").strip()
+    if not text or text in ("{}", "[]", "null"):
+        return False
+    if any(re.search(p, text, re.I) for p in AI_RESPONSE_BODY_PATTERNS):
+        return True
+    try:
+        data = json.loads(text)
+    except Exception:
+        return False
+    if isinstance(data, dict):
+        if any(k in data for k in OPENAI_JSON_KEYS):
+            return True
+        err = data.get("error")
+        if isinstance(err, dict):
+            return True
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        return any(k in data[0] for k in ("id", "object", "model", "created"))
+    return False
+
+
+def _is_soft_404_json(body: str) -> bool:
+    text = (body or "").strip()
+    if text in ("", "{}", "[]", "null"):
+        return True
+    try:
+        data = json.loads(text)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("statusCode") in (404, 405):
+        return True
+    code = str(data.get("code") or data.get("error") or "").lower()
+    if code in ("not_found", "enoent", "404"):
+        return True
+    msg = str(data.get("message") or data.get("msg") or "").lower()
+    return "not found" in msg and len(data) <= 3
+
+
+def _looks_non_api_document(path: str) -> bool:
+    """True for static/doc file shapes — never inference APIs.
+
+    Shape filter only (extensions / well-known doc basenames). Does not
+    invent or prioritize application endpoints to probe.
+    """
+    pl = (path or "").lower().split("?")[0].split("#")[0]
+    if not pl:
+        return True
+    if pl.endswith((
+        ".txt", ".xml", ".html", ".htm", ".md", ".pdf", ".csv",
+        ".css", ".js", ".map", ".ico", ".png", ".jpg", ".jpeg", ".svg", ".webp",
+    )):
+        return True
+    return False
+
+
+# Path *segments* that look like inference handlers. Exact segment match only —
+# never substring (`run` must not match `runway` / `grunge`).
+_INFERENCE_SEGMENTS = frozenset({
+    "chat", "completion", "completions",
+    "generate", "predict", "prediction",
+    "ask", "message", "messages",
+    "run", "invoke", "llm", "inference",
+    "embedding", "embeddings",
+})
+
+
+def _is_inference_path(path: str) -> bool:
+    """True when a discovered path's segments look like an inference handler.
+
+    Does not invent URLs — only classifies paths already found on the app.
+    """
+    p = (path or "").lower().split("?")[0].split("#")[0]
+    if not p or _looks_non_api_document(p):
+        return False
+    segments = [s for s in p.strip("/").split("/") if s]
+    return any(seg in _INFERENCE_SEGMENTS for seg in segments)
+
+
+def _probe_post_body(
+    path: str,
+    category: str,
+    openapi_schema: Optional[Dict] = None,
+) -> bytes:
+    """Build a probe body from OpenAPI request schema when available."""
+    derived = _body_from_openapi(path, openapi_schema)
+    if derived is not None:
+        return derived
+    path_l = (path or "").lower()
+    if "completions" in path_l and "chat" not in path_l:
+        return GENERIC_PROMPT_PROBE
+    if category in ("chat", "ml", "embedding") or _is_inference_path(path):
+        return GENERIC_CHAT_PROBE
+    return GENERIC_PROMPT_PROBE
+
+
+def _body_from_openapi(path: str, schema: Optional[Dict]) -> Optional[bytes]:
+    if not schema or not isinstance(schema, dict):
+        return None
+    paths = schema.get("paths") or {}
+    methods = paths.get(path) or paths.get(path.rstrip("/")) or {}
+    if not isinstance(methods, dict):
+        return None
+    for method in ("post", "put", "patch", "get"):
+        op = methods.get(method)
+        if not isinstance(op, dict):
+            continue
+        props = (
+            ((op.get("requestBody") or {}).get("content") or {})
+            .get("application/json", {})
+            .get("schema", {})
+            .get("properties")
+        )
+        if not isinstance(props, dict) or not props:
+            continue
+        body: Dict = {}
+        for key, prop in props.items():
+            kl = key.lower()
+            if kl in ("messages",):
+                body[key] = [{"role": "user", "content": "Hi"}]
+            elif kl in ("prompt", "input", "query", "text", "question", "input_value"):
+                body[key] = "Hi"
+            elif kl in ("model",):
+                body[key] = "default"
+            elif kl in ("max_tokens", "max_new_tokens"):
+                body[key] = 1
+            elif kl in ("stream",):
+                body[key] = False
+            elif isinstance(prop, dict) and prop.get("type") == "object":
+                body[key] = {}
+            elif isinstance(prop, dict) and prop.get("type") == "array":
+                body[key] = []
+            else:
+                body[key] = "Hi" if "str" in str(prop.get("type", "string")) else 0
+        if body:
+            return json.dumps(body).encode()
+    return None
+
 
 AI_DOM_PATTERNS = [
     r'role=["\']assistant["\']',
@@ -339,14 +490,16 @@ class EvidenceItem:
     source:    str
     endpoint:  str = ""
     framework: str = ""
+    evidence_class: str = ""
 
     @staticmethod
     def make(key: str, detail: str, source: str,
              endpoint: str = "", framework: str = "") -> "EvidenceItem":
         return EvidenceItem(
             key=key, detail=detail,
-            weight=EVIDENCE_WEIGHTS.get(key, 0),
+            weight=evidence_weight(key),
             source=source, endpoint=endpoint, framework=framework,
+            evidence_class=classify_evidence(key).value,
         )
 
 
@@ -359,17 +512,20 @@ class AuthSignal:
 
 
 ENDPOINT_TYPE_RULES: List[Tuple[re.Pattern, str, str]] = [
-    (re.compile(r"/(chat|completions|generate|messages|ask|conversation)", re.I), "inference",  "critical"),
-    (re.compile(r"/(embed|embedding)", re.I),                                      "embedding",  "high"),
-    (re.compile(r"/(pull|push|delete|copy|create|import)", re.I),                  "management", "critical"),
-    (re.compile(r"/(model|models|tags|version|health|info|config)", re.I),         "metadata",   "medium"),
-    (re.compile(r"/(tool|function|plugin|action|execute|run)", re.I),              "tool",       "high"),
-    (re.compile(r"/(memory|store|recall|history)", re.I),                          "memory",     "high"),
-    (re.compile(r"/(search|retrieve|vector|rag)", re.I),                           "retrieval",  "high"),
-    (re.compile(r"/(agent|orchestrat|workflow|plan)", re.I),                       "agentic",    "high"),
-    (re.compile(r"/(upload|file|image|audio|vision)", re.I),                       "multimodal", "medium"),
-    (re.compile(r"/(graphql|query)", re.I),                                        "graphql",    "high"),
-    (re.compile(r"/(openapi|swagger|docs|schema)", re.I),                          "schema",     "low"),
+    # Segment-aware: /chat matches /chat or /chat/... but NOT /chatflows.
+    (re.compile(r"/(?:chat|completions|generate|messages|ask|conversation|prediction|predict)(?:/|$)", re.I),
+     "inference",  "critical"),
+    (re.compile(r"/(?:embed|embeddings?)(?:/|$)", re.I),                           "embedding",  "high"),
+    (re.compile(r"/(?:pull|push|delete|copy|create|import)(?:/|$)", re.I),         "management", "critical"),
+    (re.compile(r"/(?:models?|tags|version|health|info|config)(?:/|$)", re.I),     "metadata",   "medium"),
+    (re.compile(r"/(?:tool|function|plugin|action|execute|run)(?:/|$)", re.I),     "tool",       "high"),
+    (re.compile(r"/(?:memory|store|recall|history)(?:/|$)", re.I),                 "memory",     "high"),
+    (re.compile(r"/(?:search|retrieve|vector|rag)(?:/|$)", re.I),                  "retrieval",  "high"),
+    (re.compile(r"/(?:agents?|orchestrat|workflow|plan)(?:/|$)", re.I),            "agentic",    "high"),
+    (re.compile(r"/(?:upload|file|image|audio|vision)(?:/|$)", re.I),              "multimodal", "medium"),
+    (re.compile(r"/(?:graphql|query)(?:/|$)", re.I),                               "graphql",    "high"),
+    (re.compile(r"/(?:chatflows|flows|components|nodes|openapi|swagger|docs|schema)(?:/|$)", re.I),
+     "schema",     "low"),
 ]
 
 
@@ -414,7 +570,6 @@ def classify_endpoint(url: str, auth_signals: List[AuthSignal] = None) -> Endpoi
 class FingerprintReport:
     is_ai_powered:    bool
     confidence:       str
-    evidence_score:   int
 
     framework:            str   = ""
     framework_confidence: float = 0.0
@@ -432,6 +587,8 @@ class FingerprintReport:
     classified_endpoints:   List[EndpointRecord] = field(default_factory=list)
     discovered_paths:       List[str]         = field(default_factory=list)
     auth_required_paths:    List[AuthSignal]  = field(default_factory=list)
+    # JS-discovered API hosts (netlocs) allowed for infra/vuln probing.
+    allowed_api_hosts:      List[str]         = field(default_factory=list)
 
     frameworks_detected: List[str] = field(default_factory=list)
     openapi_schema:      Dict       = field(default_factory=dict)
@@ -441,12 +598,23 @@ class FingerprintReport:
 
     evidence_items:   List[EvidenceItem] = field(default_factory=list)
     atlas_techniques: List[str]          = field(default_factory=list)
+    page_title:       str                = ""
+    spa_catch_all:    bool               = False
+    app_description:  str                = ""
+
+    has_live_surface: bool = False
+    ai_brand_only:    bool = False
+    detection:        str  = "not_detected"
+    evidence_classes: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
             "is_ai_powered":          self.is_ai_powered,
+            "detection":              self.detection,
             "confidence":             self.confidence,
-            "evidence_score":         self.evidence_score,
+            "has_live_surface":       self.has_live_surface,
+            "ai_brand_only":          self.ai_brand_only,
+            "evidence_classes":       self.evidence_classes,
             "framework":              self.framework,
             "framework_confidence":   round(self.framework_confidence * 100, 1),
             "framework_signals":      self.framework_signals,
@@ -457,6 +625,7 @@ class FingerprintReport:
             "model_reported":         self.model_reported,
             "capabilities":           self.capabilities,
             "ml_endpoints":           self.ml_endpoints,
+            "allowed_api_hosts":      self.allowed_api_hosts,
             "classified_endpoints": [
                 {"url": e.url, "path": e.path, "type": e.endpoint_type,
                  "risk": e.risk, "auth_required": e.auth_required,
@@ -473,15 +642,17 @@ class FingerprintReport:
             "openapi_schema":      self.openapi_schema,
             "graphql_types":       self.graphql_types,
             "deployment_signals":  self.deployment_signals,
-            "page_title":          "",
+            "page_title":          self.page_title,
+            "spa_catch_all":       self.spa_catch_all,
             "technologies":        self.technologies,
             "api_schema":          {"tools": [], "openapi": self.openapi_schema},
-            "app_description":     "",
+            "app_description":     self.app_description,
             "response_headers":    {},
             "chat_components":     [],
             "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
+                 "evidence_class": e.evidence_class,
                  "source": e.source, "endpoint": e.endpoint, "framework": e.framework}
                 for e in sorted(self.evidence_items, key=lambda x: x.weight, reverse=True)
             ],
@@ -492,7 +663,10 @@ class FingerprintReport:
         print(f"\n{'='*w}")
         print(f"  AI Fingerprint Report")
         print(f"{'='*w}")
-        print(f"  Confidence       : {self.confidence.upper()} (score={self.evidence_score})")
+        print(f"  Detection        : {self.detection.upper()}  (confidence={self.confidence})")
+        print(f"  Live surface     : {self.has_live_surface}")
+        if self.ai_brand_only:
+            print(f"  Brand only       : True")
         if self.framework:
             pct = f"{self.framework_confidence*100:.0f}%"
             print(f"  Framework        : {self.framework}  (confidence {pct})")
@@ -521,7 +695,7 @@ class FingerprintReport:
             print(f"  Deployment       : {self.deployment_signals}")
         print(f"\n  Evidence (top 8):")
         for ev in sorted(self.evidence_items, key=lambda x: x.weight, reverse=True)[:8]:
-            print(f"    +{ev.weight:3d}  [{ev.source:10s}]  {ev.detail[:60]}")
+            print(f"    [{ev.evidence_class:12s}] [{ev.source:10s}]  {ev.detail[:60]}")
         print(f"{'='*w}\n")
 
 
@@ -530,14 +704,25 @@ class AIFingerprintAgent:
     def __init__(
         self,
         timeout: int = 8,
-        max_js_bundles: int = 3,
-        max_js_bundle_bytes: int = 200_000,
+        max_js_bundles: int = 20,
+        max_js_bundle_bytes: int = 1_500_000,
         run_behavioral_probes: bool = True,
+        probe_prompt: str = "In one sentence, describe the ocean.",
+        probe_model: str = "gpt-3.5-turbo",
+        nondeterminism_samples: int = 3,
+        nondeterminism_low: float = 0.15,
+        nondeterminism_high: float = 0.98,
     ):
-        self.timeout               = timeout
-        self.max_js_bundles        = max_js_bundles
-        self.max_js_bundle_bytes   = max_js_bundle_bytes
-        self.run_behavioral_probes = run_behavioral_probes
+        self.timeout                = timeout
+        self.max_js_bundles         = max_js_bundles
+        self.max_js_bundle_bytes    = max_js_bundle_bytes
+        self.run_behavioral_probes  = run_behavioral_probes
+        self.probe_prompt           = probe_prompt
+        self.probe_model            = probe_model
+        self.nondeterminism_samples = nondeterminism_samples
+        self.nondeterminism_low     = nondeterminism_low
+        self.nondeterminism_high    = nondeterminism_high
+        self.auth_cookie            = ""
 
     async def fingerprint(
         self,
@@ -546,7 +731,10 @@ class AIFingerprintAgent:
         page_html: str = "",
         response_headers: Dict = None,
         verbose: bool = False,
+        auth_cookie: str = "",
     ) -> Dict:
+        if auth_cookie:
+            self.auth_cookie = auth_cookie
         report = await self._fingerprint_internal(
             target_url, discovered_endpoints or [],
             page_html, response_headers or {}, verbose)
@@ -565,24 +753,39 @@ class AIFingerprintAgent:
         base = target_url.rstrip("/")
 
         if not page_html:
-            _, page_headers, page_html = self._fetch(base)
+            # Bare urllib must not block the SSE event loop / heartbeats.
+            loop = asyncio.get_event_loop()
+            status, page_headers, page_html = await loop.run_in_executor(
+                None, lambda: self._fetch(base, max_bytes=200_000))
             if not response_headers:
                 response_headers = page_headers
+            if not page_html:
+                logger.warning(
+                    "[fingerprint] empty root page body from %s (HTTP %s) — "
+                    "host unreachable or returned no content",
+                    base, status)
 
-        js_urls, html_evidence, extracted_links = self._analyse_html(
-            page_html, base, response_headers)
+        spa_catch_all = await self._detect_spa_catch_all(base)
+        if spa_catch_all and verbose:
+            print("    [spa] catch-all/SPA fallback detected — using content-based probes")
 
+        js_urls, html_evidence, extracted_links, page_title = (
+            self._analyse_html(page_html, base, response_headers)
+        )
+        if spa_catch_all:
+            html_evidence.append(EvidenceItem.make(
+                "spa_catch_all",
+                "SPA/catch-all routing detected (canary path returned app shell)",
+                "passive"))
+
+        # Phase 1 — discover application-specific candidates (no path catalog spray).
         parallel = await asyncio.gather(
             self._fetch_and_analyse_js(js_urls, base, verbose),
-            self._probe_openapi(base, verbose),
-            self._probe_graphql(base, verbose),
             self._fetch_robots_sitemap(base, verbose),
-            self._probe_ranked_endpoints(
-                base, extracted_links, verbose),
             self._analyse_headers_cookies(response_headers, verbose),
             return_exceptions=True,
         )
-        js_r, openapi_r, graphql_r, passive_r, probe_r, header_r = parallel
+        js_r, passive_r, header_r = parallel
 
         all_evidence: List[EvidenceItem] = list(html_evidence)
         ml_endpoints:    List[str]  = []
@@ -593,59 +796,214 @@ class AIFingerprintAgent:
         graphql_types:   List[str]  = []
         js_api_paths:    List[str]  = []
         raw_html_js = ""
+        candidates: List[str] = list(extracted_links)
 
-        for r in [js_r, openapi_r, graphql_r, passive_r, probe_r, header_r]:
+        for r in [js_r, passive_r, header_r]:
             if isinstance(r, dict):
                 all_evidence.extend(r.get("evidence", []))
-                ml_endpoints.extend(r.get("endpoints", []))
                 all_frameworks.extend(r.get("frameworks", []))
-                auth_signals.extend(r.get("auth_signals", []))
 
+        related_bases: List[str] = []
         if isinstance(js_r, dict):
             js_api_paths = js_r.get("api_paths", [])
             raw_html_js  = js_r.get("raw_js", "")
-            discovered_paths.extend(js_api_paths)
-
-        if isinstance(openapi_r, dict) and openapi_r.get("found"):
-            openapi_schema = openapi_r.get("schema", {})
-
-        if isinstance(graphql_r, dict):
-            graphql_types = graphql_r.get("types", [])
+            related_bases.extend(js_r.get("api_bases", []) or [])
+            # Report every JS-discovered path/URL; probe inference-shaped ones
+            # (related-host absolute APIs are added after related_bases resolve).
+            for path in js_api_paths:
+                discovered_paths.append(path)
+                if self._candidate_is_inference(path):
+                    candidates.append(path)
 
         if isinstance(passive_r, dict):
-            discovered_paths.extend(passive_r.get("paths", []))
+            # Always record discovered paths for reporting; only probe
+            # inference-shaped ones (status codes on /features/ are noise).
+            for path in passive_r.get("paths", []) or []:
+                discovered_paths.append(path)
+                if self._candidate_is_inference(path):
+                    candidates.append(path)
+
+        for ep in discovered_endpoints or []:
+            url = ep.get("url", "") if isinstance(ep, dict) else str(ep)
+            if not url:
+                continue
+            if "://" in url:
+                candidates.append(url)
+                discovered_paths.append(url)
+            else:
+                candidates.append(url)
+                discovered_paths.append(url)
+
+        # Related API hosts referenced in app JS (e.g. qwen.ai → chat.qwen.ai).
+        related_bases = self._normalize_api_bases(related_bases, page_base=base)
+        if related_bases:
+            hop_r = await self._discover_related_bases(
+                related_bases, page_base=base, verbose=verbose)
+            if isinstance(hop_r, dict):
+                all_evidence.extend(hop_r.get("evidence", []))
+                for path in hop_r.get("api_paths", []) or []:
+                    discovered_paths.append(path)
+                    if self._candidate_is_inference(path):
+                        candidates.append(path)
+                related_bases.extend(hop_r.get("api_bases", []) or [])
+                related_bases = self._normalize_api_bases(related_bases, page_base=base)
+
+        # Relative inference paths also apply on JS-discovered API hosts only.
+        relative_infer = [
+            p for p in discovered_paths
+            if p.startswith("/") and _is_inference_path(p)
+        ]
+        for api_base in related_bases:
+            for path in relative_infer:
+                candidates.append(api_base.rstrip("/") + path)
+
+        # Absolute API URLs already present in JS on allowlisted related hosts
+        # (e.g. product APIs without chat/messages segments). No catalog spray.
+        for url in self._related_host_api_candidates(
+            discovered_paths, related_bases, page_base=base,
+        ):
+            candidates.append(url)
+
+        # Spec / GraphQL refs only if this app's HTML/JS/discovery mentioned them.
+        surface_blob = "\n".join([
+            page_html or "",
+            raw_html_js or "",
+            "\n".join(discovered_paths),
+        ])
+        spec_refs = self._extract_spec_refs(surface_blob)
+        graphql_refs = self._extract_graphql_refs(surface_blob)
+        # Also treat discovered paths that look like specs/graphql.
+        for path in discovered_paths:
+            pl = path.lower()
+            if any(x in pl for x in ("openapi", "swagger", "api-docs")):
+                spec_refs.append(path if path.startswith("/") else urllib.parse.urlparse(path).path)
+            if "graphql" in pl or "graphiql" in pl:
+                graphql_refs.append(path if path.startswith("/") else urllib.parse.urlparse(path).path)
+
+        openapi_r = await self._probe_openapi(
+            base, self._normalize_candidate_paths(spec_refs), verbose)
+        graphql_r = await self._probe_graphql(
+            base, self._normalize_candidate_paths(graphql_refs), verbose)
+
+        if isinstance(openapi_r, dict):
+            all_evidence.extend(openapi_r.get("evidence", []))
+            if openapi_r.get("found"):
+                openapi_schema = openapi_r.get("schema", {})
+                for ep in openapi_r.get("endpoints", []) or []:
+                    path = urllib.parse.urlparse(ep).path if ep.startswith("http") else ep
+                    if path:
+                        candidates.append(path)
+                        discovered_paths.append(path)
+
+        if isinstance(graphql_r, dict):
+            all_evidence.extend(graphql_r.get("evidence", []))
+            graphql_types = graphql_r.get("types", [])
+            for ep in graphql_r.get("endpoints", []) or []:
+                path = urllib.parse.urlparse(ep).path if ep.startswith("http") else ep
+                if path:
+                    candidates.append(path)
+                    discovered_paths.append(path)
+
+        candidates = self._normalize_candidate_paths(candidates)
+        if verbose:
+            print(f"    [discover] {len(candidates)} candidate path(s) from app surface")
+            if related_bases:
+                print(
+                    "    [discover] related API host(s) from JS: "
+                    + ", ".join(related_bases[:6])
+                )
+            if not candidates:
+                uniq = list(dict.fromkeys(discovered_paths))
+                api_like = [
+                    p for p in uniq
+                    if "/api/" in p or p.startswith("/v1/")
+                    or p.startswith("/v2/") or "/ollama/" in p
+                    or p.startswith("http")
+                ]
+                sample = (api_like or uniq)[:12]
+                if sample:
+                    print(
+                        "    [discover] non-probe paths seen: "
+                        + ", ".join(sample)
+                    )
+                if self.auth_cookie:
+                    print(
+                        "    [discover] auth credentials present but no inference-shaped "
+                        "paths found in HTML/JS/robots — nothing to probe yet"
+                    )
+
+        # Phase 2 — probe only what this application exposed.
+        related_api_hosts = {
+            (urllib.parse.urlparse(origin).netloc or "").lower()
+            for origin in related_bases
+            if urllib.parse.urlparse(origin).netloc
+        }
+        page_host = (urllib.parse.urlparse(base).netloc or "").lower()
+        if candidates:
+            probe_r = await self._probe_candidates(
+                base, candidates, verbose, spa_catch_all=spa_catch_all,
+                openapi_schema=openapi_schema,
+                related_api_hosts=related_api_hosts,
+                page_host=page_host,
+            )
+            if isinstance(probe_r, dict):
+                all_evidence.extend(probe_r.get("evidence", []))
+                ml_endpoints.extend(probe_r.get("endpoints", []))
+                all_frameworks.extend(probe_r.get("frameworks", []))
+                auth_signals.extend(probe_r.get("auth_signals", []))
+
+        # Auth-gated AI endpoints are still AI surfaces — track them as endpoints.
+        for sig in auth_signals:
+            if sig.endpoint and sig.endpoint not in ml_endpoints:
+                ml_endpoints.append(sig.endpoint)
 
         behav_r = None
-        probe_targets = (ml_endpoints or [base + p for p, _ in SEED_ENDPOINT_RANKING
-                                          if "chat" in _ or _ == "ml"])
-        if self.run_behavioral_probes and probe_targets:
-            behav_r = await self._behavioral_probes(probe_targets[:2], verbose)
+        auth_urls = {a.endpoint for a in auth_signals}
+        open_targets = [e for e in ml_endpoints if e not in auth_urls]
+        if self.run_behavioral_probes and open_targets:
+            behav_r = await self._behavioral_probes(open_targets[:2], verbose)
             if isinstance(behav_r, dict):
                 all_evidence.extend(behav_r.get("evidence", []))
-
-        if js_api_paths:
-            extra = await self._confirm_js_paths(base, js_api_paths, verbose)
-            if isinstance(extra, dict):
-                all_evidence.extend(extra.get("evidence", []))
-                ml_endpoints.extend(extra.get("endpoints", []))
-
-        if discovered_endpoints:
-            disc_r = await self._check_discovered_endpoints(discovered_endpoints)
-            if isinstance(disc_r, dict):
-                all_evidence.extend(disc_r.get("evidence", []))
-                ml_endpoints.extend(disc_r.get("endpoints", []))
+            nd_r = await self._nondeterminism_probe(open_targets[0], verbose)
+            if isinstance(nd_r, dict):
+                all_evidence.extend(nd_r.get("evidence", []))
 
         ml_endpoints     = list(dict.fromkeys(ml_endpoints))
         discovered_paths = list(dict.fromkeys(discovered_paths))
         all_frameworks   = list(dict.fromkeys(all_frameworks))
 
-        framework_result = self._identify_framework(
+        # Deduplicate auth signals by endpoint.
+        seen_auth: Set[str] = set()
+        deduped_auth: List[AuthSignal] = []
+        for sig in auth_signals:
+            if sig.endpoint in seen_auth:
+                continue
+            seen_auth.add(sig.endpoint)
+            deduped_auth.append(sig)
+        auth_signals = deduped_auth
+
+        framework_result = self._identify_protocol(
             page_html, raw_html_js, response_headers,
             ml_endpoints + discovered_paths, all_evidence)
         all_evidence.extend(framework_result.get("evidence", []))
         detected_framework   = framework_result.get("framework", "")
         detected_protocol    = framework_result.get("protocol", "")
         detected_infra       = framework_result.get("inference_server", "")
+
+        # Live surface: evidence keys OR inference-shaped endpoints/auth only.
+        # Non-inference AuthSignals (e.g. /admin 401) must not flip is_ai.
+        evidence_keys = [ev.key for ev in all_evidence]
+        live_from_keys = has_live_surface_evidence(evidence_keys)
+
+        def _ep_path(ep: str) -> str:
+            return urllib.parse.urlparse(ep).path if "://" in ep else ep
+
+        live_from_ml = any(_is_inference_path(_ep_path(ep)) for ep in ml_endpoints)
+        live_from_auth = any(
+            _is_inference_path(_ep_path(sig.endpoint)) for sig in auth_signals
+        )
+        has_live_surface = live_from_keys or live_from_ml or live_from_auth
+
         if detected_framework and detected_framework not in all_frameworks:
             all_frameworks.insert(0, detected_framework)
         if detected_protocol and detected_protocol not in all_frameworks:
@@ -655,14 +1013,39 @@ class AIFingerprintAgent:
             detected_framework, all_frameworks, openapi_schema,
             ml_endpoints, graphql_types)
 
-        total_score = sum(ev.weight for ev in all_evidence)
-        confidence  = score_to_confidence(total_score)
-        is_ai       = total_score >= 26
+        # Deduplicate evidence
+        seen_ev: Set[Tuple[str, str]] = set()
+        deduped_evidence: List[EvidenceItem] = []
+        for ev in all_evidence:
+            k = (ev.key, ev.detail)
+            if k in seen_ev:
+                continue
+            seen_ev.add(k)
+            deduped_evidence.append(ev)
+        all_evidence = deduped_evidence
+
+        # Taxonomy scoring
+        evidence_keys = [ev.key for ev in all_evidence]
+        detection = score_evidence(evidence_keys)
+        confidence = detection.confidence
+        classes = detection.classes or {}
+        # Brand-only: marketing/brand signals with no live surface and no
+        # structural/hint AI discovery (junk robots/JS hints are no longer emitted).
+        ai_brand_only = (
+            not has_live_surface
+            and bool(classes.get("brand"))
+            and not classes.get("behavioral")
+            and not classes.get("live_surface")
+            and not classes.get("passive_structural")
+            and not classes.get("passive_hint")
+        )
+        is_ai = has_live_surface
 
         atlas: List[str] = []
         for ep in ml_endpoints:
             path = urllib.parse.urlparse(ep).path.lower()
-            if any(x in path for x in ["/chat", "/completions", "/generate", "/messages"]):
+            if any(x in path for x in ["/chat", "/completions", "/generate", "/messages",
+                                       "/ask", "/prediction", "/run"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["chat"])
             elif any(x in path for x in ["/embed", "/embedding"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["embedding"])
@@ -689,20 +1072,38 @@ class AIFingerprintAgent:
                 deployment["server_header"] = ev.detail
             if "docker" in ev.detail.lower() or "container" in ev.detail.lower():
                 deployment["containerized"] = True
+        if spa_catch_all:
+            deployment["spa_catch_all"] = True
         if auth_signals:
             deployment["authentication"] = list({a.auth_type for a in auth_signals})
         else:
             deployment["authentication"] = ["none"]
 
-        INFRA_FRAMEWORKS = {"Ollama", "vLLM", "TGI (HuggingFace)", "OpenAI-compatible",
-                            "Triton", "TorchServe", "SageMaker"}
-        infra_layer = detected_framework if detected_framework in INFRA_FRAMEWORKS else detected_infra
-        app_layer   = detected_framework if detected_framework not in INFRA_FRAMEWORKS else ""
+        PROTOCOL_LABELS = {"OpenAI-compatible", "chat_api"}
+        infra_layer = detected_framework if detected_framework in PROTOCOL_LABELS else detected_infra
+        app_layer   = ""
+
+        meta_desc = ""
+        m_desc = re.search(
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+            page_html or "", re.I)
+        if not m_desc:
+            m_desc = re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']',
+                page_html or "", re.I)
+        if m_desc:
+            meta_desc = m_desc.group(1)[:240]
+
+        allowed_api_hosts = self._collect_allowed_api_hosts(
+            page_base=base,
+            related_bases=related_bases,
+            ml_endpoints=ml_endpoints,
+            auth_signals=auth_signals,
+        )
 
         return FingerprintReport(
             is_ai_powered         = is_ai,
             confidence            = confidence,
-            evidence_score        = total_score,
             framework             = detected_framework,
             framework_confidence  = framework_result.get("framework_confidence", 0.0),
             framework_signals     = framework_result.get("framework_signals", []),
@@ -716,6 +1117,7 @@ class AIFingerprintAgent:
             classified_endpoints  = classified,
             discovered_paths      = discovered_paths,
             auth_required_paths   = auth_signals,
+            allowed_api_hosts     = allowed_api_hosts,
             frameworks_detected   = all_frameworks,
             openapi_schema        = openapi_schema,
             graphql_types         = graphql_types,
@@ -723,32 +1125,66 @@ class AIFingerprintAgent:
             deployment_signals    = deployment,
             evidence_items        = all_evidence,
             atlas_techniques      = atlas,
+            page_title            = page_title,
+            spa_catch_all         = spa_catch_all,
+            app_description       = meta_desc,
+            has_live_surface      = has_live_surface,
+            ai_brand_only         = ai_brand_only,
+            detection             = detection.detection.value,
+            evidence_classes      = detection.classes,
         )
 
     def _analyse_html(
         self, html: str, base: str, headers: Dict
-    ) -> Tuple[List[str], List[EvidenceItem], List[str]]:
+    ) -> Tuple[List[str], List[EvidenceItem], List[str], str]:
+        """Return (js_urls, evidence, links, page_title)."""
         evidence: List[EvidenceItem] = []
         js_urls:  List[str]          = []
         links:    List[str]          = []
+        page_title = ""
 
         if not html:
-            return js_urls, evidence, links
+            return js_urls, evidence, links, page_title
+
+        m_title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        if m_title:
+            page_title = re.sub(r"\s+", " ", html_lib.unescape(m_title.group(1))).strip()
+            title_low = page_title.lower()
+            if any(kw in title_low for kw in AI_TITLE_KEYWORDS):
+                evidence.append(EvidenceItem.make(
+                    "page_title_ai", f"AI page title: {page_title[:80]}", "html"))
+        else:
+            title_low = ""
 
         for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I):
-            src = m.group(1)
-            if not src.startswith("http"):
-                src = base + ("" if src.startswith("/") else "/") + src.lstrip("/")
-            if any(x in src for x in [
-                "/assets/", "/static/", "/dist/", "/js/", "/build/",
-                "/_next/", ".bundle.", "chunk", "main.", "app.", "index.",
-            ]):
+            src = self._abs_url(base, m.group(1))
+            # Page-referenced bundles may live on a CDN (qwen.ai → alicdn).
+            if self._looks_js_asset_url(src, base, allow_cross_origin=True):
                 js_urls.append(src)
 
-        for m in re.finditer(r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant)[^"\']*)["\']',
-                             html, re.I):
+        # Vite/webpack often preload route chunks that hold API path strings.
+        for m in re.finditer(
+            r'<link[^>]+rel=["\'](?:modulepreload|preload)["\'][^>]*>',
+            html, re.I,
+        ):
+            tag = m.group(0)
+            href_m = re.search(r'href=["\']([^"\']+)["\']', tag, re.I)
+            if not href_m:
+                continue
+            href = self._abs_url(base, href_m.group(1))
+            if self._looks_js_asset_url(href, base, allow_cross_origin=True):
+                js_urls.append(href)
+
+        for m in re.finditer(
+            r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant|'
+            r'inference|embedding|language model)[^"\']*)["\']',
+            html, re.I,
+        ):
+            content = m.group(1)
+            if not _is_meaningful_ai_meta_content(content):
+                continue
             evidence.append(EvidenceItem.make(
-                "meta_ai_tag", f"AI meta tag: {m.group(1)[:60]}", "html"))
+                "meta_ai_tag", f"AI meta tag: {content[:60]}", "html"))
 
         for pattern in AI_DOM_PATTERNS:
             m = re.search(pattern, html, re.I)
@@ -761,35 +1197,56 @@ class AIFingerprintAgent:
             if href.startswith("/") and any(
                 x in href.lower() for x in [
                     "/chat", "/api", "/playground", "/workspace",
-                    "/dashboard", "/app", "/assistant",
+                    "/dashboard", "/app", "/assistant", "/flow",
+                    "/openapi", "/swagger", "/graphql", "/v1/", "/v2/",
                 ]
             ):
                 links.append(href)
 
-        csp_header = headers.get("Content-Security-Policy", "")
-        if not csp_header:
-            m = re.search(r'<meta[^>]+content=["\']([^"\']*connect-src[^"\']*)["\']',
-                          html, re.I)
-            if m:
-                csp_header = m.group(1)
-        if csp_header:
-            for domain in AI_CSP_DOMAINS:
-                if domain in csp_header:
-                    evidence.append(EvidenceItem.make(
-                        "csp_ai_domain",
-                        f"CSP connect-src includes {domain}", "passive"))
+        return (
+            list(dict.fromkeys(js_urls)),
+            evidence,
+            list(dict.fromkeys(links)),
+            page_title,
+        )
 
-        return list(dict.fromkeys(js_urls)), evidence, list(dict.fromkeys(links))
+    async def _detect_spa_catch_all(self, base: str) -> bool:
+        loop = asyncio.get_event_loop()
+        try:
+            status, headers, body = await loop.run_in_executor(
+                None, lambda: self._fetch(base + SPA_CANARY_PATH))
+            if status == 200 and _looks_html_body(
+                headers.get("Content-Type", "") or headers.get("content-type", ""),
+                body,
+            ):
+                return True
+            # Some SPAs return 200 with the same shell even for JSON Accept.
+            if status == 200 and body and len(body) > 200:
+                root_status, _, root_body = await loop.run_in_executor(
+                    None, lambda: self._fetch(base))
+                if root_status == 200 and root_body and body[:500] == root_body[:500]:
+                    return True
+        except Exception:
+            pass
+        return False
 
     async def _fetch_and_analyse_js(
         self, js_urls: List[str], base: str, verbose: bool
     ) -> Dict:
         evidence:   List[EvidenceItem] = []
         api_paths:  List[str]          = []
+        api_bases:  List[str]          = []
         frameworks: List[str]          = []
         raw_js_combined = ""
 
         loop = asyncio.get_event_loop()
+        queue: List[str] = list(dict.fromkeys(js_urls))
+        seen_urls: Set[str] = set()
+        skipped_vendor = 0
+        processed = 0
+        # Soft budget; extend when still hunting inference-shaped /api paths.
+        budget = self.max_js_bundles
+        extended_budget = max(self.max_js_bundles * 2, 24)
 
         async def fetch_js(url: str) -> Tuple[str, str]:
             try:
@@ -799,109 +1256,781 @@ class AIFingerprintAgent:
             except Exception:
                 return url, ""
 
-        bundles = await asyncio.gather(
-            *[fetch_js(u) for u in js_urls[: self.max_js_bundles * 3]],
-            return_exceptions=True)
+        def _has_inference() -> bool:
+            return any(self._candidate_is_inference(p) for p in api_paths)
 
-        processed = 0
-        for item in bundles:
-            if processed >= self.max_js_bundles:
+        def _refill_batch() -> List[str]:
+            nonlocal skipped_vendor, queue
+            # Re-rank every round so API-likely chunks beat mermaid/vendor.
+            ranked: List[Tuple[int, str]] = []
+            kept: List[str] = []
+            for u in queue:
+                if u in seen_urls:
+                    continue
+                pri = self._js_chunk_priority(u)
+                if pri < 0:
+                    seen_urls.add(u)
+                    skipped_vendor += 1
+                    continue
+                ranked.append((pri, u))
+            ranked.sort(key=lambda t: t[0], reverse=True)
+            queue = [u for _, u in ranked]
+            batch: List[str] = []
+            while queue and len(batch) < 4 and processed + len(batch) < budget:
+                u = queue.pop(0)
+                if u in seen_urls:
+                    continue
+                seen_urls.add(u)
+                batch.append(u)
+            return batch
+
+        while True:
+            if processed >= budget:
+                if _has_inference() or budget >= extended_budget:
+                    break
+                # Still no inference routes — spend remaining budget on next-best chunks.
+                budget = min(extended_budget, budget + 8)
+            batch = _refill_batch()
+            if not batch:
                 break
-            if isinstance(item, Exception) or not isinstance(item, tuple):
-                continue
-            url, js = item
-            if not js:
-                continue
-            processed += 1
-            raw_js_combined += js[:50_000]
 
-            if verbose:
-                print(f"    [js] {url[-60:]} ({len(js)} bytes)")
+            bundles = await asyncio.gather(
+                *[fetch_js(u) for u in batch], return_exceptions=True)
 
-            for sdk_name, patterns in ML_LIBRARY_JS_SIGNATURES.items():
-                for pat in patterns:
-                    if pat.lower() in js.lower():
-                        evidence.append(EvidenceItem.make(
-                            "js_ai_sdk", f"SDK: {sdk_name}", "js_bundle",
-                            endpoint=url, framework=sdk_name))
-                        frameworks.append(sdk_name)
-                        break
+            for item in bundles:
+                if processed >= budget:
+                    break
+                if isinstance(item, Exception) or not isinstance(item, tuple):
+                    continue
+                url, js = item
+                if not js:
+                    continue
+                processed += 1
+                raw_js_combined += js[:50_000]
 
-            extracted = self._extract_api_paths_from_js(js)
-            api_paths.extend(extracted)
-            if extracted:
-                evidence.append(EvidenceItem.make(
-                    "js_api_path_extracted",
-                    f"{len(extracted)} AI API path(s) in JS bundle",
-                    "js_bundle", endpoint=url))
+                if verbose:
+                    trunc = (
+                        len(js) >= self.max_js_bundle_bytes
+                        and self.max_js_bundle_bytes > 0
+                    )
+                    if len(url) > 72:
+                        label = url[:32] + "…" + url[-32:]
+                    else:
+                        label = url
+                    flag = " truncated" if trunc else ""
+                    print(f"    [js] {label} ({len(js)} bytes{flag})")
 
-            for m in re.finditer(
-                r'new\s+EventSource\s*\(\s*["\`]([^"\'`]+)["\`]', js, re.I):
-                path = m.group(1).split("${")[0]
-                if self._is_ai_api_path(path):
+                for sdk_name, patterns in ML_LIBRARY_JS_SIGNATURES.items():
+                    for pat in patterns:
+                        if pat.lower() in js.lower():
+                            evidence.append(EvidenceItem.make(
+                                "js_ai_sdk", f"SDK: {sdk_name}", "js_bundle",
+                                endpoint=url, framework=sdk_name))
+                            frameworks.append(sdk_name)
+                            break
+
+                extracted = self._extract_api_paths_from_js(js)
+                api_paths.extend(extracted)
+                api_bases.extend(self._extract_api_bases_from_js(js))
+                # Hint evidence only when at least one path is inference-shaped.
+                ai_shaped = [p for p in extracted if self._candidate_is_inference(p)]
+                if ai_shaped:
                     evidence.append(EvidenceItem.make(
-                        "sse_in_js", f"EventSource({path[:50]})",
-                        "js_bundle", endpoint=url))
-                    api_paths.append(path)
-
-            for m in re.finditer(
-                r'new\s+WebSocket\s*\(\s*["\`]([^"\'`]+)["\`]', js, re.I):
-                path = m.group(1)
-                if any(x in path for x in ["/chat", "/ws", "/stream", "/agent"]):
-                    evidence.append(EvidenceItem.make(
-                        "websocket_ai_path", f"WebSocket({path[:50]})",
+                        "js_api_path_extracted",
+                        f"{len(ai_shaped)} inference-shaped path(s) in JS bundle",
                         "js_bundle", endpoint=url))
 
-            for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-                for gs in sig.get("js_globals", []):
-                    if gs in js:
+                for m in re.finditer(
+                    r'new\s+EventSource\s*\(\s*(?:`([^`]+)`|["\']([^"\']+)["\'])',
+                    js, re.I,
+                ):
+                    raw_es = m.group(1) if m.group(1) is not None else m.group(2)
+                    for path in self._paths_from_template_expression(
+                        self._unescape_js_strings(raw_es or "")
+                    ):
+                        if self._looks_api_candidate(path):
+                            norm = self._to_path(path)
+                            evidence.append(EvidenceItem.make(
+                                "sse_in_js", f"EventSource({norm[:50]})",
+                                "js_bundle", endpoint=url))
+                            api_paths.append(norm)
+
+                for m in re.finditer(
+                    r'new\s+WebSocket\s*\(\s*(?:`([^`]+)`|["\']([^"\']+)["\'])',
+                    js, re.I,
+                ):
+                    raw_ws = m.group(1) if m.group(1) is not None else m.group(2)
+                    if any(x in (raw_ws or "") for x in (
+                        "/chat", "/ws", "/stream", "/agent",
+                    )):
                         evidence.append(EvidenceItem.make(
-                            "js_ai_sdk", f"JS global {gs} -> {fw_name}",
-                            "js_bundle", framework=fw_name))
-                        frameworks.append(fw_name)
+                            "websocket_ai_path",
+                            f"WebSocket({(raw_ws or '')[:50]})",
+                            "js_bundle", endpoint=url))
+
+                # Follow Vite/webpack chunk graph — resolve relative to this bundle URL.
+                for chunk in self._extract_js_chunk_urls(js, base, source_url=url):
+                    if chunk not in seen_urls:
+                        queue.append(chunk)
+
+            if _has_inference() and processed >= min(6, self.max_js_bundles):
+                # Found inference routes; stop burning budget on UI chrome.
+                break
+
+        # Only promote origins from absolute URLs that already look like APIs.
+        for p in api_paths:
+            if p.startswith("http://") or p.startswith("https://"):
+                if self._looks_absolute_api_url(p):
+                    parsed = urllib.parse.urlparse(p)
+                    api_bases.append(f"{parsed.scheme}://{parsed.netloc}")
+
+        if verbose and processed:
+            api_like = [
+                p for p in dict.fromkeys(api_paths)
+                if "/api/" in p or "/v1/" in p or p.startswith("http")
+            ]
+            infer = [p for p in api_like if self._candidate_is_inference(p)]
+            print(
+                f"    [js] analysed {processed} bundle(s); "
+                f"{len(list(dict.fromkeys(api_paths)))} path(s) extracted "
+                f"({len(api_like)} api-like, {len(infer)} inference); "
+                f"skipped {skipped_vendor} vendor chunk(s)"
+            )
 
         return {
             "evidence":  evidence,
             "api_paths": list(dict.fromkeys(api_paths)),
+            "api_bases": list(dict.fromkeys(api_bases)),
             "frameworks": list(dict.fromkeys(frameworks)),
             "raw_js":    raw_js_combined,
         }
 
-    def _extract_api_paths_from_js(self, js: str) -> List[str]:
-        found: Set[str] = set()
-        for m in re.finditer(
-            r'(?:fetch|axios(?:\.get|\.post)?)\s*\(\s*["\']([^"\']+)["\']', js, re.I):
-            path = m.group(1)
-            if self._is_ai_api_path(path):
-                found.add(path if path.startswith("/") else "/" + path.lstrip("/"))
-        for m in re.finditer(r'(?:fetch|axios)\s*\(\s*`([^`]+)`', js):
-            path = m.group(1).split("${")[0].rstrip("/")
-            if self._is_ai_api_path(path):
-                found.add(path if path.startswith("/") else "/" + path.lstrip("/"))
-        for m in re.finditer(
-            r'\.open\s*\(\s*["\'][A-Z]+["\'],\s*["\']([^"\']+)["\']', js, re.I):
-            path = m.group(1)
-            if self._is_ai_api_path(path):
-                found.add(path if path.startswith("/") else "/" + path.lstrip("/"))
-        return list(found)
+    @staticmethod
+    def _js_chunk_priority(url: str) -> int:
+        """Higher = fetch sooner. Negative = skip (UI vendor chrome)."""
+        name = urllib.parse.urlparse(url or "").path.lower().rsplit("/", 1)[-1]
+        if not name:
+            return 0
+        if any(tok in name for tok in _JS_VENDOR_SKIP_TOKENS):
+            return -100
+        score = 0
+        if name.startswith("index.") or ".index." in name:
+            score += 80
+        for tok in _JS_API_PRIORITY_TOKENS:
+            if tok in name:
+                score += 50
+                break
+        if "vendor" in name:
+            score -= 30
+        for tok in _JS_LOW_PRIORITY_TOKENS:
+            if tok in name:
+                score -= 15
+                break
+        return score
 
     @staticmethod
-    def _is_ai_api_path(path: str) -> bool:
-        return any(pat in path.lower() for pat in [
-            "/chat", "/completions", "/generate", "/predict",
-            "/embed", "/inference", "/infer", "/model",
-            "/v1/", "/api/", "/llm", "/ai/", "/messages",
-            "/runs", "/threads", "/assistants",
-        ])
+    def _abs_url(base: str, src: str) -> str:
+        s = (src or "").strip()
+        if not s:
+            return ""
+        return urllib.parse.urljoin(base.rstrip("/") + "/", s)
 
-    async def _probe_openapi(self, base: str, verbose: bool) -> Dict:
+    @staticmethod
+    def _is_tracker_js_url(url: str) -> bool:
+        low = (url or "").lower()
+        return any(tok in low for tok in _JS_TRACKER_HOST_TOKENS)
+
+    @staticmethod
+    def _is_static_cdn_host(url_or_host: str) -> bool:
+        low = (url_or_host or "").lower()
+        return any(tok in low for tok in _STATIC_CDN_HOST_TOKENS)
+
+    @classmethod
+    def _looks_js_asset_url(
+        cls, url: str, base: str, *, allow_cross_origin: bool = False,
+        source_url: str = "",
+    ) -> bool:
+        if not url or not url.lower().split("?", 1)[0].endswith(".js"):
+            return False
+        if cls._is_tracker_js_url(url):
+            return False
+        u = urllib.parse.urlparse(url)
+        b = urllib.parse.urlparse(base)
+        s = urllib.parse.urlparse(source_url) if source_url else None
+        cross = bool(u.netloc and b.netloc and u.netloc != b.netloc)
+        if cross:
+            if not allow_cross_origin:
+                return False
+            # Chunk continuum: same host as the parent bundle we already accepted.
+            if s and s.netloc and u.netloc == s.netloc:
+                pass
+            elif not cls._looks_app_bundle_path(u.path):
+                return False
+        path = u.path.lower()
+        if any(x in path for x in (
+            "/assets/", "/static/", "/dist/", "/js/", "/build/",
+            "/_next/", ".bundle.", "chunk", "main.", "app.", "index.",
+            "/gradio_api/", "vendor", "data-provider", "framework",
+            "qwenweb", "qwen-ai",
+        )):
+            return True
+        return path.endswith(".js")
+
+    @staticmethod
+    def _looks_app_bundle_path(path: str) -> bool:
+        pl = (path or "").lower()
+        return any(x in pl for x in (
+            "/assets/", "/static/", "/dist/", "/js/", "/build/",
+            "/_next/", "chunk", "main.", "app.", "index.",
+            "framework", "vendor", "qwenweb", "qwen-ai",
+        ))
+
+    def _extract_js_chunk_urls(
+        self, js: str, base: str, source_url: str = "",
+    ) -> List[str]:
+        """Discover additional JS chunks referenced by a bundle.
+
+        Relative imports resolve against the bundle URL (CDN-safe), not only
+        the page origin.
+        """
+        if not js:
+            return []
+        text = self._unescape_js_strings(js)
+        resolve_base = source_url or base
+        found: List[str] = []
+        patterns = (
+            r'import\s*\(\s*["\']([^"\']+\.js(?:\?[^"\']*)?)["\']',
+            r'["\']([^"\']*assets/[^"\']+\.js(?:\?[^"\']*)?)["\']',
+            r'["\'](\.?/?assets/[^"\']+\.js(?:\?[^"\']*)?)["\']',
+            # Numeric hashed chunks relative to a CDN bundle directory.
+            r'["\'](\./(?:p_)?[a-zA-Z0-9_-]+\.js)["\']',
+        )
+        for pat in patterns:
+            for m in re.finditer(pat, text):
+                url = self._abs_url(resolve_base, m.group(1))
+                if self._looks_js_asset_url(
+                    url, base, allow_cross_origin=True, source_url=source_url or resolve_base,
+                ):
+                    found.append(url)
+        return list(dict.fromkeys(found))
+
+    @staticmethod
+    def _unescape_js_strings(text: str) -> str:
+        """Decode common JS string escapes so path scanners see real slashes."""
+        if not text:
+            return ""
+        out = text.replace("\\/", "/")
+        out = re.sub(
+            r"\\u([0-9a-fA-F]{4})",
+            lambda m: chr(int(m.group(1), 16)),
+            out,
+        )
+        out = re.sub(
+            r"\\x([0-9a-fA-F]{2})",
+            lambda m: chr(int(m.group(1), 16)),
+            out,
+        )
+        return out
+
+    def _extract_api_paths_from_js(self, js: str) -> List[str]:
+        """Discover app API routes from JS without a hardcoded endpoint catalog.
+
+        Handles literal calls plus common SPA base-URL patterns, e.g.:
+          fetch("/api/chat")
+          `${BASE_URL}/api/messages`
+          BASE_URL + "/api/ask"
+          "\\/api\\/messages" (minified escaped slashes)
+          request.get(`${baseUrl}/v1/chat/completions`)
+          https://chat.example.com/api/chat (absolute, host from app JS)
+        """
+        found: Set[str] = set()
+        js = self._unescape_js_strings(js)
+
+        def _add(raw: str) -> None:
+            if not raw:
+                return
+            raw = raw.split("?")[0].split("#")[0].strip()
+            if raw.startswith("http://") or raw.startswith("https://"):
+                if self._looks_api_candidate(raw):
+                    parsed = urllib.parse.urlparse(raw)
+                    if not parsed.path or parsed.path == "/":
+                        return  # bare origins collected separately as api_bases
+                    if self._is_static_cdn_host(parsed.netloc):
+                        return
+                    found.add(
+                        f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+                        or raw
+                    )
+                return
+            path = self._to_path(raw)
+            if path and self._looks_api_candidate(path):
+                found.add(path.rstrip("/") or path)
+
+        # Explicit HTTP client calls with quoted URL.
+        for m in re.finditer(
+            r'(?:fetch|axios(?:\.get|\.post|\.put|\.delete|\.patch)?|'
+            r'request(?:\.get|\.post|\.put|\.delete|\.patch)?|'
+            r'\$\.ajax|\$\.get|\$\.post)\s*\(\s*["\']([^"\']+)["\']',
+            js, re.I,
+        ):
+            _add(m.group(1))
+
+        # HTTP client calls with template literals (incl. ${BASE_URL}/api/...).
+        for m in re.finditer(
+            r'(?:fetch|axios(?:\.get|\.post|\.put|\.delete|\.patch)?|'
+            r'request(?:\.get|\.post|\.put|\.delete|\.patch)?|'
+            r'\.\s*(?:get|post|put|delete|patch))\s*\(\s*`([^`]+)`',
+            js, re.I,
+        ):
+            for path in self._paths_from_template_expression(m.group(1)):
+                _add(path)
+
+        for m in re.finditer(
+            r'\.open\s*\(\s*["\'][A-Z]+["\'],\s*["\']([^"\']+)["\']', js, re.I):
+            _add(m.group(1))
+
+        # Quoted absolute paths (covers BASE_URL + "/api/messages").
+        for m in re.finditer(r'["\'](/[a-zA-Z0-9_\-./]{2,120})["\']', js):
+            _add(m.group(1))
+
+        # Quoted absolute http(s) API URLs.
+        for m in re.finditer(
+            r'["\'](https?://[^"\']{8,180})["\']', js, re.I,
+        ):
+            _add(m.group(1))
+
+        # Template / concat fragments: `${BASE_URL}/api/messages` or
+        # `${base}/api/chat/${id}` anywhere in the bundle (not only fetch()).
+        for m in re.finditer(r'\$\{[^}]+\}(/[a-zA-Z0-9_\-./]{2,120})', js):
+            frag = m.group(1)
+            # Stop before a trailing incomplete segment left by the next ${...}.
+            if frag.endswith("/"):
+                frag = frag.rstrip("/")
+            _add(frag)
+
+        # Full template bodies that start with a path or URL after stripping
+        # interpolations: `/api/chat/${id}` → `/api/chat`.
+        for m in re.finditer(r'`([^`]{2,180})`', js):
+            for path in self._paths_from_template_expression(m.group(1)):
+                _add(path)
+
+        # Token scan for API-shaped paths left after minify/escape normalize.
+        # Still app-derived (must appear in bundle); not a probe catalog.
+        for m in re.finditer(
+            r'(?<![A-Za-z0-9_])(/(?:api|v1|v2|v3|ollama|graphql|openai)'
+            r'(?:/[a-zA-Z0-9_\-.]+){1,6})',
+            js,
+        ):
+            _add(m.group(1))
+
+        # Minifiers sometimes split: "/api/" + "messages" or "/api" + "/messages".
+        for m in re.finditer(
+            r'["\'](/(?:api|v1|v2|v3)/?)["\']\s*\+\s*["\'](/?[a-zA-Z0-9_\-]+)["\']',
+            js,
+        ):
+            left, right = m.group(1), m.group(2)
+            if not right.startswith("/") and not left.endswith("/"):
+                joined = left + "/" + right
+            else:
+                joined = left.rstrip("/") + "/" + right.lstrip("/")
+            _add(joined)
+
+        return list(found)
+
+    def _extract_api_bases_from_js(self, js: str) -> List[str]:
+        """Origins referenced in app JS that may host APIs (not static CDNs)."""
+        if not js:
+            return []
+        text = self._unescape_js_strings(js)
+        found: List[str] = []
+        for m in re.finditer(r'https?://[a-zA-Z0-9._:-]+(?::\d+)?', text):
+            origin = m.group(0).rstrip("/")
+            host = urllib.parse.urlparse(origin).netloc.lower()
+            if not host or self._is_tracker_js_url(origin):
+                continue
+            if self._is_static_cdn_host(host):
+                continue
+            # Only keep hosts that look like API/product backends (still from JS).
+            if any(x in host for x in (
+                "docs.", "github.io", "alibabacloud.com", "cloud.google",
+                "microsoft.com", "twitter.com", "linkedin.com",
+            )):
+                continue
+            if any(x in host for x in (
+                "api.", "api-", "-api", "chat.", "chat-",
+                "llm", "openai", "inference", "model", "qwen",
+                "dashscope", "groq", "anthropic", "together",
+                "ollama", "openrouter", "deepseek",
+            )):
+                found.append(origin)
+        return list(dict.fromkeys(found))
+
+    @staticmethod
+    def _candidate_is_inference(candidate: str) -> bool:
+        if not candidate:
+            return False
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            return _is_inference_path(urllib.parse.urlparse(candidate).path)
+        return _is_inference_path(candidate)
+
+    # Analytics / auth-broker noise on related hosts — never primary AI surface.
+    _RELATED_API_PATH_NOISE = (
+        "/analytics", "/oauth", "/mediator", "/pixel", "/collect",
+        "/telemetry", "/tracking", "/beacon", "/gtm", "/segment",
+    )
+
+    def _related_host_api_candidates(
+        self,
+        discovered_paths: List[str],
+        related_bases: List[str],
+        page_base: str,
+        *,
+        limit: int = 15,
+    ) -> List[str]:
+        """Absolute API URLs from JS on allowlisted related hosts (not page origin).
+
+        Discovers-first only: never invents paths. Prefer /api and /vN; cap count.
+        """
+        page_host = (urllib.parse.urlparse(page_base).netloc or "").lower()
+        allowed: Set[str] = set()
+        for origin in related_bases or []:
+            host = (urllib.parse.urlparse(origin).netloc or "").lower()
+            if host and host != page_host and not self._is_static_cdn_host(host):
+                allowed.add(host)
+        if not allowed:
+            return []
+
+        scored: List[Tuple[int, str]] = []
+        for raw in discovered_paths or []:
+            if not (raw.startswith("http://") or raw.startswith("https://")):
+                continue
+            if not self._looks_absolute_api_url(raw):
+                continue
+            parsed = urllib.parse.urlparse(raw.split("#")[0])
+            host = (parsed.netloc or "").lower()
+            if host not in allowed:
+                continue
+            path = (parsed.path or "").split("?")[0]
+            path_l = path.lower()
+            if any(n in path_l for n in self._RELATED_API_PATH_NOISE):
+                continue
+            if not path or path == "/":
+                continue
+            score = 0
+            if "/api/" in path_l or path_l.startswith("/api"):
+                score += 3
+            if re.search(r"/v\d+/", path_l):
+                score += 2
+            if _is_inference_path(path):
+                score += 5
+            norm = f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
+            scored.append((score, norm))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        out: List[str] = []
+        seen: Set[str] = set()
+        for _score, url in scored:
+            if url in seen:
+                continue
+            seen.add(url)
+            out.append(url)
+            if len(out) >= limit:
+                break
+        return out
+
+    def _normalize_api_bases(self, bases: List[str], page_base: str) -> List[str]:
+        page = urllib.parse.urlparse(page_base)
+        page_origin = f"{page.scheme}://{page.netloc}".rstrip("/")
+        out: List[str] = []
+        seen = set()
+        for raw in bases or []:
+            if not raw:
+                continue
+            p = urllib.parse.urlparse(raw if "://" in raw else "https://" + raw)
+            if not p.scheme or not p.netloc:
+                continue
+            origin = f"{p.scheme}://{p.netloc}".rstrip("/")
+            if origin in seen or origin == page_origin:
+                continue
+            if self._is_static_cdn_host(p.netloc) or self._is_tracker_js_url(origin):
+                continue
+            seen.add(origin)
+            out.append(origin)
+        return out[:6]
+
+    def _collect_allowed_api_hosts(
+        self,
+        page_base: str,
+        related_bases: List[str],
+        ml_endpoints: List[str],
+        auth_signals: List[AuthSignal],
+    ) -> List[str]:
+        """Netlocs the scanner may probe beyond the page origin (JS-derived)."""
+        hosts: List[str] = []
+        page_host = urllib.parse.urlparse(page_base).netloc
+        if page_host:
+            hosts.append(page_host)
+        for origin in related_bases or []:
+            h = urllib.parse.urlparse(origin).netloc
+            if h and not self._is_static_cdn_host(h):
+                hosts.append(h)
+        for ep in list(ml_endpoints or []) + [
+            s.endpoint for s in (auth_signals or []) if getattr(s, "endpoint", None)
+        ]:
+            if isinstance(ep, str) and ep.startswith("http"):
+                h = urllib.parse.urlparse(ep).netloc
+                if h and not self._is_static_cdn_host(h):
+                    hosts.append(h)
+        return list(dict.fromkeys(hosts))
+
+    async def _discover_related_bases(
+        self, bases: List[str], page_base: str, verbose: bool,
+    ) -> Dict:
+        """One-hop: fetch JS-discovered API hosts' HTML for more app routes."""
+        evidence: List[EvidenceItem] = []
+        api_paths: List[str] = []
+        api_bases: List[str] = []
+        loop = asyncio.get_event_loop()
+
+        for origin in bases[:3]:
+            try:
+                status, headers, html = await loop.run_in_executor(
+                    None, lambda u=origin: self._fetch(u, max_bytes=200_000))
+            except Exception:
+                continue
+            if status == 0 or not html:
+                continue
+            evidence.append(EvidenceItem.make(
+                "related_api_host",
+                f"JS-referenced API host {origin}",
+                "js_bundle", endpoint=origin))
+            if verbose:
+                print(f"    [discover] one-hop related host {origin}")
+            js_urls, html_ev, links, _title = self._analyse_html(
+                html, origin, headers or {})
+            evidence.extend(html_ev)
+            for link in links:
+                api_paths.append(link)
+            old_budget = self.max_js_bundles
+            self.max_js_bundles = min(8, old_budget)
+            try:
+                hop_js = await self._fetch_and_analyse_js(js_urls, origin, verbose)
+            finally:
+                self.max_js_bundles = old_budget
+            if isinstance(hop_js, dict):
+                api_paths.extend(hop_js.get("api_paths", []) or [])
+                api_bases.extend(hop_js.get("api_bases", []) or [])
+                evidence.extend(hop_js.get("evidence", []) or [])
+
+        return {
+            "evidence": evidence,
+            "api_paths": list(dict.fromkeys(api_paths)),
+            "api_bases": list(dict.fromkeys(api_bases)),
+        }
+
+    @staticmethod
+    def _paths_from_template_expression(raw: str) -> List[str]:
+        """Pull routable path(s) or absolute API URLs out of a template body."""
+        if not raw:
+            return []
+        out: List[str] = []
+        # `${BASE_URL}/api/messages/${id}` → keep "/api/messages" segments.
+        for m in re.finditer(r'\$\{[^}]+\}(/[a-zA-Z0-9_\-./]+)', raw):
+            frag = m.group(1).rstrip("/")
+            if frag:
+                out.append(frag)
+        # `/api/chat/${id}` or plain `/api/models` before any interpolation.
+        head = raw.split("${", 1)[0].rstrip("/")
+        if head.startswith("http://") or head.startswith("https://"):
+            # Keep absolute API URL when the host is part of the template.
+            parsed = urllib.parse.urlparse(head)
+            if parsed.path and parsed.path != "/":
+                out.append(f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/"))
+            head = parsed.path.rstrip("/")
+        if head.startswith("/") and len(head) >= 2:
+            out.append(head)
+        # After removing all ${...}, a leftover absolute path/URL.
+        stripped = re.sub(r"\$\{[^}]*\}", "", raw).split("?")[0].strip()
+        if stripped.startswith("http://") or stripped.startswith("https://"):
+            parsed = urllib.parse.urlparse(stripped)
+            if parsed.path and parsed.path != "/":
+                out.append(
+                    f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+                )
+            stripped = parsed.path
+        stripped = stripped.rstrip("/")
+        if stripped.startswith("/") and len(stripped) >= 2:
+            out.append(stripped)
+        return out
+
+    @staticmethod
+    def _to_path(path: str) -> str:
+        p = path.strip()
+        if p.startswith("http://") or p.startswith("https://"):
+            p = urllib.parse.urlparse(p).path
+        if not p.startswith("/"):
+            p = "/" + p.lstrip("/")
+        return p.split("?")[0].split("#")[0] or "/"
+
+    @classmethod
+    def _looks_absolute_api_url(cls, url: str) -> bool:
+        """True for absolute URLs that look like API endpoints (not docs/SVG/CDN)."""
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            return False
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").lower()
+        if not host or not path or path == "/":
+            return False
+        if cls._is_static_cdn_host(host) or cls._is_tracker_js_url(url):
+            return False
+        if any(x in host for x in (
+            "w3.org", "reactjs.org", "github.com", "githubusercontent",
+            "wikipedia.org", "mozilla.org", "schema.org", "googleapis.com",
+            "gstatic.com", "twitter.com", "x.com", "linkedin.com",
+            "discord.com", "facebook.com", "youtube.com",
+        )):
+            return False
+        if any(path.endswith(ext) for ext in (
+            ".js", ".css", ".map", ".png", ".jpg", ".svg", ".html", ".md",
+            ".tgz", ".dtd", ".woff", ".woff2",
+        )):
+            return False
+        return bool(re.search(
+            r"/(?:api|v1|v2|v3|ollama|graphql|openai|chat|completions?|"
+            r"generate|messages?|embeddings?|inference|ask)(?:/|$)",
+            path,
+        ))
+
+    @classmethod
+    def _looks_api_candidate(cls, path: str) -> bool:
+        """Heuristic: keep likely API/route strings; drop static assets."""
+        p = (path or "").strip()
+        if not p or len(p) > 180:
+            return False
+        pl = p.lower()
+        if any(pl.endswith(ext) for ext in (
+            ".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+            ".ico", ".woff", ".woff2", ".ttf", ".mp4", ".webp",
+        )):
+            return False
+        if any(x in pl for x in (
+            "/assets/", "/static/", "/_next/", "/dist/", "/node_modules/",
+            "webpack", "chunk",
+        )):
+            return False
+        if pl.startswith("http://") or pl.startswith("https://"):
+            return cls._looks_absolute_api_url(p)
+        # Prefer paths that look routable / API-like.
+        if pl.startswith("/"):
+            return True
+        return False
+
+    @staticmethod
+    def _guess_probe_category(path: str) -> str:
+        p = (path or "").lower()
+        if "embed" in p:
+            return "embedding"
+        if "graphql" in p or p.endswith("/query"):
+            return "graphql"
+        if any(x in p for x in (
+            "chat", "completion", "generate", "ask", "message", "predict",
+            "prediction", "run", "invoke", "queue", "agent", "llm",
+        )):
+            return "chat"
+        if any(x in p for x in (
+            "model", "tag", "health", "openapi", "swagger", "docs", "config",
+            "info", "flow", "node", "workspace", "endpoint", "convo", "schema",
+        )):
+            return "schema"
+        # Unknown paths must not be assumed chat — schema has stricter body gates.
+        return "schema"
+
+    @staticmethod
+    def _normalize_candidate_paths(paths: List[str]) -> List[str]:
+        """Normalize candidates; preserve absolute URLs discovered in app JS."""
+        out: List[str] = []
+        seen = set()
+        for raw in paths:
+            if not raw:
+                continue
+            if raw.startswith("http://") or raw.startswith("https://"):
+                parsed = urllib.parse.urlparse(raw.split("#")[0])
+                path = (parsed.path or "").split("?")[0]
+                if not path or path == "/":
+                    continue
+                if any(path.lower().endswith(ext) for ext in (
+                    ".js", ".css", ".map", ".png", ".jpg", ".svg", ".ico",
+                )):
+                    continue
+                norm = f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                out.append(norm)
+                continue
+            path = raw
+            path = path if path.startswith("/") else "/" + path.lstrip("/")
+            path = path.split("?")[0].split("#")[0]
+            if not path or path == "/" or path in seen:
+                continue
+            if any(path.lower().endswith(ext) for ext in (
+                ".js", ".css", ".map", ".png", ".jpg", ".svg", ".ico",
+            )):
+                continue
+            seen.add(path)
+            out.append(path)
+        # Prefer likely inference paths first for faster confirmation.
+        def _rank(p: str) -> Tuple[int, str]:
+            pl = p.lower()
+            if any(x in pl for x in ("chat", "completion", "generate", "predict", "ask", "run")):
+                return (0, p)
+            if any(x in pl for x in ("model", "flow", "agent", "message")):
+                return (1, p)
+            return (2, p)
+        return sorted(out, key=_rank)[:80]
+
+    @staticmethod
+    def _extract_spec_refs(text: str) -> List[str]:
+        found: List[str] = []
+        for m in _SPEC_REF_RE.finditer(text or ""):
+            found.append(m.group("path").split("?")[0])
+        # Also catch quoted relative filenames without leading path noise.
+        for m in re.finditer(
+            r"""["']([^"']*(?:openapi|swagger)[^"']*\.(?:json|yaml|yml))["']""",
+            text or "", re.I,
+        ):
+            p = m.group(1)
+            if not p.startswith("/"):
+                p = "/" + p.lstrip("./")
+            found.append(p.split("?")[0])
+        return found
+
+    @staticmethod
+    def _extract_graphql_refs(text: str) -> List[str]:
+        found: List[str] = []
+        for m in _GRAPHQL_REF_RE.finditer(text or ""):
+            found.append(m.group("path").split("?")[0])
+        return found
+
+    async def _probe_openapi(
+        self, base: str, spec_paths: List[str], verbose: bool
+    ) -> Dict:
+        """Fetch OpenAPI only at paths this application referenced."""
         evidence:     List[EvidenceItem] = []
         endpoints:    List[str]          = []
         capabilities: List[str]          = []
         schema:       Dict               = {}
         loop = asyncio.get_event_loop()
 
-        for path in OPENAPI_SPEC_PATHS:
+        if not spec_paths:
+            return {
+                "found": False, "evidence": evidence,
+                "endpoints": endpoints, "capabilities": capabilities, "schema": schema,
+            }
+
+        for path in spec_paths:
             url = base + path
             try:
                 status, _, body = await loop.run_in_executor(
@@ -919,12 +2048,12 @@ class AIFingerprintAgent:
                 if not (spec.get("openapi") or spec.get("swagger") or spec.get("paths")):
                     continue
                 schema = spec
-                spec_paths = spec.get("paths", {})
+                spec_path_map = spec.get("paths", {})
                 evidence.append(EvidenceItem.make(
                     "openapi_schema",
-                    f"OpenAPI spec at {path} ({len(spec_paths)} paths)",
+                    f"OpenAPI spec at {path} ({len(spec_path_map)} paths)",
                     "openapi", endpoint=url))
-                for ep_path, methods in spec_paths.items():
+                for ep_path, methods in spec_path_map.items():
                     endpoints.append(base + ep_path)
                     if any(x in ep_path.lower() for x in [
                         "/chat", "/completions", "/generate", "/embed",
@@ -950,7 +2079,7 @@ class AIFingerprintAgent:
                             if "input" in props and "model" in props:
                                 capabilities.append("embedding")
                 if verbose:
-                    print(f"    [openapi] {path}: {len(spec_paths)} paths")
+                    print(f"    [openapi] {path}: {len(spec_path_map)} paths")
                 break
             except Exception as exc:
                 logger.debug(f"[OpenAPI] {url}: {exc}")
@@ -978,14 +2107,17 @@ class AIFingerprintAgent:
             result["paths"] = paths
         return result if result else None
 
-    async def _probe_graphql(self, base: str, verbose: bool) -> Dict:
+    async def _probe_graphql(
+        self, base: str, graphql_paths: List[str], verbose: bool
+    ) -> Dict:
+        """Probe GraphQL only at paths this application referenced."""
         evidence: List[EvidenceItem] = []
         endpoints: List[str]         = []
         types:     List[str]         = []
         loop = asyncio.get_event_loop()
 
-        graphql_paths = ["/graphql", "/api/graphql", "/graphiql",
-                         "/v1/graphql", "/query"]
+        if not graphql_paths:
+            return {"evidence": evidence, "endpoints": endpoints, "types": types}
 
         introspection_query = json.dumps({
             "query": "{ __schema { queryType { name } types { name } } }"
@@ -1062,12 +2194,16 @@ class AIFingerprintAgent:
                     line = line.strip()
                     if line.lower().startswith("disallow:") or line.lower().startswith("allow:"):
                         path = line.split(":", 1)[1].strip()
-                        if self._is_ai_api_path(path):
-                            evidence.append(EvidenceItem.make(
-                                "robots_ai_path",
-                                f"robots.txt {line[:60]}",
-                                "passive"))
-                            paths.append(path)
+                        if path and path != "/" and self._looks_api_candidate(path):
+                            norm = self._to_path(path)
+                            paths.append(norm)
+                            # Hint evidence only for inference-shaped paths
+                            # (/404, /features/, etc. are discovery noise).
+                            if _is_inference_path(norm):
+                                evidence.append(EvidenceItem.make(
+                                    "robots_ai_path",
+                                    f"robots.txt AI-shaped path: {norm[:60]}",
+                                    "passive"))
                     if line.lower().startswith("sitemap:"):
                         sitemap_url = line.split(":", 1)[1].strip()
                         try:
@@ -1076,12 +2212,14 @@ class AIFingerprintAgent:
                             for m in re.finditer(r'<loc>([^<]+)</loc>', smap):
                                 url = m.group(1).strip()
                                 parsed = urllib.parse.urlparse(url)
-                                if self._is_ai_api_path(parsed.path):
-                                    evidence.append(EvidenceItem.make(
-                                        "sitemap_ai_path",
-                                        f"sitemap: {parsed.path[:60]}",
-                                        "passive"))
-                                    paths.append(parsed.path)
+                                if parsed.path and self._looks_api_candidate(parsed.path):
+                                    norm = self._to_path(parsed.path)
+                                    paths.append(norm)
+                                    if _is_inference_path(norm):
+                                        evidence.append(EvidenceItem.make(
+                                            "sitemap_ai_path",
+                                            f"sitemap AI-shaped path: {norm[:60]}",
+                                            "passive"))
                         except Exception:
                             pass
         except Exception:
@@ -1089,59 +2227,91 @@ class AIFingerprintAgent:
 
         return {"evidence": evidence, "paths": list(dict.fromkeys(paths))}
 
-    async def _probe_ranked_endpoints(
-        self, base: str, extra_paths: List[str], verbose: bool
+    def _is_related_host_api_probe(
+        self,
+        url: str,
+        related_api_hosts: Optional[Set[str]],
+        page_host: str,
+    ) -> bool:
+        """True when probing an absolute API URL on a JS-allowlisted related host."""
+        if not related_api_hosts or not (
+            url.startswith("http://") or url.startswith("https://")
+        ):
+            return False
+        host = (urllib.parse.urlparse(url).netloc or "").lower()
+        page = (page_host or "").lower()
+        if not host or host == page or host not in related_api_hosts:
+            return False
+        return self._looks_absolute_api_url(url)
+
+    async def _probe_candidates(
+        self, base: str, candidates: List[str], verbose: bool,
+        spa_catch_all: bool = False,
+        openapi_schema: Optional[Dict] = None,
+        related_api_hosts: Optional[Set[str]] = None,
+        page_host: str = "",
     ) -> Dict:
+        """Probe application-discovered paths/URLs only — no catalog spray."""
         evidence:    List[EvidenceItem] = []
         endpoints:   List[str]          = []
         frameworks:  List[str]          = []
         auth_signals: List[AuthSignal]  = []
         loop = asyncio.get_event_loop()
-        confirmed = 0
+        related_api_hosts = related_api_hosts or set()
+        page_host = page_host or (urllib.parse.urlparse(base).netloc or "")
 
-        ordered = (
-            [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "schema"] +
-            [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "chat"] +
-            [(p, c) for p, c in SEED_ENDPOINT_RANKING if c in ("embedding", "ml", "graphql")]
-        )
-
-        async def probe(path: str, category: str):
-            url = base + path
+        async def probe(candidate: str, category: str):
+            if candidate.startswith("http://") or candidate.startswith("https://"):
+                url = candidate
+                path = urllib.parse.urlparse(candidate).path or "/"
+            else:
+                url = base + candidate
+                path = candidate
+            # Cross-origin probes only for hosts discovered via app JS candidates.
             try:
                 status, resp_headers, body = await loop.run_in_executor(
                     None, lambda: self._fetch(url))
-                if status in (404, 405) and category in ("chat", "embedding", "ml", "graphql"):
+                ct = (resp_headers.get("Content-Type")
+                      or resp_headers.get("content-type") or "")
+                # SPA catch-all applies to the page origin, not related API hosts.
+                use_spa = spa_catch_all and url.startswith(base)
+                needs_post = (
+                    status in (404, 405)
+                    or (status == 200 and _looks_html_body(ct, body))
+                    or (use_spa and status == 200 and category in (
+                        "chat", "embedding", "ml", "graphql", "schema"))
+                )
+                if needs_post:
+                    post_body = _probe_post_body(path, category, openapi_schema)
                     status, resp_headers, body = await loop.run_in_executor(
-                        None, lambda: self._fetch(url, data=b"{}", method="POST"))
+                        None,
+                        lambda u=url, d=post_body: self._fetch(u, data=d, method="POST"),
+                    )
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
-                    auth_signals)
+                    auth_signals, spa_catch_all=use_spa,
+                    related_api_hosts=related_api_hosts,
+                    page_host=page_host,
+                )
             except Exception:
                 return None
 
-        schema_paths = [(p, c) for p, c in ordered if c == "schema"]
-        schema_results = await asyncio.gather(
-            *[probe(p, c) for p, c in schema_paths], return_exceptions=True)
-        for r in schema_results:
+        tasks = [
+            probe(path, self._guess_probe_category(
+                urllib.parse.urlparse(path).path if path.startswith("http") else path
+            ))
+            for path in candidates
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
             if isinstance(r, dict) and r:
                 evidence.extend(r.get("evidence", []))
                 endpoints.extend(r.get("endpoints", []))
                 frameworks.extend(r.get("frameworks", []))
-                confirmed += len(r.get("endpoints", []))
 
-        for path, category in ordered:
-            if confirmed >= 6:
-                break
-            if category == "schema":
-                continue
-            r = await probe(path, category)
-            if isinstance(r, dict) and r:
-                evidence.extend(r.get("evidence", []))
-                new_eps = r.get("endpoints", [])
-                if new_eps:
-                    endpoints.extend(new_eps)
-                    confirmed += len(new_eps)
-                frameworks.extend(r.get("frameworks", []))
+        if verbose:
+            print(f"    [probe] confirmed {len(set(endpoints))} live surface(s) "
+                  f"from {len(candidates)} candidate(s)")
 
         return {
             "evidence":    evidence,
@@ -1159,6 +2329,9 @@ class AIFingerprintAgent:
         headers: Dict,
         body: str,
         auth_signals: List[AuthSignal],
+        spa_catch_all: bool = False,
+        related_api_hosts: Optional[Set[str]] = None,
+        page_host: str = "",
     ) -> Dict:
         evidence:  List[EvidenceItem] = []
         endpoints: List[str]          = []
@@ -1170,17 +2343,31 @@ class AIFingerprintAgent:
         headers_low = {k.lower(): v for k, v in headers.items()}
         ct = headers_low.get("content-type", "")
         body_l = (body or "").lower()
+        related_api = self._is_related_host_api_probe(
+            url, related_api_hosts, page_host,
+        )
+        inference = _is_inference_path(path)
+
+        # SPA HTML responses are not API evidence.
+        if _looks_html_body(ct, body):
+            return {}
 
         if status == 200 and body:
-            if "json" in ct and any(re.search(p, body, re.I)
-                                    for p in AI_RESPONSE_BODY_PATTERNS):
-                ev_key = ("chat_endpoint_200" if category == "chat" else
+            is_json = "json" in ct or body.strip()[:1] in "{["
+            ai_shaped = is_json and _looks_ai_api_json(body)
+            # 200 live-surface evidence requires an AI-shaped body — status alone
+            # on an inference path is not enough (matches 401/405 path-shape gate).
+            if ai_shaped:
+                ev_key = ("chat_endpoint_200" if category == "chat" or inference else
                           "embedding_endpoint_200" if category == "embedding" else
                           "ml_endpoint_200")
                 evidence.append(EvidenceItem.make(
-                    ev_key, f"AI body at {path} (HTTP 200)",
+                    ev_key,
+                    f"AI body at {path} (HTTP 200)",
                     "probe", endpoint=url))
                 endpoints.append(url)
+                if category in ("chat", "schema") or inference:
+                    frameworks.append("OpenAI-compatible")
 
             if "text/event-stream" in ct:
                 evidence.append(EvidenceItem.make(
@@ -1188,28 +2375,56 @@ class AIFingerprintAgent:
                     f"SSE at {path}", "probe", endpoint=url))
                 endpoints.append(url)
 
-            if "chunked" in headers_low.get("transfer-encoding", ""):
+            # NOTE: bare Transfer-Encoding: chunked is CDN/static noise and must
+            # NOT emit live-surface evidence (Picsart /llms.txt false confirm).
+
+            # Schema/config endpoints with AI-shaped JSON only.
+            if (category == "schema" and ai_shaped and url not in endpoints):
                 evidence.append(EvidenceItem.make(
-                    "sse_chunked_transfer",
-                    f"Chunked transfer at {path}", "probe", endpoint=url))
+                    "ml_endpoint_200",
+                    f"AI schema/config at {path} (HTTP 200)",
+                    "probe", endpoint=url))
+                endpoints.append(url)
+                if any(k in body_l for k in ("choices", '"object"', "chat.completion")):
+                    frameworks.append("OpenAI-compatible")
 
         if status in (401, 403):
+            # Object-store / CDN denials are not application auth gates.
+            if _looks_static_storage_error(ct, body):
+                return {
+                    "evidence": evidence,
+                    "endpoints": endpoints,
+                    "frameworks": frameworks,
+                }
             auth_type = self._detect_auth_type(headers_low, body_l)
             auth_signals.append(AuthSignal(
                 endpoint=url, auth_type=auth_type,
                 status_code=status,
                 detail=f"Auth required ({auth_type}) at {path}"))
-            if category in ("chat", "embedding", "ml", "graphql"):
+            # Inference paths: any auth gate confirms. Related-host absolute API
+            # URLs (non-inference) require an API-shaped auth/error response.
+            if inference or (
+                related_api and _looks_api_auth_rejection(ct, body, headers_low)
+            ):
                 evidence.append(EvidenceItem.make(
                     "ml_endpoint_401_403",
                     f"Auth-gated {path} (HTTP {status}, {auth_type})",
                     "probe", endpoint=url))
+                endpoints.append(url)
 
-        if status == 405 and category in ("chat", "embedding", "ml"):
+        # 405 is noise on SPA catch-alls, non-API paths, and static
+        # storage/CDN errors (e.g. Aliyun OSS MethodNotAllowed XML).
+        if (
+            status == 405
+            and not spa_catch_all
+            and (inference or related_api)
+            and _looks_api_method_rejection(ct, body, headers_low)
+        ):
             evidence.append(EvidenceItem.make(
                 "ml_endpoint_405",
                 f"Endpoint exists {path} (HTTP 405)",
                 "probe", endpoint=url))
+            endpoints.append(url)
 
         if status in (400, 422) and body:
             fw = self._fingerprint_error_body(body, url, evidence)
@@ -1217,6 +2432,17 @@ class AIFingerprintAgent:
                 frameworks.append(fw)
                 if url not in endpoints:
                     endpoints.append(url)
+            elif (
+                category in ("chat", "embedding", "ml") or related_api
+            ) and (
+                "json" in ct or body.strip()[:1] in "{["
+            ):
+                # Handler reached with validation error => real API surface.
+                evidence.append(EvidenceItem.make(
+                    "error_generic_validation",
+                    f"API validation response at {path} (HTTP {status})",
+                    "probe", endpoint=url))
+                endpoints.append(url)
 
         for h in AI_RESPONSE_HEADERS:
             if h in headers_low:
@@ -1333,10 +2559,84 @@ class AIFingerprintAgent:
                             f"{urllib.parse.urlparse(endpoint).path}",
                             "behavior", endpoint=endpoint))
 
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Behavioral probe failed on {endpoint}: {e}")
 
         return {"evidence": evidence, "model_reported": model_reported}
+
+    async def _nondeterminism_probe(self, endpoint: str, verbose: bool) -> Dict:
+        evidence: List[EvidenceItem] = []
+        loop = asyncio.get_event_loop()
+        payload = json.dumps({
+            "model": self.probe_model,
+            "messages": [{"role": "user", "content": self.probe_prompt}],
+        }).encode()
+
+        responses: List[str] = []
+        for _ in range(max(2, self.nondeterminism_samples)):
+            try:
+                status, _, body = await loop.run_in_executor(
+                    None,
+                    lambda ep=endpoint, data=payload: self._fetch(
+                        ep, data=data, method="POST"),
+                )
+                if status in (200, 201) and body:
+                    text = self._extract_text(body)
+                    if text:
+                        responses.append(text)
+            except Exception:
+                continue
+
+        if len(responses) < 2:
+            return {"evidence": evidence}
+
+        divergences = [
+            self._token_divergence(responses[i], responses[j])
+            for i in range(len(responses))
+            for j in range(i + 1, len(responses))
+        ]
+        mean_div = sum(divergences) / len(divergences)
+        if self.nondeterminism_low < mean_div < self.nondeterminism_high:
+            evidence.append(EvidenceItem.make(
+                "behavior_nondeterministic",
+                f"Non-deterministic output over {len(responses)} samples "
+                f"(mean divergence {mean_div:.2f})",
+                "behavior", endpoint=endpoint))
+            if verbose:
+                print(f"    [behavior] non-determinism at {endpoint} div={mean_div:.2f}")
+        return {"evidence": evidence}
+
+    @staticmethod
+    def _token_divergence(a: str, b: str) -> float:
+        ta = set(re.findall(r"\w+", a.lower()))
+        tb = set(re.findall(r"\w+", b.lower()))
+        if not ta and not tb:
+            return 0.0
+        if not ta or not tb:
+            return 1.0
+        return 1.0 - len(ta & tb) / len(ta | tb)
+
+    @staticmethod
+    def _extract_text(body: str) -> str:
+        try:
+            data = json.loads(body)
+        except Exception:
+            return body
+        if isinstance(data, dict):
+            choices = data.get("choices")
+            if isinstance(choices, list) and choices:
+                message = choices[0].get("message", {})
+                if isinstance(message, dict) and message.get("content"):
+                    return str(message["content"])
+                if choices[0].get("text"):
+                    return str(choices[0]["text"])
+            for candidate in ("response", "answer", "text", "generated_text"):
+                if data.get(candidate):
+                    return str(data[candidate])
+            message = data.get("message", {})
+            if isinstance(message, dict) and message.get("content"):
+                return str(message["content"])
+        return body
 
     async def _analyse_headers_cookies(
         self, headers: Dict, verbose: bool
@@ -1352,30 +2652,9 @@ class AIFingerprintAgent:
                     f"{h}: {headers_low[h][:50]}", "header"))
                 break
 
-        server = headers_low.get("server", "") + " " + headers_low.get("x-powered-by", "")
-        for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-            for k, v in (sig.get("headers") or {}).items():
-                if k in headers_low:
-                    if v is None or v.lower() in headers_low.get(k, "").lower():
-                        evidence.append(EvidenceItem.make(
-                            "framework_header",
-                            f"Header {k} matches {fw_name}",
-                            "header", framework=fw_name))
-                        frameworks.append(fw_name)
-
-        cookies = headers_low.get("set-cookie", "")
-        for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-            for cookie_name in sig.get("cookie_names", []):
-                if cookie_name.lower() in cookies.lower():
-                    evidence.append(EvidenceItem.make(
-                        "framework_cookie",
-                        f"Cookie '{cookie_name}' matches {fw_name}",
-                        "header", framework=fw_name))
-                    frameworks.append(fw_name)
-
         return {"evidence": evidence, "frameworks": list(dict.fromkeys(frameworks))}
 
-    def _identify_framework(
+    def _identify_protocol(
         self,
         html: str,
         js: str,
@@ -1383,100 +2662,41 @@ class AIFingerprintAgent:
         known_endpoints: List[str],
         existing_evidence: List[EvidenceItem],
     ) -> Dict:
-        evidence:    List[EvidenceItem] = []
-        headers_low = {k.lower(): v for k, v in headers.items()}
-        combined_text = (html + js).lower()
-        known_paths = {urllib.parse.urlparse(ep).path for ep in known_endpoints}
+        """Label protocol from live evidence shapes — not path catalogs."""
+        evidence: List[EvidenceItem] = []
+        keys = {ev.key for ev in existing_evidence}
+        signals: List[str] = []
+        framework = ""
+        protocol = ""
 
-        scores:          Dict[str, int]       = {}
-        matched_signals: Dict[str, List[str]] = {}
+        if keys & {
+            "chat_endpoint_200", "error_openai_format", "error_missing_messages",
+            "error_missing_model", "embedding_endpoint_200",
+        }:
+            framework = "OpenAI-compatible"
+            protocol = "OpenAI-compatible"
+            signals.append("live_surface")
+        elif "ml_endpoint_200" in keys:
+            # Label-only. Bare validation / auth status codes are not enough —
+            # those fire on any REST API and must not imply an AI framework.
+            framework = "chat_api"
+            protocol = "chat_api"
+            signals.append("ai_shaped_ml_surface")
 
-        for fw_name, sig in FRAMEWORK_SIGNATURES.items():
-            score   = 0
-            signals = []
-
-            for p in sig.get("paths", []):
-                if any(p in kp for kp in known_paths) or p in combined_text:
-                    score += 3
-                    signals.append(f"path:{p}")
-
-            for s in sig.get("js_strings", []):
-                if s.lower() in combined_text:
-                    score += 2
-                    signals.append(f"js:{s}")
-
-            for k, v in (sig.get("headers") or {}).items():
-                if k in headers_low:
-                    if v is None or v.lower() in headers_low[k].lower():
-                        score += 5
-                        signals.append(f"header:{k}")
-
-            cookie_header = headers_low.get("set-cookie", "")
-            for cn in sig.get("cookie_names", []):
-                if cn.lower() in cookie_header.lower():
-                    score += 3
-                    signals.append(f"cookie:{cn}")
-
-            for pat in sig.get("body_patterns", []):
-                for ev in existing_evidence:
-                    if re.search(pat, ev.detail, re.I):
-                        score += 2
-                        signals.append(f"body:{pat[:20]}")
-                        break
-
-            if score > 0:
-                scores[fw_name]          = score
-                matched_signals[fw_name] = signals
-
-        PROTOCOL_ONLY_LABELS = {"OpenAI-compatible"}
-        MAX_POSSIBLE_SCORE   = 12
-
-        best_fw       = ""
-        best_score    = 0
-        best_protocol = ""
-
-        for fw, sc in scores.items():
-            if fw in PROTOCOL_ONLY_LABELS:
-                if sc > 0:
-                    best_protocol = fw
-                continue
-            if sc > best_score:
-                best_score = sc
-                best_fw = fw
-
-        if not best_fw and best_protocol:
-            best_fw = best_protocol
-            best_protocol = ""
-
-        fw_confidence = min(best_score / MAX_POSSIBLE_SCORE, 1.0) if best_fw else 0.0
-        fw_signals    = matched_signals.get(best_fw, [])
-
-        if best_fw and best_score >= 3:
-            pct = f"{fw_confidence*100:.0f}%"
+        fw_confidence = 0.8 if framework else 0.0
+        if framework:
             evidence.append(EvidenceItem.make(
                 "framework_identified",
-                f"Framework: {best_fw} confidence={pct} signals={fw_signals[:4]}",
-                "passive", framework=best_fw))
-
-        INFERENCE_SERVER_NAMES = set(FRAMEWORK_SIGNATURES.keys()) - PROTOCOL_ONLY_LABELS
-        infra = ""
-        for fw_name in [best_fw] + sorted(scores.keys(), key=lambda x: scores.get(x,0), reverse=True):
-            sig = FRAMEWORK_SIGNATURES.get(fw_name, {})
-            if sig.get("paths") and any(
-                any(p in kp for kp in known_paths)
-                for p in sig.get("paths", [])
-                if any(x in p for x in ["/api/", "/v1/", "/v2/"])
-            ):
-                infra = fw_name
-                break
+                f"Protocol: {framework} signals={signals[:4]}",
+                "passive", framework=framework))
 
         return {
-            "evidence":            evidence,
-            "framework":           best_fw,
+            "evidence":             evidence,
+            "framework":            framework,
             "framework_confidence": fw_confidence,
-            "framework_signals":   fw_signals,
-            "protocol":            best_protocol,
-            "inference_server":    infra or best_fw,
+            "framework_signals":    signals,
+            "protocol":             protocol or framework,
+            "inference_server":     framework,
         }
 
     def _infer_capabilities(
@@ -1489,15 +2709,8 @@ class AIFingerprintAgent:
     ) -> List[str]:
         caps: Set[str] = set()
 
-        if framework and framework in FRAMEWORK_SIGNATURES:
-            caps.update(FRAMEWORK_SIGNATURES[framework].get("capabilities", []))
-
-        PROTOCOL_LABELS = {"OpenAI-compatible"}
-        for fw in all_frameworks:
-            if fw in PROTOCOL_LABELS:
-                continue
-            if fw in FRAMEWORK_SIGNATURES and fw != framework:
-                caps.update(FRAMEWORK_SIGNATURES[fw].get("capabilities", []))
+        if framework in ("OpenAI-compatible", "chat_api"):
+            caps.add("chat")
 
         if openapi_schema:
             caps.add("chat")
@@ -1543,7 +2756,7 @@ class AIFingerprintAgent:
             if "agent" in t_l:
                 caps.add("multi_agent")
 
-        return sorted(cap for cap in caps if cap in EXTENDED_CAPABILITIES)
+        return sorted(cap for cap in caps if cap in KNOWN_CAPABILITIES)
 
     async def _confirm_js_extracted_paths(
         self, base: str, paths: List[str], verbose: bool
@@ -1551,23 +2764,29 @@ class AIFingerprintAgent:
         return await self._confirm_js_paths(base, paths, verbose)
 
     async def _confirm_js_paths(
-        self, base: str, paths: List[str], verbose: bool
+        self, base: str, paths: List[str], verbose: bool,
+        spa_catch_all: bool = False,
     ) -> Dict:
         evidence:  List[EvidenceItem] = []
         endpoints: List[str]          = []
+        auth_signals: List[AuthSignal] = []
         loop = asyncio.get_event_loop()
 
         async def probe(path: str):
+            if not path.startswith("/"):
+                path = "/" + path.lstrip("/")
             url = base + path
             try:
                 status, hdrs, body = await loop.run_in_executor(
                     None, lambda: self._fetch(
                         url, data=b"{}", method="POST"))
-                if status == 0:
+                ct = hdrs.get("Content-Type") or hdrs.get("content-type") or ""
+                if status == 0 or _looks_html_body(ct, body):
                     status, hdrs, body = await loop.run_in_executor(
                         None, lambda: self._fetch(url))
                 r = self._evaluate_probe_response(
-                    url, path, "chat", status, hdrs, body, [])
+                    url, path, "chat", status, hdrs, body, auth_signals,
+                    spa_catch_all=spa_catch_all)
                 if r:
                     evidence.extend(r.get("evidence", []))
                     endpoints.extend(r.get("endpoints", []))
@@ -1575,7 +2794,11 @@ class AIFingerprintAgent:
                 pass
 
         await asyncio.gather(*[probe(p) for p in paths[:8]], return_exceptions=True)
-        return {"evidence": evidence, "endpoints": list(dict.fromkeys(endpoints))}
+        return {
+            "evidence": evidence,
+            "endpoints": list(dict.fromkeys(endpoints)),
+            "auth_signals": auth_signals,
+        }
 
     async def _check_discovered_endpoints(
         self, endpoints: List[Dict]
@@ -1612,24 +2835,49 @@ class AIFingerprintAgent:
         method: str = "GET",
         data: Optional[bytes] = None,
     ) -> Tuple[int, Dict, str]:
-        try:
+        def _once(target: str) -> Tuple[int, Dict, str]:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; AISecurityScanner/1.0)",
+                "Accept":     "text/html,application/json,application/xhtml+xml,*/*;q=0.8",
+                **({"Content-Type": "application/json"} if data else {}),
+                **request_auth_headers(self.auth_cookie),
+            }
             req = urllib.request.Request(
-                url, data=data,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (SecurityScanner)",
-                    "Accept":     "application/json, text/html, */*",
-                    **({"Content-Type": "application/json"} if data else {}),
-                },
+                target, data=data,
+                headers=headers,
                 method=method,
             )
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read(max_bytes).decode("utf-8", errors="replace")
                 return resp.status, dict(resp.headers), body
+
+        try:
+            return _once(url)
         except urllib.error.HTTPError as exc:
             try:
-                body = exc.read(2048).decode("utf-8", errors="replace")
+                body = exc.read(max(2048, max_bytes)).decode("utf-8", errors="replace")
             except Exception:
                 body = ""
             return exc.code, dict(exc.headers) if exc.headers else {}, body
-        except Exception:
+        except Exception as exc:
+            # localhost often resolves to ::1 first; retry 127.0.0.1 for dual-stack hosts.
+            alt = None
+            if "://localhost" in url.lower() or "://[::1]" in url.lower():
+                alt = (url.replace("://localhost", "://127.0.0.1")
+                          .replace("://Localhost", "://127.0.0.1")
+                          .replace("://[::1]", "://127.0.0.1"))
+            if alt and alt != url:
+                try:
+                    return _once(alt)
+                except urllib.error.HTTPError as exc2:
+                    try:
+                        body = exc2.read(max(2048, max_bytes)).decode("utf-8", errors="replace")
+                    except Exception:
+                        body = ""
+                    return exc2.code, dict(exc2.headers) if exc2.headers else {}, body
+                except Exception as exc2:
+                    logger.warning("[fingerprint] fetch failed %s (%s); retry %s also failed (%s)",
+                                   url, exc, alt, exc2)
+                    return 0, {}, ""
+            logger.warning("[fingerprint] fetch failed %s: %s", url, exc)
             return 0, {}, ""

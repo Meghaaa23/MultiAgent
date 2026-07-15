@@ -121,18 +121,35 @@ app = FastAPI(
     version="7.0.0",
 )
 
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:4200,http://ems885-sidc-lab"
-).split(",")
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:4200,http://127.0.0.1:4200,"
+        "http://ems885-sidc-lab,http://ems885-sidc-lab:4200,"
+        "http://ems885-sidc-lab:8000",
+    ).split(",")
+    if o.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|ems885-sidc-lab)(:\d+)?",
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def strip_api_prefix(request: Request, call_next):
+    """Accept both /query/ and /api/query/ (Angular proxy / reverse proxies)."""
+    path = request.scope.get("path", "")
+    if path == "/api" or path.startswith("/api/"):
+        request.scope["path"] = path[4:] or "/"
+    return await call_next(request)
 
 # ============================================================================
 # MONGODB & VECTOR STORE
@@ -227,7 +244,11 @@ try:
     )
     logger.info("✓ Threat Modeling Agent initialized")
 except Exception as e:
-    logger.warning(f"Threat Modeling Agent init failed: {e}")
+    logger.error(
+        "Threat Modeling Agent init failed: %s\n%s",
+        e,
+        traceback.format_exc(),
+    )
     threat_modeling_agent = None
 
 logger.info("✓ All agents initialized")
@@ -413,7 +434,27 @@ def safe_file_path(filename: str) -> Path:
 
 
 def _format_sse(event_type: str, data: dict) -> str:
+    if event_type == "progress":
+        logger.info(
+            "SSE EMITTED @ %s phase=%s percent=%s msg=%s",
+            datetime.now().isoformat(),
+            data.get("phase"),
+            data.get("percent"),
+            data.get("message"),
+        )
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+def _as_count(value, default: int = 0) -> int:
+    """Coerce a list or pre-computed int count to an int safely."""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return len(value)
+    except TypeError:
+        return default
 
 # ============================================================================
 # ROOT / HEALTH
@@ -670,6 +711,9 @@ async def query_with_full_autogen(request: Request):
                 scan_data = (
                     result.get("reasoning_chain", {}).get("scan_results") or {}
                 )
+                vulns = scan_data.get("vulnerabilities", []) or []
+                if not isinstance(vulns, list):
+                    vulns = []
                 return JSONResponse({
                     "answer":               result["report"],
                     "report_sections":      result.get("report_sections", []),
@@ -679,16 +723,20 @@ async def query_with_full_autogen(request: Request):
                     "reasoning_chain":      result.get("reasoning_chain"),
                     "scan_performed":       result.get("web_scan_performed", False),
                     "target_url":           target_url,
-                    "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
+                    "vulnerabilities_found": (
+                        _as_count(scan_data.get("confirmed_vulns", 0))
+                        + _as_count(scan_data.get("potential_vulns", 0))
+                    ),
                     # AI backdoor fields (populated when ML detected)
                     "is_ai_powered":        scan_data.get("is_ai_powered", False),
                     "ai_vulns_found":       len([
-                        f for f in scan_data.get("vulnerabilities", [])
-                        if f.get("category") == "ai_vulnerability"
+                        f for f in vulns
+                        if isinstance(f, dict) and f.get("category") == "ai_vulnerability"
                     ]),
-                    "avid_findings":        len(scan_data.get("avid_findings", [])),
-                    "strategic_recommendations": len(
-                        scan_data.get("strategic_recommendations", [])
+                    # _summarize_scan_results already stores these as ints.
+                    "avid_findings":        _as_count(scan_data.get("avid_findings", 0)),
+                    "strategic_recommendations": _as_count(
+                        scan_data.get("strategic_recommendations", 0)
                     ),
                 })
 
@@ -956,28 +1004,34 @@ async def query_stream(request: StreamQueryRequest):
 
                 heartbeats = [
                     "Fingerprinting tech stack...",
-                    "Detecting AI/ML components...",        
-                    "Querying AVID database...",            
-                    "Testing ML endpoints...",              
+                    "Detecting AI/ML components...",
+                    "Querying AVID database...",
+                    "Testing ML endpoints...",
                     "Testing XSS / SQLi...",
                     "Verifying findings...",
                 ]
-                hb_idx, base_pct = 0, 50
+                # Poll every 1s so "scan complete" lands promptly; emit heartbeat
+                # text only every 5s so the UI is not spammed.
+                hb_idx, base_pct, last_beat = 0, 50, 0
                 while not scan_task.done():
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)
                     if scan_task.done():
                         break
+                    last_beat += 1
+                    if last_beat < 5:
+                        continue
+                    last_beat = 0
                     yield _format_sse("progress", {
                         "phase": "active_scanning", "step": 4, "total_steps": 6,
                         "message": heartbeats[hb_idx % len(heartbeats)],
                         "percent": min(63, base_pct + 2),
                     })
-                    hb_idx   += 1
-                    base_pct  = min(63, base_pct + 2)
+                    hb_idx  += 1
+                    base_pct = min(63, base_pct + 2)
                     await asyncio.sleep(0)
 
                 scan_results = await scan_task
-                vuln_count   = len(scan_results.get('vulnerabilities', []))
+                vuln_count   = _as_count(scan_results.get("vulnerabilities", []))
                 ai_powered   = scan_results.get("is_ai_powered", False)
 
                 yield _format_sse("progress", {

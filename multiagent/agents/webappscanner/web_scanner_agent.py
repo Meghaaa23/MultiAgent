@@ -156,7 +156,11 @@ class WebScannerAgent:
 
         self.ai_fingerprinter = AIFingerprintAgent(timeout=8)
         self.avid_lookup      = AVIDLookupAgent(timeout=15)
-        self.ai_vuln_tester   = AIVulnerabilityTester(timeout=10, openai_client=self.openai_client)
+        self.ai_vuln_tester   = AIVulnerabilityTester(
+            timeout=10,
+            llm_model=self.llm_model,
+            openai_client=self.openai_client,
+        )
         self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client, llm_model=self.llm_model)
 
         print(" WebScannerAgent initialized ")
@@ -171,13 +175,19 @@ class WebScannerAgent:
             target_url = target_url.split("#")[0].rstrip("/")
 
         target_url = _resolve_docker_url(target_url, verbose=verbose)
-        self.vuln_tester.auth_cookie = auth_cookie or ""
+        cred = auth_cookie or ""
+        self.vuln_tester.auth_cookie = cred
+        self.browser.auth_cookie = cred
+        self.ai_fingerprinter.auth_cookie = cred
+        self.ai_vuln_tester.auth_cookie = cred
+        if hasattr(self, "ai_infra_agent"):
+            self.ai_infra_agent.auth_cookie = cred
 
         if verbose:
             print(f"\n{'='*70}")
             print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
-            if auth_cookie:
-                print(f"  Auth   : Session cookie provided (authenticated scan)")
+            if cred:
+                print(f"  Auth   : Session credential provided (authenticated scan)")
             print(f"  Target : {target_url}")
             print(f"  Budget : {max_time_minutes} minutes")
             print(f"{'='*70}\n")
@@ -193,10 +203,12 @@ class WebScannerAgent:
         if verbose:
             print(" Technology Fingerprinting...")
         try:
-            page            = await self.browser.capture_page(target_url)
+            page            = await self.browser.capture_page(target_url, auth_cookie=cred)
             html            = page.get("html", "")
             elements        = page.get("elements", [])
-            initial_headers, headers_capture_failed = await self._get_real_headers(target_url, verbose=verbose)
+            initial_headers, headers_capture_failed = await self._get_real_headers(
+                target_url, verbose=verbose, auth_cookie=cred
+            )
             stack           = await self.fingerprinter.fingerprint(
                 target_url=target_url, page_html=html,
                 response_headers=initial_headers, verbose=verbose
@@ -295,7 +307,9 @@ class WebScannerAgent:
         ai_fingerprint  = None
         avid_results    = None
         ai_vuln_results = None
+        ai_infra_result = None
         is_ai_powered   = False
+        brand_only_ai   = False
 
         try:
             ai_fingerprint = await self.ai_fingerprinter.fingerprint(
@@ -304,18 +318,41 @@ class WebScannerAgent:
                 page_html            = html,
                 response_headers     = initial_headers,
                 verbose              = verbose,
+                auth_cookie          = cred,
             )
 
-            raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
-            confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers"))
-            is_ai_powered = raw_is_ai and (confidence == "high" or has_concrete)
+            has_live_surface = bool(
+                ai_fingerprint.get("has_live_surface")
+                or ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("auth_required_paths")
+            )
+            brand_only_ai = bool(ai_fingerprint.get("ai_brand_only")) and not has_live_surface
+            is_ai_powered = bool(ai_fingerprint.get("is_ai_powered") and has_live_surface)
 
             if is_ai_powered:
                 if verbose:
-                    print(f"  AI-powered app detected [{confidence} confidence]")
+                    conf = ai_fingerprint.get("confidence", "low")
+                    det = ai_fingerprint.get("detection", "not_detected")
+                    print(f"  AI-powered app detected [{det}, confidence={conf}]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
+
+                if verbose:
+                    print("  AI Infrastructure Build Attack Analysis...")
+                try:
+                    ai_infra_result = await self.ai_infra_agent.scan(
+                        target_url=target_url, ai_stack=ai_fingerprint,
+                    )
+                    if ai_infra_result and ai_infra_result.exposed_endpoints:
+                        ai_fingerprint = AIVulnerabilityTester.merge_exposed_endpoints(
+                            ai_fingerprint, ai_infra_result.exposed_endpoints)
+                        if verbose:
+                            print(f"     Infra exposed endpoints merged: "
+                                  f"{ai_infra_result.exposed_endpoints[:3]}")
+                    if verbose:
+                        print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
+                except Exception as e:
+                    logging.warning(f"AIInfraAgent failed: {e}")
 
                 if verbose:
                     print("  Querying AVID database for AI vulnerabilities...")
@@ -333,7 +370,8 @@ class WebScannerAgent:
                 if verbose:
                     print("  Running AI-specific vulnerability tests...")
                 ai_vuln_results = await self.ai_vuln_tester.test_all(
-                    ai_fingerprint=ai_fingerprint, target_url=target_url, verbose=verbose,
+                    ai_fingerprint=ai_fingerprint, target_url=target_url,
+                    verbose=verbose, auth_cookie=cred,
                 )
                 if verbose:
                     c = len(ai_vuln_results.get("confirmed_ai_vulns", []))
@@ -341,28 +379,20 @@ class WebScannerAgent:
                     s = len(ai_vuln_results.get("strategic_recommendations", []))
                     print(f"   AI vulns: {c} confirmed, {p} potential")
                     print(f"   Strategic recommendations: {s} ATLAS-based\n")
+            elif brand_only_ai:
+                if verbose:
+                    fw = ai_fingerprint.get("framework") or (
+                        (ai_fingerprint.get("frameworks_detected") or ["unknown"])[0]
+                    )
+                    det = ai_fingerprint.get("detection", "possible")
+                    print(f"  AI product brand detected ({fw}) but no live inference surface")
+                    print(f"     detection={det} — skipping AI escalation\n")
             else:
                 if verbose:
-                    if raw_is_ai and not has_concrete:
-                        print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
-                    else:
-                        print(f"  No AI/ML components detected — AI-specific tests skipped\n")
+                    print(f"  No AI/ML components detected — AI-specific tests skipped\n")
 
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
-
-        ai_infra_result = None
-        try:
-            if ai_fingerprint and ai_fingerprint.get("is_ai_powered"):
-                if verbose:
-                    print("  AI Infrastructure Build Attack Analysis...")
-                ai_infra_result = await self.ai_infra_agent.scan(
-                    target_url=target_url, ai_stack=ai_fingerprint,
-                )
-                if verbose:
-                    print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
-        except Exception as e:
-            logging.warning(f"AIInfraAgent failed: {e}")
 
         if verbose:
             print(" CVE Lookup ")
@@ -631,7 +661,8 @@ class WebScannerAgent:
             "scan_duration":          round(duration, 1),
             "authenticated_scan":     bool(auth_cookie),
             "timestamp":              datetime.now().isoformat(),
-            "is_ai_powered":          is_ai_powered,
+            "is_ai_powered":          is_ai_powered or brand_only_ai,
+            "ai_brand_only":          brand_only_ai,
             "ai_fingerprint":         ai_fingerprint,
             "avid_findings":          (avid_results or {}).get("avid_findings", []),
             "avid_backdoor_relevant": (avid_results or {}).get("backdoor_relevant", []),
@@ -644,7 +675,8 @@ class WebScannerAgent:
             "headers_capture_failed": headers_capture_failed,
         }
 
-    async def _get_real_headers(self, url: str, verbose: bool = False) -> tuple:
+    async def _get_real_headers(self, url: str, verbose: bool = False,
+                                auth_cookie: str = "") -> tuple:
         """
         Fetch the target's response headers once, to be shared as ground
         truth across the AI fingerprinter, STRIDE builder, and Action Agent.
@@ -655,7 +687,9 @@ class WebScannerAgent:
         mystery three call-layers later.
         """
         loop = asyncio.get_event_loop()
-        headers, error = await loop.run_in_executor(None, lambda: self._sync_headers(url))
+        headers, error = await loop.run_in_executor(
+            None, lambda: self._sync_headers(url, auth_cookie=auth_cookie)
+        )
         if not headers:
             logger.warning(
                 "Header capture failed for %s — downstream header-based "
@@ -667,11 +701,18 @@ class WebScannerAgent:
             return {}, True
         return headers, False
 
-    def _sync_headers(self, url: str) -> tuple:
+    def _sync_headers(self, url: str, auth_cookie: str = "") -> tuple:
         try:
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "Mozilla/5.0 (SecurityScanner)"}
-            )
+            try:
+                from ..auth_support import request_auth_headers
+            except ImportError:
+                from multiagent.agents.auth_support import request_auth_headers
+            cred = auth_cookie or getattr(self.vuln_tester, "auth_cookie", "")
+            headers = {
+                "User-Agent": "Mozilla/5.0 (SecurityScanner)",
+                **request_auth_headers(cred),
+            }
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return {k.lower(): v for k, v in resp.headers.items()}, None
         except urllib.error.HTTPError as e:

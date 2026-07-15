@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import logging
 import ipaddress
@@ -43,6 +44,7 @@ class AIInfraScanResult:
     error:           str = ""
     catch_all_detected: bool = False
     auth_protected_endpoints: list = field(default_factory=list)
+    exposed_endpoints: list = field(default_factory=list)
 
 
 RAY_SERVE_PATHS = ["/-/routes", "/api/serve/routes", "/-/healthz",
@@ -86,15 +88,32 @@ INFO_ENDPOINTS = {
 GENERIC_PATHS = {"/docs", "/health", "/healthz", "/readyz", "/metrics",
                  "/openapi.json", "/info", "/ping"}
 
-AI_BODY_SIGNALS = ["model", "ollama", "vllm", "embedding", "inference",
+AI_BODY_SIGNALS = ["model", "embedding", "inference",
                    "completion", "generate", "torch", "tensorflow", "llm",
                    "cuda", "gpu", "triton", "ray", "bentoml", "langchain",
-                   "huggingface", "transformers", "tokenizer", "checkpoint"]
+                   "huggingface", "transformers", "tokenizer", "checkpoint",
+                   "choices", "messages", "prompt", "chatflows", "flows"]
 
 CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
 INFERENCE_PATHS = ["/v1/chat/completions", "/v1/completions", "/api/generate",
-                   "/api/chat", "/generate"]
+                   "/api/chat", "/generate", "/api/v1/prediction", "/api/ask",
+                   "/api/v1/run", "/run/predict", "/api/chat-messages",
+                   "/api/v1/openai/chat/completions"]
 TRAINING_PATHS = ["/train", "/fine-tune", "/finetune", "/training", "/api/train"]
+
+INFERENCE_PATH_RE = re.compile(
+    r"/(?:v\d+/)?(?:chat/)?completions(?:/|$)"
+    r"|/api/(?:chat|generate|ask|messages|prediction|predict)(?:/|$)"
+    r"|/run(?:/|$)|/invoke(?:/$)",
+    re.I,
+)
+
+OPENAI_CHAT_PROBE = {
+    "model": "gpt-3.5-turbo",
+    "messages": [{"role": "user", "content": "Hi"}],
+    "max_tokens": 1,
+    "stream": False,
+}
 
 HIGH_IMPACT_CAPS = {"code_execution", "shell", "python", "email_send", "tool_calling", "mcp"}
 MED_IMPACT_CAPS  = {"memory", "multi_agent", "web_search", "browser", "retrieval", "rag"}
@@ -186,7 +205,19 @@ def _is_triton_list(body: str) -> bool:
 
 def _is_k8s_body(body: str) -> bool:
     d = _json_body(body)
-    return isinstance(d, dict) and ("kind" in d or "apiVersion" in d)
+    if not isinstance(d, dict):
+        return False
+    # Require both fields — SPA/auth JSON often has one by coincidence.
+    if "kind" in d and "apiVersion" in d:
+        return True
+    kind = d.get("kind")
+    if kind in ("APIVersions", "APIGroupList", "NamespaceList", "PodList", "Status"):
+        return True
+    return (
+        str(d.get("apiVersion", "")).startswith("v1")
+        and isinstance(d.get("items"), list)
+        and kind is not None
+    )
 
 
 def _is_ai_json(body: str) -> bool:
@@ -215,6 +246,7 @@ class AIInfraAgent:
         self.client    = openai_client
         self.timeout   = timeout
         self.llm_model = llm_model or os.getenv("AZURE_OPENAI_DEPLOYMENT", "MultiAgentLLM")
+        self.auth_cookie = ""
 
     async def scan(self, target_url: str, ai_stack: Optional[dict] = None) -> AIInfraScanResult:
         target_url   = target_url.rstrip("/")
@@ -242,6 +274,14 @@ class AIInfraAgent:
 
             exposed, auth_hits, catch_all = await self._probe_ai_endpoints(target_url, ai_stack)
             result.catch_all_detected = catch_all
+            result.exposed_endpoints = [
+                (meta or {}).get("url") or (
+                    key if str(key).startswith("http") else f"{target_url}{key}"
+                )
+                for key, meta in exposed.items()
+                if (meta or {}).get("verdict") == "exposed"
+                or (meta or {}).get("status") == 200
+            ]
             for ep in auth_hits:
                 if ep not in result.auth_protected_endpoints:
                     result.auth_protected_endpoints.append(ep)
@@ -264,8 +304,17 @@ class AIInfraAgent:
 
     async def _detect_catch_all(self, base_url: str) -> bool:
         try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            try:
+                from ..auth_support import request_auth_headers
+            except ImportError:
+                try:
+                    from multiagent.agents.auth_support import request_auth_headers
+                except ImportError:
+                    from auth_support import request_auth_headers
+            headers.update(request_auth_headers(self.auth_cookie))
             async with httpx.AsyncClient(timeout=self.timeout, verify=False) as http:
-                r = await http.get(f"{base_url}{CANARY_PATH}", headers={"User-Agent": "Mozilla/5.0"})
+                r = await http.get(f"{base_url}{CANARY_PATH}", headers=headers)
                 if r.status_code == 200:
                     logger.warning(
                         "[AIInfraAgent] Catch-all/SPA-fallback detected at %s "
@@ -276,8 +325,11 @@ class AIInfraAgent:
             pass
         return False
 
-    def _select_paths(self, confirmed_paths: list) -> list:
+    def _select_paths(self, confirmed_paths: list, ai_stack: Optional[dict] = None,
+                      catch_all: bool = False) -> list:
         paths_to_probe = []
+
+        # Expand from confirmed path patterns (no product-name catalogs).
         if any(p in confirmed_paths for p in ["/api/tags", "/api/generate", "/api/chat"]):
             paths_to_probe += OLLAMA_PATHS
         if any(p in confirmed_paths for p in ["/v1/models", "/v1/chat/completions"]):
@@ -290,43 +342,130 @@ class AIInfraAgent:
             paths_to_probe += TORCHSERVE_PATHS
         if any(p in confirmed_paths for p in ["/v2/models", "/v2/health/ready"]):
             paths_to_probe += TRITON_PATHS
-        paths_to_probe += UNIVERSAL_PATHS + MANAGEMENT_PATHS + KUBERNETES_PATHS
-        return list(dict.fromkeys(paths_to_probe))
+
+        # Always include confirmed fingerprint endpoints.
+        paths_to_probe += confirmed_paths
+
+        # Avoid spraying K8s/Ray/management probes onto SPA frontends — massive FP source.
+        if not catch_all:
+            # Only expand management/K8s when already confirmed on this host.
+            for p in MANAGEMENT_PATHS:
+                if p in confirmed_paths:
+                    paths_to_probe.append(p)
+            if any(p.startswith("/api/v1/namespaces") or p == "/apis" for p in confirmed_paths):
+                paths_to_probe += KUBERNETES_PATHS
+        else:
+            for p in MANAGEMENT_PATHS:
+                if p in confirmed_paths:
+                    paths_to_probe.append(p)
+
+        return list(dict.fromkeys(p for p in paths_to_probe if p))
+
+    def _allowed_hosts(self, base_url: str, ai_stack: Optional[dict]) -> set:
+        """Hosts infra may probe: page origin + fingerprint JS allowlist only."""
+        hosts = set()
+        page_host = urlparse(base_url).netloc
+        if page_host:
+            hosts.add(page_host)
+        stack = ai_stack or {}
+        for h in stack.get("allowed_api_hosts") or []:
+            if isinstance(h, str) and h.strip():
+                host = urlparse(h if "://" in h else f"https://{h}").netloc or h.strip()
+                if host:
+                    hosts.add(host)
+        return hosts
 
     async def _probe_ai_endpoints(self, base_url: str, ai_stack: Optional[dict]) -> Tuple[dict, list, bool]:
         is_catch_all = await self._detect_catch_all(base_url)
+        if not is_catch_all and (ai_stack or {}).get("spa_catch_all"):
+            is_catch_all = True
 
-        confirmed       = ai_stack.get("ml_endpoints", []) if ai_stack else []
-        confirmed_paths = [urlparse(e).path for e in confirmed]
-        paths_to_probe  = self._select_paths(confirmed_paths)
+        confirmed       = list((ai_stack or {}).get("ml_endpoints") or [])
+        # Also consider auth-gated paths as known AI surfaces (not "exposed").
+        for sig in (ai_stack or {}).get("auth_required_paths") or []:
+            if isinstance(sig, dict) and sig.get("endpoint"):
+                confirmed.append(sig["endpoint"])
+
+        page_host = urlparse(base_url).netloc
+        allowed = self._allowed_hosts(base_url, ai_stack)
+
+        # Catalog expansion only on the page origin — never spray related hosts.
+        same_origin_paths: list = []
+        # (origin, path, full_url) for allowlisted cross-origin confirmed endpoints.
+        cross_targets: list = []
+        for e in confirmed:
+            if not e:
+                continue
+            if e.startswith("http://") or e.startswith("https://"):
+                parsed = urlparse(e)
+                path = parsed.path or "/"
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+                if parsed.netloc == page_host:
+                    same_origin_paths.append(path)
+                elif parsed.netloc in allowed:
+                    cross_targets.append((origin, path, f"{origin}{path}"))
+                else:
+                    logger.info(
+                        "[AIInfraAgent] skip cross-origin not allowlisted: %s", e)
+            else:
+                same_origin_paths.append(e if e.startswith("/") else "/" + e)
+
+        paths_to_probe = self._select_paths(
+            list(dict.fromkeys(same_origin_paths)), ai_stack, catch_all=is_catch_all)
+
+        # Dedupe cross-origin confirmed URLs (no catalog expansion on them).
+        seen_cross = set()
+        cross_unique = []
+        for origin, path, full in cross_targets:
+            if full in seen_cross:
+                continue
+            seen_cross.add(full)
+            cross_unique.append((origin, path, full))
 
         exposed: dict = {}
         auth_hits: list = []
+        # Work items: (probe_base, path, full_url, use_spa, same_origin)
+        work = [
+            (base_url, p, base_url + p, is_catch_all, True) for p in paths_to_probe
+        ] + [
+            (origin, path, full, False, False)
+            for origin, path, full in cross_unique
+        ]
 
         async with httpx.AsyncClient(timeout=self.timeout, verify=False, follow_redirects=True) as http:
-            tasks   = [self._probe_path(http, base_url, p) for p in paths_to_probe]
+            tasks   = [self._probe_path(http, b, p) for b, p, _, _, _ in work]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for path, res in zip(paths_to_probe, results):
+        for (_b, path, full_url, use_spa, same_origin), res in zip(work, results):
             if isinstance(res, Exception):
                 continue
             status, body, ct = res
-            verdict = self._classify(status, body, ct, path, bool(confirmed_paths))
+            verdict = self._classify(
+                status, body, ct, path, bool(same_origin_paths or cross_unique),
+                catch_all=use_spa)
             if verdict == "auth":
-                url = base_url + path
-                if url not in auth_hits:
-                    auth_hits.append(url)
-                logger.info("[AIInfraAgent] AUTH-PROTECTED -> %s [%d]", path, status)
+                if full_url not in auth_hits:
+                    auth_hits.append(full_url)
+                logger.info("[AIInfraAgent] AUTH-PROTECTED -> %s [%d]", full_url, status)
                 continue
             if verdict == "skip":
                 continue
-            exposed[path] = {"status": status, "body": body, "verdict": verdict}
-            tag = "content-verified" if is_catch_all else "reached"
-            logger.info("[AIInfraAgent] EXPOSED (%s) -> %s [%d]", tag, path, status)
+            # Defense in depth: never mark non-success/validation statuses as exposed.
+            if status in SKIP_STATUS or status in (401, 403):
+                continue
+            # Same-origin keyed by path (threat heuristics); cross-origin by full URL.
+            key = path if same_origin else full_url
+            exposed[key] = {
+                "status": status, "body": body, "verdict": verdict,
+                "path": path, "url": full_url,
+            }
+            tag = "content-verified" if use_spa else "reached"
+            logger.info("[AIInfraAgent] EXPOSED (%s) -> %s [%d]", tag, full_url, status)
 
         return exposed, auth_hits, is_catch_all
 
-    def _classify(self, status: int, body: str, ct: str, path: str, have_confirmed: bool) -> str:
+    def _classify(self, status: int, body: str, ct: str, path: str,
+                  have_confirmed: bool, catch_all: bool = False) -> str:
         if _looks_html(ct, body):
             return "skip"
         if status in (401, 403):
@@ -334,26 +473,56 @@ class AIInfraAgent:
         if status in SKIP_STATUS:
             return "skip"
         if status == 200:
-            if path in GENERIC_PATHS:
-                if not any(s in (body or "").lower() for s in AI_BODY_SIGNALS):
-                    return "skip"
             parsed = _json_body(body)
             b = (body or "").strip().lower()
+            is_inference = bool(INFERENCE_PATH_RE.search(path or ""))
+            soft_404 = (
+                b in ("", "{}", "[]", "null")
+                or (isinstance(parsed, dict) and parsed.get("statusCode") in (404, 405))
+            )
+            if catch_all or path in GENERIC_PATHS:
+                ai_shaped = _is_ai_json(body) or any(
+                    s in (body or "").lower() for s in AI_BODY_SIGNALS
+                )
+                # Known inference routes: non-HTML JSON 200 is enough in SPA mode.
+                if not ai_shaped and not (is_inference and parsed is not None and not soft_404):
+                    if not (is_inference and "json" in (ct or "").lower() and not soft_404):
+                        return "skip"
             if parsed is None and b in ("", "null"):
+                if is_inference and "json" in (ct or "").lower():
+                    return "exposed"
+                return "skip"
+            if parsed is None and not any(s in b for s in AI_BODY_SIGNALS):
+                if is_inference and not _looks_html(ct, body):
+                    return "exposed"
                 return "skip"
             return "exposed"
         if status in (400, 422):
+            # Validation errors prove a real handler; still skip HTML SPA shells.
+            if catch_all and not (_json_body(body) or any(
+                s in (body or "").lower() for s in AI_BODY_SIGNALS
+            )):
+                return "skip"
             return "reached"
         return "skip"
 
     async def _probe_path(self, http: httpx.AsyncClient, base: str, path: str) -> Tuple[int, str, str]:
         headers = {"User-Agent": "Mozilla/5.0"}
         try:
+            try:
+                from ..auth_support import request_auth_headers
+            except ImportError:
+                try:
+                    from multiagent.agents.auth_support import request_auth_headers
+                except ImportError:
+                    from auth_support import request_auth_headers
+            headers.update(request_auth_headers(self.auth_cookie))
             if "delete" in path:
                 r = await http.request("DELETE", f"{base}{path}", headers=headers)
                 return r.status_code, (r.text[:400] if r.text else ""), r.headers.get("content-type", "")
             if any(seg in path for seg in ["/chat", "/generate", "/completions"]):
-                r = await http.post(f"{base}{path}", json={}, headers=headers)
+                payload = OPENAI_CHAT_PROBE if "chat" in path or "completions" in path else {}
+                r = await http.post(f"{base}{path}", json=payload, headers=headers)
                 return r.status_code, (r.text[:400] if r.text else ""), r.headers.get("content-type", "")
             r = await http.get(f"{base}{path}", headers=headers)
             if r.status_code == 405:
@@ -444,9 +613,18 @@ class AIInfraAgent:
 
     async def _analyze_runtime_plane(self, url, exposed, capabilities, reachability):
         threats = []
-        exposed_inference = [p for p in INFERENCE_PATHS
-                             if p in exposed and _is_ai_json(exposed[p].get("body", ""))
-                             or (p in exposed and exposed[p].get("verdict") == "reached")]
+        exposed_inference = []
+        for p in INFERENCE_PATHS:
+            if p not in exposed:
+                continue
+            entry = exposed[p]
+            body = entry.get("body", "")
+            verdict = entry.get("verdict")
+            if _is_ai_json(body) or verdict == "reached":
+                # Ignore 404/HTML ghosts that slipped through.
+                if entry.get("status") in SKIP_STATUS:
+                    continue
+                exposed_inference.append(p)
         exposed_inference = list(dict.fromkeys(exposed_inference))
 
         if exposed_inference:
@@ -517,6 +695,8 @@ class AIInfraAgent:
             if path not in exposed:
                 continue
             d = exposed[path]
+            if d.get("status") not in (200, 400, 422):
+                continue
             status_note = "(reached handler, requires body) " if d["status"] in (400, 422) else ""
             threats.append(AIInfraThreat(
                 attack_name=f"{action.title()} API Exposed (management endpoint)",
@@ -647,5 +827,6 @@ class AIInfraAgent:
             "summary":        result.summary,
             "catch_all_detected": result.catch_all_detected,
             "auth_protected_endpoints": result.auth_protected_endpoints,
+            "exposed_endpoints": result.exposed_endpoints,
             "planes_covered": ["BUILD", "DEPLOYMENT", "RUNTIME", "ORCHESTRATION"],
         }

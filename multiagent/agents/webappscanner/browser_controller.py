@@ -9,6 +9,17 @@ from urllib.parse import urlparse, urljoin
 
 logger = logging.getLogger(__name__)
 
+try:
+    from ..auth_support import request_auth_headers, playwright_cookies_from_header
+except ImportError:
+    try:
+        from multiagent.agents.auth_support import (
+            request_auth_headers,
+            playwright_cookies_from_header,
+        )
+    except ImportError:
+        from auth_support import request_auth_headers, playwright_cookies_from_header
+
 
 class BrowserController:
  
@@ -17,6 +28,7 @@ class BrowserController:
         self.openai_client  = openai_client
         self.llm_model      = llm_model
         self.action_history: List[Dict] = []
+        self.auth_cookie: str = ""
 
         try:
             from playwright.async_api import async_playwright  # noqa: F401
@@ -31,7 +43,7 @@ class BrowserController:
     # SENSORS — page capture
     # ==================================================================
 
-    async def capture_page(self, url: str) -> Dict:
+    async def capture_page(self, url: str, auth_cookie: str = "") -> Dict:
         """
         Capture page HTML and interactive elements.
 
@@ -43,6 +55,8 @@ class BrowserController:
             "url":      str
         }
         """
+        if auth_cookie:
+            self.auth_cookie = auth_cookie
         if self._has_playwright:
             return await self._playwright_capture(url)
         return await self._urllib_capture(url)
@@ -59,7 +73,18 @@ class BrowserController:
                 browser = await p.chromium.launch(
                     headless=True, args=["--no-sandbox"]
                 )
-                page = await browser.new_page()
+                context_kwargs = {}
+                # Bearer tokens go as extra HTTP headers; cookies via add_cookies.
+                auth_hdrs = request_auth_headers(self.auth_cookie)
+                if "Authorization" in auth_hdrs:
+                    context_kwargs["extra_http_headers"] = {
+                        "Authorization": auth_hdrs["Authorization"]
+                    }
+                context = await browser.new_context(**context_kwargs)
+                cookies = playwright_cookies_from_header(self.auth_cookie, url)
+                if cookies:
+                    await context.add_cookies(cookies)
+                page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(2000)  # wait for JS
 
@@ -76,10 +101,11 @@ class BrowserController:
         """Fallback: fetch HTML with urllib, extract elements with regex."""
         import urllib.request
         try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (SecurityScanner)"}
-            )
+            headers = {
+                "User-Agent": "Mozilla/5.0 (SecurityScanner)",
+                **request_auth_headers(self.auth_cookie),
+            }
+            req = urllib.request.Request(url, headers=headers)
             loop = asyncio.get_event_loop()
             raw  = await loop.run_in_executor(
                 None, lambda: urllib.request.urlopen(req, timeout=15).read(1_000_000)
@@ -524,7 +550,17 @@ Output JSON only:
                 browser = await p.chromium.launch(
                     headless=True, args=["--no-sandbox"]
                 )
-                page = await browser.new_page()
+                context_kwargs = {}
+                auth_hdrs = request_auth_headers(self.auth_cookie)
+                if "Authorization" in auth_hdrs:
+                    context_kwargs["extra_http_headers"] = {
+                        "Authorization": auth_hdrs["Authorization"]
+                    }
+                context = await browser.new_context(**context_kwargs)
+                cookies = playwright_cookies_from_header(self.auth_cookie, url)
+                if cookies:
+                    await context.add_cookies(cookies)
+                page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 self.action_history = []
 

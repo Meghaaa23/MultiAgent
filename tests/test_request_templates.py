@@ -27,21 +27,21 @@ class TestSelectTemplate:
         tmpl = _select_template("/v1/completions")
         assert _template_name(tmpl) == "openai_completions"
 
-    def test_ollama_chat_path(self):
+    def test_api_chat_path(self):
         tmpl = _select_template("/api/chat")
-        assert _template_name(tmpl) == "ollama_chat"
+        assert _template_name(tmpl) == "api_chat"
 
-    def test_ollama_generate_path(self):
+    def test_api_generate_path(self):
         tmpl = _select_template("/api/generate")
-        assert _template_name(tmpl) == "ollama_generate"
+        assert _template_name(tmpl) == "api_generate"
 
-    def test_flowise_path(self):
+    def test_api_v1_prediction_path(self):
         tmpl = _select_template("/api/v1/prediction")
-        assert _template_name(tmpl) == "flowise"
+        assert _template_name(tmpl) == "api_v1_prediction"
 
-    def test_tgi_path(self):
+    def test_generate_path(self):
         tmpl = _select_template("/generate")
-        assert _template_name(tmpl) == "tgi"
+        assert _template_name(tmpl) == "generate"
 
     def test_generic_predict_path(self):
         tmpl = _select_template("/predict")
@@ -89,19 +89,19 @@ class TestTemplateBodies:
         assert "prompt" in body
         assert body["prompt"] == "Complete this:"
 
-    def test_ollama_chat_no_stream(self):
-        tmpl = REQUEST_TEMPLATES["ollama_chat"]
+    def test_api_chat_no_stream(self):
+        tmpl = REQUEST_TEMPLATES["api_chat"]
         body = tmpl["body"]("Test", None)
         assert body["stream"] is False
 
-    def test_flowise_body_uses_question_key(self):
-        tmpl = REQUEST_TEMPLATES["flowise"]
+    def test_api_v1_prediction_body_uses_question_key(self):
+        tmpl = REQUEST_TEMPLATES["api_v1_prediction"]
         body = tmpl["body"]("What is AI?", None)
         assert "question" in body
         assert body["question"] == "What is AI?"
 
-    def test_tgi_body_has_parameters(self):
-        tmpl = REQUEST_TEMPLATES["tgi"]
+    def test_generate_body_has_parameters(self):
+        tmpl = REQUEST_TEMPLATES["generate"]
         body = tmpl["body"]("prompt text", None)
         assert "inputs" in body
         assert "parameters" in body
@@ -148,6 +148,6 @@ class TestExtractByPath:
         result = _extract_by_path("raw response text", None)
         assert result == "raw response text"
 
-    def test_tgi_parse_path(self):
+    def test_generate_parse_path(self):
         data = {"generated_text": "output here"}
         assert _extract_by_path(data, "generated_text") == "output here"
