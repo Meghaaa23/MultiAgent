@@ -258,6 +258,40 @@ def _looks_api_method_rejection(
     return False
 
 
+def _looks_api_auth_rejection(
+    ct: str, body: str, headers: Optional[Dict] = None,
+) -> bool:
+    """True when 401/403 looks like an application API auth gate (not CDN/HTML)."""
+    if _looks_html_body(ct, body):
+        return False
+    if _looks_static_storage_error(ct, body):
+        return False
+    headers = headers or {}
+    headers_low = {str(k).lower(): v for k, v in headers.items()}
+    if headers_low.get("www-authenticate"):
+        return True
+    ct_l = (ct or "").lower()
+    b = (body or "").strip()
+    jsonish = "json" in ct_l or (b[:1] in "{[")
+    if not jsonish:
+        return False
+    if not b:
+        # Empty body with JSON content-type is still an API auth signal.
+        return "json" in ct_l
+    bl = b.lower()
+    if any(x in bl for x in (
+        "auth", "unauthorized", "forbidden", "token", "login",
+        "credential", "permission", "detail", "error", "message",
+        "denied", "unauthenticated",
+    )):
+        return True
+    try:
+        data = json.loads(b)
+    except Exception:
+        return False
+    return isinstance(data, (dict, list))
+
+
 def _is_meaningful_ai_meta_content(content: str) -> bool:
     """True when meta content is real AI product copy, not a URL/domain hit.
 
@@ -774,7 +808,8 @@ class AIFingerprintAgent:
             js_api_paths = js_r.get("api_paths", [])
             raw_html_js  = js_r.get("raw_js", "")
             related_bases.extend(js_r.get("api_bases", []) or [])
-            # Report every JS-discovered path/URL; only probe inference-shaped ones.
+            # Report every JS-discovered path/URL; probe inference-shaped ones
+            # (related-host absolute APIs are added after related_bases resolve).
             for path in js_api_paths:
                 discovered_paths.append(path)
                 if self._candidate_is_inference(path):
@@ -821,6 +856,13 @@ class AIFingerprintAgent:
         for api_base in related_bases:
             for path in relative_infer:
                 candidates.append(api_base.rstrip("/") + path)
+
+        # Absolute API URLs already present in JS on allowlisted related hosts
+        # (e.g. product APIs without chat/messages segments). No catalog spray.
+        for url in self._related_host_api_candidates(
+            discovered_paths, related_bases, page_base=base,
+        ):
+            candidates.append(url)
 
         # Spec / GraphQL refs only if this app's HTML/JS/discovery mentioned them.
         surface_blob = "\n".join([
@@ -891,10 +933,19 @@ class AIFingerprintAgent:
                     )
 
         # Phase 2 — probe only what this application exposed.
+        related_api_hosts = {
+            (urllib.parse.urlparse(origin).netloc or "").lower()
+            for origin in related_bases
+            if urllib.parse.urlparse(origin).netloc
+        }
+        page_host = (urllib.parse.urlparse(base).netloc or "").lower()
         if candidates:
             probe_r = await self._probe_candidates(
                 base, candidates, verbose, spa_catch_all=spa_catch_all,
-                openapi_schema=openapi_schema)
+                openapi_schema=openapi_schema,
+                related_api_hosts=related_api_hosts,
+                page_host=page_host,
+            )
             if isinstance(probe_r, dict):
                 all_evidence.extend(probe_r.get("evidence", []))
                 ml_endpoints.extend(probe_r.get("endpoints", []))
@@ -1622,6 +1673,71 @@ class AIFingerprintAgent:
             return _is_inference_path(urllib.parse.urlparse(candidate).path)
         return _is_inference_path(candidate)
 
+    # Analytics / auth-broker noise on related hosts — never primary AI surface.
+    _RELATED_API_PATH_NOISE = (
+        "/analytics", "/oauth", "/mediator", "/pixel", "/collect",
+        "/telemetry", "/tracking", "/beacon", "/gtm", "/segment",
+    )
+
+    def _related_host_api_candidates(
+        self,
+        discovered_paths: List[str],
+        related_bases: List[str],
+        page_base: str,
+        *,
+        limit: int = 15,
+    ) -> List[str]:
+        """Absolute API URLs from JS on allowlisted related hosts (not page origin).
+
+        Discovers-first only: never invents paths. Prefer /api and /vN; cap count.
+        """
+        page_host = (urllib.parse.urlparse(page_base).netloc or "").lower()
+        allowed: Set[str] = set()
+        for origin in related_bases or []:
+            host = (urllib.parse.urlparse(origin).netloc or "").lower()
+            if host and host != page_host and not self._is_static_cdn_host(host):
+                allowed.add(host)
+        if not allowed:
+            return []
+
+        scored: List[Tuple[int, str]] = []
+        for raw in discovered_paths or []:
+            if not (raw.startswith("http://") or raw.startswith("https://")):
+                continue
+            if not self._looks_absolute_api_url(raw):
+                continue
+            parsed = urllib.parse.urlparse(raw.split("#")[0])
+            host = (parsed.netloc or "").lower()
+            if host not in allowed:
+                continue
+            path = (parsed.path or "").split("?")[0]
+            path_l = path.lower()
+            if any(n in path_l for n in self._RELATED_API_PATH_NOISE):
+                continue
+            if not path or path == "/":
+                continue
+            score = 0
+            if "/api/" in path_l or path_l.startswith("/api"):
+                score += 3
+            if re.search(r"/v\d+/", path_l):
+                score += 2
+            if _is_inference_path(path):
+                score += 5
+            norm = f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
+            scored.append((score, norm))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        out: List[str] = []
+        seen: Set[str] = set()
+        for _score, url in scored:
+            if url in seen:
+                continue
+            seen.add(url)
+            out.append(url)
+            if len(out) >= limit:
+                break
+        return out
+
     def _normalize_api_bases(self, bases: List[str], page_base: str) -> List[str]:
         page = urllib.parse.urlparse(page_base)
         page_origin = f"{page.scheme}://{page.netloc}".rstrip("/")
@@ -2111,10 +2227,29 @@ class AIFingerprintAgent:
 
         return {"evidence": evidence, "paths": list(dict.fromkeys(paths))}
 
+    def _is_related_host_api_probe(
+        self,
+        url: str,
+        related_api_hosts: Optional[Set[str]],
+        page_host: str,
+    ) -> bool:
+        """True when probing an absolute API URL on a JS-allowlisted related host."""
+        if not related_api_hosts or not (
+            url.startswith("http://") or url.startswith("https://")
+        ):
+            return False
+        host = (urllib.parse.urlparse(url).netloc or "").lower()
+        page = (page_host or "").lower()
+        if not host or host == page or host not in related_api_hosts:
+            return False
+        return self._looks_absolute_api_url(url)
+
     async def _probe_candidates(
         self, base: str, candidates: List[str], verbose: bool,
         spa_catch_all: bool = False,
         openapi_schema: Optional[Dict] = None,
+        related_api_hosts: Optional[Set[str]] = None,
+        page_host: str = "",
     ) -> Dict:
         """Probe application-discovered paths/URLs only — no catalog spray."""
         evidence:    List[EvidenceItem] = []
@@ -2122,6 +2257,8 @@ class AIFingerprintAgent:
         frameworks:  List[str]          = []
         auth_signals: List[AuthSignal]  = []
         loop = asyncio.get_event_loop()
+        related_api_hosts = related_api_hosts or set()
+        page_host = page_host or (urllib.parse.urlparse(base).netloc or "")
 
         async def probe(candidate: str, category: str):
             if candidate.startswith("http://") or candidate.startswith("https://"):
@@ -2152,7 +2289,10 @@ class AIFingerprintAgent:
                     )
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
-                    auth_signals, spa_catch_all=use_spa)
+                    auth_signals, spa_catch_all=use_spa,
+                    related_api_hosts=related_api_hosts,
+                    page_host=page_host,
+                )
             except Exception:
                 return None
 
@@ -2190,6 +2330,8 @@ class AIFingerprintAgent:
         body: str,
         auth_signals: List[AuthSignal],
         spa_catch_all: bool = False,
+        related_api_hosts: Optional[Set[str]] = None,
+        page_host: str = "",
     ) -> Dict:
         evidence:  List[EvidenceItem] = []
         endpoints: List[str]          = []
@@ -2201,6 +2343,10 @@ class AIFingerprintAgent:
         headers_low = {k.lower(): v for k, v in headers.items()}
         ct = headers_low.get("content-type", "")
         body_l = (body or "").lower()
+        related_api = self._is_related_host_api_probe(
+            url, related_api_hosts, page_host,
+        )
+        inference = _is_inference_path(path)
 
         # SPA HTML responses are not API evidence.
         if _looks_html_body(ct, body):
@@ -2212,7 +2358,7 @@ class AIFingerprintAgent:
             # 200 live-surface evidence requires an AI-shaped body — status alone
             # on an inference path is not enough (matches 401/405 path-shape gate).
             if ai_shaped:
-                ev_key = ("chat_endpoint_200" if category == "chat" or _is_inference_path(path) else
+                ev_key = ("chat_endpoint_200" if category == "chat" or inference else
                           "embedding_endpoint_200" if category == "embedding" else
                           "ml_endpoint_200")
                 evidence.append(EvidenceItem.make(
@@ -2220,7 +2366,7 @@ class AIFingerprintAgent:
                     f"AI body at {path} (HTTP 200)",
                     "probe", endpoint=url))
                 endpoints.append(url)
-                if category in ("chat", "schema") or _is_inference_path(path):
+                if category in ("chat", "schema") or inference:
                     frameworks.append("OpenAI-compatible")
 
             if "text/event-stream" in ct:
@@ -2255,20 +2401,23 @@ class AIFingerprintAgent:
                 endpoint=url, auth_type=auth_type,
                 status_code=status,
                 detail=f"Auth required ({auth_type}) at {path}"))
-            # Auth is always recorded; AI live-surface only on inference paths.
-            if _is_inference_path(path):
+            # Inference paths: any auth gate confirms. Related-host absolute API
+            # URLs (non-inference) require an API-shaped auth/error response.
+            if inference or (
+                related_api and _looks_api_auth_rejection(ct, body, headers_low)
+            ):
                 evidence.append(EvidenceItem.make(
                     "ml_endpoint_401_403",
                     f"Auth-gated {path} (HTTP {status}, {auth_type})",
                     "probe", endpoint=url))
                 endpoints.append(url)
 
-        # 405 is noise on SPA catch-alls, non-inference paths, and static
+        # 405 is noise on SPA catch-alls, non-API paths, and static
         # storage/CDN errors (e.g. Aliyun OSS MethodNotAllowed XML).
         if (
             status == 405
             and not spa_catch_all
-            and _is_inference_path(path)
+            and (inference or related_api)
             and _looks_api_method_rejection(ct, body, headers_low)
         ):
             evidence.append(EvidenceItem.make(
@@ -2283,7 +2432,9 @@ class AIFingerprintAgent:
                 frameworks.append(fw)
                 if url not in endpoints:
                     endpoints.append(url)
-            elif category in ("chat", "embedding", "ml") and (
+            elif (
+                category in ("chat", "embedding", "ml") or related_api
+            ) and (
                 "json" in ct or body.strip()[:1] in "{["
             ):
                 # Handler reached with validation error => real API surface.

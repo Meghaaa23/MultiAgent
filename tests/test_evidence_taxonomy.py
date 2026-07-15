@@ -245,6 +245,65 @@ def test_non_inference_401_is_auth_only():
     assert len(auth) == 1
 
 
+def test_related_host_api_401_json_confirms_live():
+    """Grammarly-style: product API on related host, JSON 401 → live surface."""
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    url = "https://capi.example.com/api/configuration/product/v1/settings"
+    r = agent._evaluate_probe_response(
+        url,
+        "/api/configuration/product/v1/settings",
+        "schema",
+        401,
+        {"Content-Type": "application/json"},
+        '{"detail":"Unauthorized"}',
+        auth,
+        related_api_hosts={"capi.example.com"},
+        page_host="www.example.com",
+    )
+    assert url in (r.get("endpoints") or [])
+    assert any(e.key == "ml_endpoint_401_403" for e in r.get("evidence", []))
+    assert len(auth) == 1
+
+
+def test_related_host_api_401_html_does_not_confirm():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    url = "https://capi.example.com/api/configuration/v1/settings"
+    r = agent._evaluate_probe_response(
+        url,
+        "/api/configuration/v1/settings",
+        "schema",
+        401,
+        {"Content-Type": "text/html"},
+        "<!DOCTYPE html><html><body>login</body></html>",
+        auth,
+        related_api_hosts={"capi.example.com"},
+        page_host="www.example.com",
+    )
+    assert r.get("endpoints", []) == []
+    assert not any(e.key == "ml_endpoint_401_403" for e in r.get("evidence", []))
+
+
+def test_page_origin_non_inference_api_401_still_auth_only():
+    """Same-origin /api/settings without inference segments must not auto-confirm."""
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    auth = []
+    r = agent._evaluate_probe_response(
+        "https://www.example.com/api/configuration/v1/settings",
+        "/api/configuration/v1/settings",
+        "schema",
+        401,
+        {"Content-Type": "application/json"},
+        '{"detail":"Unauthorized"}',
+        auth,
+        related_api_hosts={"capi.example.com"},
+        page_host="www.example.com",
+    )
+    assert r.get("endpoints", []) == []
+    assert len(auth) == 1
+
+
 def test_non_inference_405_emits_nothing():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     r = agent._evaluate_probe_response(
