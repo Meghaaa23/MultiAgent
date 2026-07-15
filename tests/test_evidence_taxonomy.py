@@ -256,6 +256,56 @@ def test_non_inference_405_emits_nothing():
     assert not any(e.key == "ml_endpoint_405" for e in r.get("evidence", []))
 
 
+def test_oss_405_not_live_surface():
+    """qwencloud /try-ai/chat regression: Aliyun OSS 405 must not confirm AI."""
+    from multiagent.agents.ai_agents.ai_fingerprint import (
+        _looks_api_method_rejection,
+        _looks_static_storage_error,
+    )
+
+    oss_body = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Error>\n"
+        "  <Code>MethodNotAllowed</Code>\n"
+        "  <Message>The specified method is not allowed against this resource.</Message>\n"
+        "  <HostId>www-qwencloud-com.oss-accelerate.aliyuncs.com</HostId>\n"
+        "  <Method>POST</Method>\n"
+        "</Error>"
+    )
+    assert _looks_static_storage_error("application/xml", oss_body) is True
+    assert _looks_api_method_rejection("application/xml", oss_body, {}) is False
+
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    r = agent._evaluate_probe_response(
+        "https://www.qwencloud.com/try-ai/chat",
+        "/try-ai/chat",
+        "chat",
+        405,
+        {"Content-Type": "application/xml"},
+        oss_body,
+        [],
+        spa_catch_all=False,
+    )
+    assert r.get("endpoints", []) == []
+    assert not any(e.key == "ml_endpoint_405" for e in r.get("evidence", []))
+
+
+def test_json_api_405_still_counts():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    r = agent._evaluate_probe_response(
+        "http://x/api/chat",
+        "/api/chat",
+        "chat",
+        405,
+        {"Content-Type": "application/json", "Allow": "GET, POST"},
+        '{"detail":"Method Not Allowed"}',
+        [],
+        spa_catch_all=False,
+    )
+    assert "http://x/api/chat" in (r.get("endpoints") or [])
+    assert any(e.key == "ml_endpoint_405" for e in r.get("evidence", []))
+
+
 def test_guess_probe_category_fallthrough_is_schema():
     assert AIFingerprintAgent._guess_probe_category("/features/") == "schema"
     assert AIFingerprintAgent._guess_probe_category("/create/") == "schema"

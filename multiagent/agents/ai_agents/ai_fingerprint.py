@@ -204,6 +204,60 @@ def _looks_html_body(ct: str, body: str) -> bool:
     return "html" in (ct or "").lower() or b.startswith(("<!doctype", "<html"))
 
 
+def _looks_static_storage_error(ct: str, body: str) -> bool:
+    """True for CDN/object-store errors (Aliyun OSS, S3, etc.) — not app APIs."""
+    b = (body or "").strip()
+    if not b:
+        return False
+    bl = b.lower()
+    ct_l = (ct or "").lower()
+    xmlish = (
+        "xml" in ct_l
+        or bl.startswith("<?xml")
+        or bl.startswith("<error")
+        or "<error>" in bl[:200]
+    )
+    if xmlish and any(x in bl for x in (
+        "methodnotallowed", "accessdenied", "nosuchkey", "invalidaccesskey",
+        "nosuchbucket", "allaccessdisabled", "<code>",
+    )):
+        return True
+    if any(x in bl for x in (
+        "oss-accelerate", "aliyuncs.com", "s3.amazonaws.com",
+        "s3-website", "blob.core.windows.net",
+    )):
+        return True
+    return False
+
+
+def _looks_api_method_rejection(
+    ct: str, body: str, headers: Optional[Dict] = None,
+) -> bool:
+    """True when HTTP 405 still looks like an application API handler.
+
+    Rejects static OSS/S3 XML and HTML shells. Accepts JSON APIs and
+    responses that advertise an Allow header.
+    """
+    if _looks_html_body(ct, body):
+        return False
+    if _looks_static_storage_error(ct, body):
+        return False
+    headers = headers or {}
+    headers_low = {str(k).lower(): v for k, v in headers.items()}
+    allow = str(headers_low.get("allow") or "")
+    if allow and re.search(r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b", allow, re.I):
+        return True
+    ct_l = (ct or "").lower()
+    b = (body or "").strip()
+    if "json" in ct_l or (b[:1] in "{["):
+        return True
+    if ct_l.startswith("application/") and "xml" not in ct_l:
+        return True
+    if headers_low.get("www-authenticate"):
+        return True
+    return False
+
+
 def _is_meaningful_ai_meta_content(content: str) -> bool:
     """True when meta content is real AI product copy, not a URL/domain hit.
 
@@ -2189,6 +2243,13 @@ class AIFingerprintAgent:
                     frameworks.append("OpenAI-compatible")
 
         if status in (401, 403):
+            # Object-store / CDN denials are not application auth gates.
+            if _looks_static_storage_error(ct, body):
+                return {
+                    "evidence": evidence,
+                    "endpoints": endpoints,
+                    "frameworks": frameworks,
+                }
             auth_type = self._detect_auth_type(headers_low, body_l)
             auth_signals.append(AuthSignal(
                 endpoint=url, auth_type=auth_type,
@@ -2202,8 +2263,14 @@ class AIFingerprintAgent:
                     "probe", endpoint=url))
                 endpoints.append(url)
 
-        # 405 is noise on SPA catch-alls and on non-inference paths.
-        if (status == 405 and not spa_catch_all and _is_inference_path(path)):
+        # 405 is noise on SPA catch-alls, non-inference paths, and static
+        # storage/CDN errors (e.g. Aliyun OSS MethodNotAllowed XML).
+        if (
+            status == 405
+            and not spa_catch_all
+            and _is_inference_path(path)
+            and _looks_api_method_rejection(ct, body, headers_low)
+        ):
             evidence.append(EvidenceItem.make(
                 "ml_endpoint_405",
                 f"Endpoint exists {path} (HTTP 405)",
