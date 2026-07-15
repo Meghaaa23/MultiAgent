@@ -740,6 +740,11 @@ class AIFingerprintAgent:
         candidates = self._normalize_candidate_paths(candidates)
         if verbose:
             print(f"    [discover] {len(candidates)} candidate path(s) from app surface")
+            if not candidates and self.auth_cookie:
+                print(
+                    "    [discover] auth credentials present but no inference-shaped "
+                    "paths found in HTML/JS/robots — nothing to probe yet"
+                )
 
         # Phase 2 — probe only what this application exposed.
         if candidates:
@@ -1084,20 +1089,28 @@ class AIFingerprintAgent:
                     "js_bundle", endpoint=url))
 
             for m in re.finditer(
-                r'new\s+EventSource\s*\(\s*["\`]([^"\'`]+)["\`]', js, re.I):
-                path = m.group(1).split("${")[0]
-                if self._looks_api_candidate(path):
-                    evidence.append(EvidenceItem.make(
-                        "sse_in_js", f"EventSource({path[:50]})",
-                        "js_bundle", endpoint=url))
-                    api_paths.append(self._to_path(path))
+                r'new\s+EventSource\s*\(\s*(?:`([^`]+)`|["\']([^"\']+)["\'])',
+                js, re.I,
+            ):
+                raw_es = m.group(1) if m.group(1) is not None else m.group(2)
+                for path in self._paths_from_template_expression(raw_es):
+                    if self._looks_api_candidate(path):
+                        norm = self._to_path(path)
+                        evidence.append(EvidenceItem.make(
+                            "sse_in_js", f"EventSource({norm[:50]})",
+                            "js_bundle", endpoint=url))
+                        api_paths.append(norm)
 
             for m in re.finditer(
-                r'new\s+WebSocket\s*\(\s*["\`]([^"\'`]+)["\`]', js, re.I):
-                path = m.group(1)
-                if any(x in path for x in ["/chat", "/ws", "/stream", "/agent"]):
+                r'new\s+WebSocket\s*\(\s*(?:`([^`]+)`|["\']([^"\']+)["\'])',
+                js, re.I,
+            ):
+                raw_ws = m.group(1) if m.group(1) is not None else m.group(2)
+                if any(x in (raw_ws or "") for x in (
+                    "/chat", "/ws", "/stream", "/agent",
+                )):
                     evidence.append(EvidenceItem.make(
-                        "websocket_ai_path", f"WebSocket({path[:50]})",
+                        "websocket_ai_path", f"WebSocket({(raw_ws or '')[:50]})",
                         "js_bundle", endpoint=url))
 
         return {
@@ -1108,32 +1121,92 @@ class AIFingerprintAgent:
         }
 
     def _extract_api_paths_from_js(self, js: str) -> List[str]:
+        """Discover app API routes from JS without a hardcoded endpoint catalog.
+
+        Handles literal calls plus common SPA base-URL patterns, e.g.:
+          fetch("/api/chat")
+          `${BASE_URL}/api/messages`
+          BASE_URL + "/api/ask"
+          request.get(`${baseUrl}/v1/chat/completions`)
+        """
         found: Set[str] = set()
-        # Explicit HTTP client calls.
+
+        def _add(raw: str) -> None:
+            if not raw:
+                return
+            path = self._to_path(raw.split("?")[0].split("#")[0])
+            if path and self._looks_api_candidate(path):
+                found.add(path.rstrip("/") or path)
+
+        # Explicit HTTP client calls with quoted URL.
         for m in re.finditer(
             r'(?:fetch|axios(?:\.get|\.post|\.put|\.delete|\.patch)?|'
+            r'request(?:\.get|\.post|\.put|\.delete|\.patch)?|'
             r'\$\.ajax|\$\.get|\$\.post)\s*\(\s*["\']([^"\']+)["\']',
             js, re.I,
         ):
-            path = m.group(1)
-            if self._looks_api_candidate(path):
-                found.add(self._to_path(path))
+            _add(m.group(1))
+
+        # HTTP client calls with template literals (incl. ${BASE_URL}/api/...).
         for m in re.finditer(
-            r'(?:fetch|axios)\s*\(\s*`([^`]+)`', js):
-            path = m.group(1).split("${")[0].rstrip("/")
-            if self._looks_api_candidate(path):
-                found.add(self._to_path(path))
+            r'(?:fetch|axios(?:\.get|\.post|\.put|\.delete|\.patch)?|'
+            r'request(?:\.get|\.post|\.put|\.delete|\.patch)?|'
+            r'\.\s*(?:get|post|put|delete|patch))\s*\(\s*`([^`]+)`',
+            js, re.I,
+        ):
+            for path in self._paths_from_template_expression(m.group(1)):
+                _add(path)
+
         for m in re.finditer(
             r'\.open\s*\(\s*["\'][A-Z]+["\'],\s*["\']([^"\']+)["\']', js, re.I):
-            path = m.group(1)
-            if self._looks_api_candidate(path):
-                found.add(self._to_path(path))
-        # Quoted absolute paths that look like API routes (app-specific).
+            _add(m.group(1))
+
+        # Quoted absolute paths (covers BASE_URL + "/api/messages").
         for m in re.finditer(r'["\'](/[a-zA-Z0-9_\-./]{2,120})["\']', js):
-            path = m.group(1).split("?")[0]
-            if self._looks_api_candidate(path):
-                found.add(self._to_path(path))
+            _add(m.group(1))
+
+        # Template / concat fragments: `${BASE_URL}/api/messages` or
+        # `${base}/api/chat/${id}` anywhere in the bundle (not only fetch()).
+        for m in re.finditer(r'\$\{[^}]+\}(/[a-zA-Z0-9_\-./]{2,120})', js):
+            frag = m.group(1)
+            # Stop before a trailing incomplete segment left by the next ${...}.
+            if frag.endswith("/"):
+                frag = frag.rstrip("/")
+            _add(frag)
+
+        # Full template bodies that start with a path or URL after stripping
+        # interpolations: `/api/chat/${id}` → `/api/chat`.
+        for m in re.finditer(r'`([^`]{2,180})`', js):
+            for path in self._paths_from_template_expression(m.group(1)):
+                _add(path)
+
         return list(found)
+
+    @staticmethod
+    def _paths_from_template_expression(raw: str) -> List[str]:
+        """Pull routable path(s) out of a JS template-literal body."""
+        if not raw:
+            return []
+        out: List[str] = []
+        # `${BASE_URL}/api/messages/${id}` → keep "/api/messages" segments.
+        for m in re.finditer(r'\$\{[^}]+\}(/[a-zA-Z0-9_\-./]+)', raw):
+            frag = m.group(1).rstrip("/")
+            if frag:
+                out.append(frag)
+        # `/api/chat/${id}` or plain `/api/models` before any interpolation.
+        head = raw.split("${", 1)[0].rstrip("/")
+        if head.startswith("http://") or head.startswith("https://"):
+            head = urllib.parse.urlparse(head).path.rstrip("/")
+        if head.startswith("/") and len(head) >= 2:
+            out.append(head)
+        # After removing all ${...}, a leftover absolute path/URL.
+        stripped = re.sub(r"\$\{[^}]*\}", "", raw).split("?")[0].strip()
+        if stripped.startswith("http://") or stripped.startswith("https://"):
+            stripped = urllib.parse.urlparse(stripped).path
+        stripped = stripped.rstrip("/")
+        if stripped.startswith("/") and len(stripped) >= 2:
+            out.append(stripped)
+        return out
 
     @staticmethod
     def _to_path(path: str) -> str:

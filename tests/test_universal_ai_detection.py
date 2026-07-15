@@ -302,6 +302,41 @@ def test_discovery_extracts_js_routes_without_catalog():
     assert "/api/models" in paths
 
 
+def test_discovery_extracts_base_url_template_and_concat_paths():
+    """SPA bundles often build URLs as `${BASE_URL}/api/...` (LibreChat-style)."""
+    from multiagent.agents.ai_agents.ai_fingerprint import _is_inference_path
+
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    js = r"""
+        const BASE_URL = "";
+        request.get(`${BASE_URL}/api/messages/${conversationId}`);
+        request.post(`${BASE_URL}/api/ask/${endpoint}`, body);
+        fetch(`${baseUrl}/v1/chat/completions`);
+        const url = BASE_URL + "/api/agents";
+        axios.post(API_URL + "/api/chat", payload);
+        new EventSource(`${BASE_URL}/api/stream`);
+    """
+    paths = agent._extract_api_paths_from_js(js)
+    assert "/api/messages" in paths
+    assert "/api/ask" in paths
+    assert "/v1/chat/completions" in paths
+    assert "/api/agents" in paths  # discovered; probe gate is separate
+    assert "/api/chat" in paths
+    assert "/api/stream" in paths
+    assert all(
+        _is_inference_path(p)
+        for p in (
+            "/api/messages",
+            "/api/ask",
+            "/v1/chat/completions",
+            "/api/chat",
+        )
+    )
+    # Must not invent catalog endpoints that were never in the bundle.
+    assert "/api/tags" not in paths
+    assert "/ollama/api/generate" not in paths
+
+
 # ---------------------------------------------------------------------------
 # Unit: infra classify / k8s
 # ---------------------------------------------------------------------------

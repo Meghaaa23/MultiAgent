@@ -42,6 +42,16 @@ def test_js_path_extraction_finds_app_routes():
     assert "/assets/app.js" not in paths
 
 
+def test_js_path_extraction_template_literal_base_url():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    paths = agent._extract_api_paths_from_js(
+        'export const getMessages = (id) => '
+        'request.get(`${BASE_URL}/api/messages/${id}`);'
+    )
+    assert "/api/messages" in paths
+    assert "/assets/app.js" not in paths
+
+
 def test_openapi_derived_probe_body():
     schema = {
         "paths": {
