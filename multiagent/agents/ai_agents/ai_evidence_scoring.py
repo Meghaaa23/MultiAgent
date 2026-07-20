@@ -48,7 +48,7 @@ _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
     (re.compile(r"^framework_header$"), EvidenceClass.BRAND),
     (re.compile(r"^framework_cookie$"), EvidenceClass.PASSIVE_HINT),
     (re.compile(r"^(?:openapi|graphql)_schema$"), EvidenceClass.PASSIVE_STRUCTURAL),
-    (re.compile(r"^(?:js_|sse_in_js|websocket_|robots_|sitemap_|csp_)"),
+    (re.compile(r"^(?:js_|sse_in_js|websocket_|robots_|sitemap_|csp_|chatbot_ui_)"),
      EvidenceClass.PASSIVE_HINT),
 ]
 

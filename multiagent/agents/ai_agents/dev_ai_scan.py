@@ -10,6 +10,10 @@ from ai_fingerprint import AIFingerprintAgent
 from Ai_Infra_agent       import AIInfraAgent
 from ai_vulnerability_test       import AIVulnerabilityTester
 from avid_lookup_agent    import AVIDLookupAgent
+from chatbot_ui_probe     import (
+    ChatbotUIProbe,
+    widgets_to_chat_components,
+)
 from openai import AzureOpenAI
 
 def get_openai_client():
@@ -18,6 +22,40 @@ def get_openai_client():
         api_version    = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT"),
     )
+
+
+async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
+                             auth_cookie: str, verbose: bool) -> dict:
+    """Detect on-page chatbot widgets (Playwright) and merge into fingerprint."""
+    probe = ChatbotUIProbe()
+    result = await probe.detect(
+        target_url,
+        html="",
+        auth_cookie=auth_cookie,
+        verbose=verbose,
+    )
+    if not result.widgets:
+        return ai_fingerprint
+
+    components = widgets_to_chat_components(result.widgets)
+    existing = list(ai_fingerprint.get("chat_components") or [])
+    # Prefer Playwright selectors; keep unique provider hints.
+    merged = components + [
+        c for c in existing
+        if c.get("source") == "static_html"
+        and c.get("provider")
+        and not any(x.get("provider") == c.get("provider") for x in components)
+    ]
+    ai_fingerprint["chat_components"] = merged
+    print(f"\n  Chatbot UI widgets: {len(merged)}")
+    for w in merged[:5]:
+        print(
+            f"    - provider={w.get('provider') or '?'} "
+            f"input={w.get('input_selector') or '-'} "
+            f"conf={w.get('confidence', 0):.2f} via={w.get('source')}"
+        )
+    return ai_fingerprint
+
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -28,6 +66,11 @@ async def main():
         "--cookie",
         default="",
         help="Session cookie (session=...) or Bearer token (Bearer ...) supplied up front",
+    )
+    parser.add_argument(
+        "--skip-chatbot-ui",
+        action="store_true",
+        help="Skip browser chatbot UI detection/injection",
     )
     args = parser.parse_args()
 
@@ -43,6 +86,12 @@ async def main():
         verbose              = True,
         auth_cookie          = auth_cookie,
     )
+
+    if not args.skip_chatbot_ui:
+        ai_fingerprint = await _enrich_chatbot_ui(
+            ai_fingerprint, target_url, auth_cookie, verbose=True,
+        )
+
     print("\n========== RAW FINGERPRINT ==========")
 
     for k, v in ai_fingerprint.items():
@@ -57,6 +106,7 @@ async def main():
     print(f"  Live surface: {ai_fingerprint.get('has_live_surface')}")
     print(f"  Brand only  : {ai_fingerprint.get('ai_brand_only')}")
     print(f"  Auth cookie : {'yes' if auth_cookie else 'no'}")
+    print(f"  Chat UI     : {len(ai_fingerprint.get('chat_components') or [])} widget(s)")
     print(f"  Allowed hosts: {ai_fingerprint.get('allowed_api_hosts') or []}")
     print(f"  ML endpoints: {ai_fingerprint['ml_endpoints']}")
     print("\nEvidence:")
@@ -72,41 +122,52 @@ async def main():
         return
 
     has_live = bool(ai_fingerprint.get("has_live_surface"))
-    if not has_live and args.agent in ("infra", "vuln", "all"):
+    has_ui = bool(ai_fingerprint.get("chat_components"))
+    if not has_live and not has_ui and args.agent in ("infra", "vuln", "all"):
         print(
-            "\n  No live AI surface — skipping infra / vuln escalation "
+            "\n  No live AI surface / chatbot UI — skipping infra / vuln escalation "
             "(use --agent avid if you still want AVID on brand-only)."
         )
         if args.agent != "avid":
             return
 
     if args.agent in ("infra", "all"):
-        infra_agent = AIInfraAgent(openai_client=get_openai_client(), timeout=15)
-        infra_agent.auth_cookie = auth_cookie
-        infra_result = await infra_agent.scan(
-            target_url = target_url,
-            ai_stack   = ai_fingerprint,
-        )
-        print(f"\n  Infra threats: {len(infra_result.threats)}")
-        for t in infra_result.threats:
-            print(f"  [{t.severity}] {t.attack_name} — {t.stride_category}")
-        print(f"\n  Summary: {infra_result.summary}")
-        if infra_result.exposed_endpoints:
-            ai_fingerprint = AIVulnerabilityTester.merge_exposed_endpoints(
-                ai_fingerprint, infra_result.exposed_endpoints)
-            print(f"  Merged exposed endpoints: {infra_result.exposed_endpoints}")
+        if not has_live:
+            print("\n  No API live surface — skipping infra (chatbot UI alone does not imply exposed infra).")
+        else:
+            infra_agent = AIInfraAgent(openai_client=get_openai_client(), timeout=15)
+            infra_agent.auth_cookie = auth_cookie
+            infra_result = await infra_agent.scan(
+                target_url = target_url,
+                ai_stack   = ai_fingerprint,
+            )
+            print(f"\n  Infra threats: {len(infra_result.threats)}")
+            for t in infra_result.threats:
+                print(f"  [{t.severity}] {t.attack_name} — {t.stride_category}")
+            print(f"\n  Summary: {infra_result.summary}")
+            if infra_result.exposed_endpoints:
+                ai_fingerprint = AIVulnerabilityTester.merge_exposed_endpoints(
+                    ai_fingerprint, infra_result.exposed_endpoints)
+                print(f"  Merged exposed endpoints: {infra_result.exposed_endpoints}")
 
     if args.agent in ("vuln", "all"):
-        vuln_agent = AIVulnerabilityTester(timeout=10)
-        vuln_result = await vuln_agent.test_all(
-            ai_fingerprint = ai_fingerprint,
-            target_url     = target_url,
-            verbose        = args.verbose,
-            auth_cookie    = auth_cookie,
-        )
-        print(f"\n  Confirmed: {len(vuln_result['confirmed_ai_vulns'])}")
-        print(f"  Potential: {len(vuln_result['potential_ai_vulns'])}")
-        print(f"  Authenticated requests: {vuln_result.get('authenticated')}")
+        if not has_live and not has_ui:
+            print("\n  Skipping vuln — nothing to inject against.")
+        else:
+            vuln_agent = AIVulnerabilityTester(timeout=10)
+            vuln_result = await vuln_agent.test_all(
+                ai_fingerprint=ai_fingerprint,
+                target_url=target_url,
+                verbose=args.verbose,
+                auth_cookie=auth_cookie,
+            )
+            print(f"\n  Confirmed: {len(vuln_result.get('confirmed_ai_vulns') or [])}")
+            print(f"  Potential: {len(vuln_result.get('potential_ai_vulns') or [])}")
+            print(f"  Authenticated requests: {vuln_result.get('authenticated')}")
+            for finding in (vuln_result.get("confirmed_ai_vulns") or [])[:5]:
+                print(f"  [CONFIRMED] {finding.get('type')} @ {finding.get('location')}")
+            for finding in (vuln_result.get("potential_ai_vulns") or [])[:5]:
+                print(f"  [POTENTIAL] {finding.get('type')} @ {finding.get('location')}")
 
     if args.agent in ("avid", "all"):
         ml_stack = ai_fingerprint.get("ml_libraries", [])
@@ -117,6 +178,7 @@ async def main():
             verbose        = args.verbose,
         )
         print(f"\n  AVID findings: {avid_result['total_found']}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

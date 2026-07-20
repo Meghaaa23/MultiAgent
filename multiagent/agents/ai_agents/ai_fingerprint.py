@@ -606,6 +606,7 @@ class FingerprintReport:
     ai_brand_only:    bool = False
     detection:        str  = "not_detected"
     evidence_classes: Dict = field(default_factory=dict)
+    chat_components:  List[Dict] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         return {
@@ -648,7 +649,7 @@ class FingerprintReport:
             "api_schema":          {"tools": [], "openapi": self.openapi_schema},
             "app_description":     self.app_description,
             "response_headers":    {},
-            "chat_components":     [],
+            "chat_components":     self.chat_components,
             "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
@@ -1101,6 +1102,36 @@ class AIFingerprintAgent:
             auth_signals=auth_signals,
         )
 
+        # Static HTML chatbot widget hints (Playwright enrich happens in scan harness).
+        chat_components: List[Dict] = []
+        try:
+            from .chatbot_ui_probe import (
+                detect_chatbot_from_html,
+                widgets_to_chat_components,
+            )
+        except ImportError:
+            try:
+                from multiagent.agents.ai_agents.chatbot_ui_probe import (
+                    detect_chatbot_from_html,
+                    widgets_to_chat_components,
+                )
+            except ImportError:
+                from chatbot_ui_probe import (  # type: ignore
+                    detect_chatbot_from_html,
+                    widgets_to_chat_components,
+                )
+        try:
+            widgets = detect_chatbot_from_html(page_html or "", base)
+            chat_components = widgets_to_chat_components(widgets)
+            if chat_components:
+                all_evidence.append(EvidenceItem.make(
+                    "chatbot_ui_detected",
+                    f"Chatbot UI hint(s) in HTML ({len(chat_components)})",
+                    "passive",
+                ))
+        except Exception:
+            chat_components = []
+
         return FingerprintReport(
             is_ai_powered         = is_ai,
             confidence            = confidence,
@@ -1132,6 +1163,7 @@ class AIFingerprintAgent:
             ai_brand_only         = ai_brand_only,
             detection             = detection.detection.value,
             evidence_classes      = detection.classes,
+            chat_components       = chat_components,
         )
 
     def _analyse_html(
