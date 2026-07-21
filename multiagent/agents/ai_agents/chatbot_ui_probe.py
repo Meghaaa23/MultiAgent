@@ -54,20 +54,28 @@ except ImportError:
 # Drift, Zendesk, …). They may be reported as third_party passive hints only.
 
 _WIDGET_PROVIDER_MARKERS: Tuple[Tuple[str, str], ...] = (
-    ("intercom", "Intercom"),
-    ("drift", "Drift"),
-    ("zendesk", "Zendesk"),
-    ("zopim", "Zendesk"),
+    ("intercom.io", "Intercom"),
+    ("widget.intercom", "Intercom"),
+    ("js.driftt.com", "Drift"),
+    ("drift.com", "Drift"),
+    ("zendesk.com", "Zendesk"),
+    ("zopim.com", "Zendesk"),
+    ("static.zdassets.com", "Zendesk"),
     ("crisp.chat", "Crisp"),
     ("tawk.to", "Tawk"),
-    ("tidio", "Tidio"),
-    ("hubspot", "HubSpot"),
-    ("livechat", "LiveChat"),
-    ("olark", "Olark"),
-    ("freshchat", "Freshchat"),
-    ("botpress", "Botpress"),
-    ("voiceflow", "Voiceflow"),
-    ("landbot", "Landbot"),
+    ("tidio.co", "Tidio"),
+    ("js.hs-scripts.com", "HubSpot"),
+    ("js.usemessages.com", "HubSpot"),
+    ("conversations-visitor", "HubSpot"),
+    ("app.hubspot.com/conversations", "HubSpot"),
+    ("app.hubspot.com/feedback-web", "HubSpot"),
+    ("cdn.livechatinc.com", "LiveChat"),
+    ("static.olark.com", "Olark"),
+    ("wchat.freshchat.com", "Freshchat"),
+    ("botpress.cloud", "Botpress"),
+    ("cdn.botpress.cloud", "Botpress"),
+    ("cdn.voiceflow.com", "Voiceflow"),
+    ("landbot.io", "Landbot"),
 )
 
 _CHAT_PATH_RE = re.compile(
@@ -296,6 +304,41 @@ def evidence_key_for_tier(tier: str, scope: str = "") -> str:
     if tier == EvidenceClass.PASSIVE_STRUCTURAL.value:
         return "chatbot_ui_structural"
     return "chatbot_ui_hint"
+
+
+_INJECTABLE_TIERS = frozenset({
+    EvidenceClass.BEHAVIORAL.value,
+    EvidenceClass.LIVE_SURFACE.value,
+})
+
+
+def component_is_injectable(c: Dict) -> bool:
+    """True only for app-owned surfaces worth running UI injection against.
+
+    Third-party widgets and weak passive hints never escalate the vuln stage.
+    Passive-structural requires an explicit side-effect gate pass.
+    """
+    if not isinstance(c, dict):
+        return False
+    if c.get("type") and c.get("type") != "chatbot_ui":
+        return False
+    if c.get("scope") == SurfaceScope.THIRD_PARTY.value:
+        return False
+    tier = str(c.get("tier") or "")
+    if tier in _INJECTABLE_TIERS:
+        return True
+    if tier == EvidenceClass.PASSIVE_STRUCTURAL.value and c.get("submit_allowed"):
+        return True
+    return False
+
+
+def widget_is_injectable(w: ChatWidget) -> bool:
+    return component_is_injectable(w.to_dict())
+
+
+def ui_warrants_vuln(components: List[Dict]) -> bool:
+    """Whether chat_components alone should open the vulnerability stage."""
+    return any(component_is_injectable(c) for c in (components or []))
 
 
 def _same_origin(page_url: str, other_url: str) -> bool:
@@ -688,6 +731,8 @@ class ChatbotUIProbe:
             gated: List[Dict[str, Any]] = []
             for cand in candidates:
                 structural = self._structural_tier(cand)
+                if not structural:
+                    continue  # search/newsletter/login fields, etc.
                 observe_ok, submit_ok, gate_reason = self._side_effect_gate(
                     {**cand, "structural": structural},
                 )
@@ -902,9 +947,13 @@ class ChatbotUIProbe:
     def _structural_tier(cand: Dict[str, Any]) -> str:
         if cand.get("has_control") and cand.get("has_message_list"):
             return EvidenceClass.PASSIVE_STRUCTURAL.value
-        if cand.get("has_hint") or cand.get("has_control"):
+        # Weak priors require an explicit chat-ish attribute — a random
+        # editable+button (search, newsletter) must not become a chat surface.
+        if cand.get("has_hint") and (
+            cand.get("has_control") or cand.get("has_message_list")
+        ):
             return EvidenceClass.PASSIVE_HINT.value
-        return EvidenceClass.PASSIVE_HINT.value
+        return ""
 
     async def _enumerate_editables(self, page) -> List[Dict[str, Any]]:
         """Enumerate visible editables, piercing open shadow roots."""
@@ -1409,17 +1458,31 @@ def ui_result_to_findings(
     result: ChatbotUIProbeResult,
     target_url: str,
 ) -> Tuple[List[Dict], List[Dict]]:
-    """Map UI probe result into confirmed/potential vuln finding dicts."""
+    """Map UI probe result into confirmed/potential vuln finding dicts.
+
+    Weak passive hints and third-party widgets are informational only —
+    they must not become Medium "Potential Prompt Injection" findings.
+    """
     confirmed: List[Dict] = []
     potential: List[Dict] = []
     if not result.detected and not result.injected:
         return confirmed, potential
 
-    location = target_url
-    if result.widgets:
-        w = result.widgets[0]
-        label = w.provider or w.tier or "widget"
-        location = f"{target_url}#chatbot-ui:{label}"
+    app_widgets = [
+        w for w in result.widgets
+        if w.scope != SurfaceScope.THIRD_PARTY.value
+    ]
+    third_widgets = [
+        w for w in result.widgets
+        if w.scope == SurfaceScope.THIRD_PARTY.value
+    ]
+
+    def _loc(widgets: List[ChatWidget], fallback: str = "widget") -> str:
+        if widgets:
+            w = widgets[0]
+            label = w.provider or w.tier or fallback
+            return f"{target_url}#chatbot-ui:{label}"
+        return target_url
 
     sev_rank = {
         InjectionSeverity.TOOL_EGRESS.value: ("Critical", "High"),
@@ -1435,7 +1498,7 @@ def ui_result_to_findings(
             "type": "Confirmed Prompt Injection (chatbot UI)",
             "severity": finding_sev,
             "status": "Confirmed",
-            "location": location,
+            "location": _loc(app_widgets or result.widgets),
             "details": (
                 f"Differential UI injection confirmed "
                 f"(severity={result.severity}, outcome={result.outcome}). "
@@ -1460,12 +1523,14 @@ def ui_result_to_findings(
                 "atlas_severity_hint": atlas_sev,
             },
         })
-    elif result.injected and result.outcome not in ("", "no_reply", "no_differential"):
+        return confirmed, potential
+
+    if result.injected and result.outcome not in ("", "no_reply", "no_differential"):
         potential.append({
             "type": "Potential Prompt Injection (chatbot UI)",
             "severity": "Medium",
             "status": "Potential",
-            "location": location,
+            "location": _loc(app_widgets or result.widgets),
             "details": (
                 f"Chatbot UI responded but differential confirmation failed "
                 f"(outcome={result.outcome})."
@@ -1483,54 +1548,83 @@ def ui_result_to_findings(
                 "channel": "chatbot_ui",
             },
         })
-    elif result.detected:
-        third_only = result.widgets and all(
-            w.scope == SurfaceScope.THIRD_PARTY.value for w in result.widgets
-        )
-        if third_only:
-            potential.append({
-                "type": "Third-party chatbot widget (out of scope)",
-                "severity": "Info",
-                "status": "Informational",
-                "location": location,
-                "details": (
-                    "Cross-origin / vendor support chatbot detected. "
-                    "Excluded from injection under app-owned LLM threat model."
-                ),
-                "atlas": "AML.T0051 - LLM Prompt Injection",
-                "owasp": "LLM01:2025 - Prompt Injection",
-                "cwe": "CWE-77",
-                "remediation": "Review third-party widget data sharing separately.",
-                "evidence": {
-                    "outcome": "third_party_out_of_scope",
-                    "verified": False,
-                    "widgets": [w.to_dict() for w in result.widgets[:5]],
-                    "channel": "chatbot_ui",
-                },
-            })
-        else:
-            potential.append({
-                "type": "Potential Prompt Injection (chatbot UI surface)",
-                "severity": "Medium",
-                "status": "Potential",
-                "location": location,
-                "details": (
-                    "Chatbot UI surface detected. "
-                    + (
-                        "Injection was not completed"
-                        f"{' (' + result.error + ')' if result.error else ''}."
-                    )
-                ),
-                "atlas": "AML.T0051 - LLM Prompt Injection",
-                "owasp": "LLM01:2025 - Prompt Injection",
-                "cwe": "CWE-77",
-                "remediation": "Ensure the chatbot backend enforces auth and guardrails.",
-                "evidence": {
-                    "outcome": "ui_detected",
-                    "verified": False,
-                    "widgets": [w.to_dict() for w in result.widgets[:5]],
-                    "channel": "chatbot_ui",
-                    "evidence_keys": result.evidence_keys,
-                },
-            })
+        return confirmed, potential
+
+    # Detect-only path: never promote third-party / weak hints to Medium PI.
+    if third_widgets:
+        potential.append({
+            "type": "Third-party chatbot widget (out of scope)",
+            "severity": "Info",
+            "status": "Informational",
+            "location": _loc(third_widgets, "third_party"),
+            "details": (
+                "Cross-origin / vendor support chatbot detected. "
+                "Excluded from injection under app-owned LLM threat model."
+            ),
+            "atlas": "AML.T0051 - LLM Prompt Injection",
+            "owasp": "LLM01:2025 - Prompt Injection",
+            "cwe": "CWE-77",
+            "remediation": "Review third-party widget data sharing separately.",
+            "evidence": {
+                "outcome": "third_party_out_of_scope",
+                "verified": False,
+                "widgets": [w.to_dict() for w in third_widgets[:5]],
+                "channel": "chatbot_ui",
+            },
+        })
+
+    injectable = [w for w in app_widgets if widget_is_injectable(w)]
+    structural = [
+        w for w in app_widgets
+        if w.tier == EvidenceClass.PASSIVE_STRUCTURAL.value
+    ]
+    if injectable or structural:
+        lead = injectable[0] if injectable else structural[0]
+        potential.append({
+            "type": "Potential Prompt Injection (chatbot UI surface)",
+            "severity": "Medium",
+            "status": "Potential",
+            "location": _loc([lead]),
+            "details": (
+                "App-owned chatbot UI surface detected. "
+                + (
+                    "Injection was not completed"
+                    f"{' (' + result.error + ')' if result.error else ''}."
+                )
+            ),
+            "atlas": "AML.T0051 - LLM Prompt Injection",
+            "owasp": "LLM01:2025 - Prompt Injection",
+            "cwe": "CWE-77",
+            "remediation": "Ensure the chatbot backend enforces auth and guardrails.",
+            "evidence": {
+                "outcome": "ui_detected",
+                "verified": False,
+                "widgets": [w.to_dict() for w in (injectable or structural)[:5]],
+                "channel": "chatbot_ui",
+                "evidence_keys": result.evidence_keys,
+            },
+        })
+    elif app_widgets and not third_widgets:
+        # Weak app-owned hints alone — informational, not a PI finding.
+        potential.append({
+            "type": "Weak chatbot UI prior (not confirmed)",
+            "severity": "Info",
+            "status": "Informational",
+            "location": _loc(app_widgets, "hint"),
+            "details": (
+                "Passive chat-like DOM priors only; no live-surface or gated "
+                "structural evidence. Not treated as an injection target."
+            ),
+            "atlas": "AML.T0051 - LLM Prompt Injection",
+            "owasp": "LLM01:2025 - Prompt Injection",
+            "cwe": "CWE-77",
+            "remediation": "No action unless a live chat surface is confirmed.",
+            "evidence": {
+                "outcome": "ui_hint_only",
+                "verified": False,
+                "widgets": [w.to_dict() for w in app_widgets[:5]],
+                "channel": "chatbot_ui",
+            },
+        })
+
     return confirmed, potential

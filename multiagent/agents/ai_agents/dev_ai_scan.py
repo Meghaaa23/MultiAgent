@@ -151,11 +151,16 @@ async def main():
         return
 
     has_live = bool(ai_fingerprint.get("has_live_surface"))
-    has_ui = bool(ai_fingerprint.get("chat_components"))
+    try:
+        from chatbot_ui_probe import ui_warrants_vuln
+    except ImportError:
+        from multiagent.agents.ai_agents.chatbot_ui_probe import ui_warrants_vuln
+    has_ui = ui_warrants_vuln(ai_fingerprint.get("chat_components") or [])
     if not has_live and not has_ui and args.agent in ("infra", "vuln", "all"):
         print(
-            "\n  No live AI surface / chatbot UI — skipping infra / vuln escalation "
-            "(use --agent avid if you still want AVID on brand-only)."
+            "\n  No live AI surface / injectable chatbot UI — skipping infra / vuln "
+            "escalation (third-party widgets and weak DOM hints do not escalate; "
+            "use --agent avid if you still want AVID on brand-only)."
         )
         if args.agent != "avid":
             return

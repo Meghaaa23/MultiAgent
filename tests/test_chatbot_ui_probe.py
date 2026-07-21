@@ -8,6 +8,7 @@ from multiagent.agents.ai_agents.chatbot_ui_probe import (
     detect_chatbot_from_html,
     evidence_key_for_tier,
     ui_result_to_findings,
+    ui_warrants_vuln,
     widgets_to_chat_components,
 )
 from multiagent.agents.ai_agents.ai_evidence_scoring import (
@@ -24,6 +25,18 @@ def test_detect_intercom_is_third_party_out_of_scope():
     assert w.scope == "third_party"
     assert w.submit_allowed is False
     assert w.tier == EvidenceClass.PASSIVE_HINT.value
+
+
+def test_bare_hubspot_brand_is_not_a_widget_marker():
+    """www.hubspot.com HTML contains 'hubspot' everywhere — must not FP."""
+    html = "<html><title>HubSpot | Software & Tools</title><p>HubSpot CRM</p></html>"
+    assert detect_chatbot_from_html(html, "https://www.hubspot.com/") == []
+
+
+def test_hubspot_conversations_script_is_third_party():
+    html = '<script src="https://js.hs-scripts.com/123.js"></script>'
+    widgets = detect_chatbot_from_html(html, "https://example.com")
+    assert any(w.provider == "HubSpot" and w.scope == "third_party" for w in widgets)
 
 
 def test_detect_structural_chat_surface():
@@ -175,24 +188,35 @@ def test_ui_result_confirmed_requires_differential():
     assert potential == []
 
 
-def test_third_party_detected_is_informational():
+def test_third_party_plus_weak_hint_is_not_medium_pi():
+    """HubSpot-style: vendor iframes + random editable must not be Medium PI."""
     result = ChatbotUIProbeResult(
         detected=True,
         injected=False,
-        widgets=[ChatWidget(
-            provider="Intercom",
-            tier="passive_hint",
-            scope="third_party",
-            submit_allowed=False,
-            source="iframe",
-        )],
-        error="third_party_out_of_scope",
+        widgets=[
+            ChatWidget(
+                provider="HubSpot",
+                tier="passive_hint",
+                scope="third_party",
+                submit_allowed=False,
+                source="iframe",
+            ),
+            ChatWidget(
+                tier="passive_hint",
+                scope="app_owned",
+                submit_allowed=False,
+                source="dom",
+                detail="Passive-hint: editable field with weak chat priors",
+            ),
+        ],
     )
-    confirmed, potential = ui_result_to_findings(result, "https://example.com")
+    confirmed, potential = ui_result_to_findings(result, "https://www.hubspot.com")
     assert confirmed == []
-    assert len(potential) == 1
-    assert potential[0]["evidence"]["outcome"] == "third_party_out_of_scope"
-    assert potential[0]["severity"] == "Info"
+    assert all(p["severity"] == "Info" for p in potential)
+    assert any(p["evidence"]["outcome"] == "third_party_out_of_scope" for p in potential)
+    assert not any("Potential Prompt Injection" in p["type"] for p in potential)
+    comps = [w.to_dict() for w in result.widgets]
+    assert ui_warrants_vuln(comps) is False
 
 
 def test_ui_result_detected_only_is_potential():
@@ -211,3 +235,4 @@ def test_ui_result_detected_only_is_potential():
     assert confirmed == []
     assert len(potential) == 1
     assert potential[0]["evidence"]["outcome"] == "ui_detected"
+    assert potential[0]["severity"] == "Medium"
