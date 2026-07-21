@@ -42,6 +42,11 @@ def test_passive_structural_vs_hint_and_brand():
     assert classify_evidence("robots_ai_path") == EvidenceClass.PASSIVE_HINT
     assert classify_evidence("sitemap_ai_path") == EvidenceClass.PASSIVE_HINT
     assert classify_evidence("framework_cookie") == EvidenceClass.PASSIVE_HINT
+    # Chatbot UI channel shares the same ordinal taxonomy.
+    assert classify_evidence("chatbot_ui_live_surface") == EvidenceClass.LIVE_SURFACE
+    assert classify_evidence("chatbot_ui_structural") == EvidenceClass.PASSIVE_STRUCTURAL
+    assert classify_evidence("chatbot_ui_hint") == EvidenceClass.PASSIVE_HINT
+    assert classify_evidence("behavior_chatbot_ui_confirmed") == EvidenceClass.BEHAVIORAL
     # Alias maps to the same enum member as PASSIVE_HINT.
     assert EvidenceClass.PASSIVE is EvidenceClass.PASSIVE_HINT
     assert classify_evidence("framework_header") == EvidenceClass.BRAND

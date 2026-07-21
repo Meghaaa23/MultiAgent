@@ -50,10 +50,39 @@ async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
     print(f"\n  Chatbot UI widgets: {len(merged)}")
     for w in merged[:5]:
         print(
-            f"    - provider={w.get('provider') or '?'} "
-            f"input={w.get('input_selector') or '-'} "
-            f"conf={w.get('confidence', 0):.2f} via={w.get('source')}"
+            f"    - tier={w.get('tier') or '?'} scope={w.get('scope') or '?'} "
+            f"submit={w.get('submit_allowed')} provider={w.get('provider') or '-'} "
+            f"via={w.get('source')}"
         )
+    # Merge UI taxonomy evidence into fingerprint evidence list when present.
+    evidence = list(ai_fingerprint.get("evidence_items") or [])
+    existing_keys = {e.get("key") for e in evidence if isinstance(e, dict)}
+    for w in merged:
+        key = {
+            "behavioral": "behavior_chatbot_ui_confirmed",
+            "live_surface": "chatbot_ui_live_surface",
+            "passive_structural": "chatbot_ui_structural",
+            "passive_hint": "chatbot_ui_hint",
+        }.get(w.get("tier") or "", "chatbot_ui_hint")
+        if w.get("scope") == "third_party":
+            key = "chatbot_ui_third_party"
+        if key in existing_keys:
+            continue
+        evidence.append({
+            "key": key,
+            "detail": w.get("detail") or key,
+            "source": "chatbot_ui",
+            "weight": {"behavior_chatbot_ui_confirmed": 5,
+                       "chatbot_ui_live_surface": 4,
+                       "chatbot_ui_structural": 3}.get(key, 2),
+            "evidence_class": {
+                "behavior_chatbot_ui_confirmed": "behavioral",
+                "chatbot_ui_live_surface": "live_surface",
+                "chatbot_ui_structural": "passive_structural",
+            }.get(key, "passive_hint"),
+        })
+        existing_keys.add(key)
+    ai_fingerprint["evidence_items"] = evidence
     return ai_fingerprint
 
 

@@ -48,6 +48,11 @@ _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
     (re.compile(r"^framework_header$"), EvidenceClass.BRAND),
     (re.compile(r"^framework_cookie$"), EvidenceClass.PASSIVE_HINT),
     (re.compile(r"^(?:openapi|graphql)_schema$"), EvidenceClass.PASSIVE_STRUCTURAL),
+    # Chatbot UI channel — same ordinal taxonomy as API evidence.
+    # More specific chatbot_ui_* rules must precede the generic hint prefix.
+    (re.compile(r"^behavior_chatbot_ui_"), EvidenceClass.BEHAVIORAL),
+    (re.compile(r"^chatbot_ui_live_surface$"), EvidenceClass.LIVE_SURFACE),
+    (re.compile(r"^chatbot_ui_structural$"), EvidenceClass.PASSIVE_STRUCTURAL),
     (re.compile(r"^(?:js_|sse_in_js|websocket_|robots_|sitemap_|csp_|chatbot_ui_)"),
      EvidenceClass.PASSIVE_HINT),
 ]

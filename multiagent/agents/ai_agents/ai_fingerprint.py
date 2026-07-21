@@ -1107,26 +1107,34 @@ class AIFingerprintAgent:
         try:
             from .chatbot_ui_probe import (
                 detect_chatbot_from_html,
+                evidence_key_for_tier,
                 widgets_to_chat_components,
             )
         except ImportError:
             try:
                 from multiagent.agents.ai_agents.chatbot_ui_probe import (
                     detect_chatbot_from_html,
+                    evidence_key_for_tier,
                     widgets_to_chat_components,
                 )
             except ImportError:
                 from chatbot_ui_probe import (  # type: ignore
                     detect_chatbot_from_html,
+                    evidence_key_for_tier,
                     widgets_to_chat_components,
                 )
         try:
             widgets = detect_chatbot_from_html(page_html or "", base)
             chat_components = widgets_to_chat_components(widgets)
-            if chat_components:
+            for w in widgets:
+                key = evidence_key_for_tier(
+                    getattr(w, "tier", "") or "passive_hint",
+                    getattr(w, "scope", "") or "",
+                )
                 all_evidence.append(EvidenceItem.make(
-                    "chatbot_ui_detected",
-                    f"Chatbot UI hint(s) in HTML ({len(chat_components)})",
+                    key,
+                    getattr(w, "detail", None)
+                    or f"Chatbot UI surface ({key})",
                     "passive",
                 ))
         except Exception:
