@@ -250,25 +250,47 @@ def test_non_inference_401_is_auth_only():
     assert len(auth) == 1
 
 
-def test_related_host_api_401_json_confirms_live():
-    """Grammarly-style: product API on related host, JSON 401 → live surface."""
+def test_related_host_sso_logout_400_is_not_live_surface():
+    """Booking.com FP: account.booking.com/sso/logout/v3 JSON 400 ≠ AI."""
+    from multiagent.agents.ai_agents.ai_fingerprint import AIFingerprintAgent
+
     agent = AIFingerprintAgent(run_behavioral_probes=False)
+    assert agent._looks_absolute_api_url(
+        "https://account.booking.com/sso/logout/v3",
+    ) is False
+    assert agent._looks_auth_account_path("/sso/logout/v3") is True
+
     auth = []
-    url = "https://capi.example.com/api/configuration/product/v1/settings"
+    url = "https://account.booking.com/sso/logout/v3"
+    body = (
+        '{"detail":[{"type":"missing","loc":["body"],'
+        '"msg":"Field required","input":null}]}'
+    )
     r = agent._evaluate_probe_response(
         url,
-        "/api/configuration/product/v1/settings",
+        "/sso/logout/v3",
         "schema",
-        401,
+        400,
         {"Content-Type": "application/json"},
-        '{"detail":"Unauthorized"}',
+        body,
         auth,
-        related_api_hosts={"capi.example.com"},
-        page_host="www.example.com",
+        related_api_hosts={"account.booking.com"},
+        page_host="www.booking.com",
     )
-    assert url in (r.get("endpoints") or [])
-    assert any(e.key == "ml_endpoint_401_403" for e in r.get("evidence", []))
-    assert len(auth) == 1
+    assert r.get("endpoints", []) == []
+    assert not any(e.key == "error_generic_validation" for e in r.get("evidence", []))
+
+
+def test_related_host_api_v1_still_looks_like_api():
+    from multiagent.agents.ai_agents.ai_fingerprint import AIFingerprintAgent
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    assert agent._looks_absolute_api_url(
+        "https://capi.example.com/api/configuration/product/v1/settings",
+    ) is True
+    # Bare /v3 alone must not qualify.
+    assert agent._looks_absolute_api_url(
+        "https://account.example.com/sso/logout/v3",
+    ) is False
 
 
 def test_related_host_api_401_html_does_not_confirm():

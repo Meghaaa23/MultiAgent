@@ -1913,6 +1913,19 @@ class AIFingerprintAgent:
         return p.split("?")[0].split("#")[0] or "/"
 
     @classmethod
+    def _looks_auth_account_path(cls, path: str) -> bool:
+        """Auth/session/account routes are not AI live surfaces."""
+        p = (path or "").lower()
+        segments = [s for s in p.strip("/").split("/") if s]
+        auth_segs = {
+            "sso", "logout", "login", "logon", "signin", "signout", "signup",
+            "oauth", "oauth2", "authorize", "token", "session", "sessions",
+            "passwd", "password", "reset-password", "forgot-password",
+            "csrf", "saml", "oidc", "accounts", "account",
+        }
+        return any(s in auth_segs for s in segments)
+
+    @classmethod
     def _looks_absolute_api_url(cls, url: str) -> bool:
         """True for absolute URLs that look like API endpoints (not docs/SVG/CDN)."""
         try:
@@ -1937,11 +1950,18 @@ class AIFingerprintAgent:
             ".tgz", ".dtd", ".woff", ".woff2",
         )):
             return False
-        return bool(re.search(
-            r"/(?:api|v1|v2|v3|ollama|graphql|openai|chat|completions?|"
+        # Booking.com FP: /sso/logout/v3 matched solely on trailing /v3.
+        if cls._looks_auth_account_path(path):
+            return False
+        # Version segments alone are not enough — require an API/AI token, or
+        # /api/.../vN/... style product API paths.
+        if re.search(
+            r"/(?:api|ollama|graphql|openai|chat|completions?|"
             r"generate|messages?|embeddings?|inference|ask)(?:/|$)",
             path,
-        ))
+        ):
+            return True
+        return bool(re.search(r"/api/.*/v\d+(?:/|$)", path))
 
     @classmethod
     def _looks_api_candidate(cls, path: str) -> bool:
@@ -2467,22 +2487,44 @@ class AIFingerprintAgent:
             endpoints.append(url)
 
         if status in (400, 422) and body:
+            # AI-shaped error fingerprints (missing messages/model, OpenAI error
+            # envelope) can confirm. Generic FastAPI-style validation on a
+            # related-host non-inference path must not (Booking /sso/logout FP).
             fw = self._fingerprint_error_body(body, url, evidence)
-            if fw:
+            ai_error_keys = {
+                "error_openai_format",
+                "error_missing_messages",
+                "error_missing_model",
+            }
+            emitted_ai_error = any(
+                ev.key in ai_error_keys and ev.endpoint == url for ev in evidence
+            )
+            if fw and (inference or emitted_ai_error or category in ("chat", "embedding", "ml")):
                 frameworks.append(fw)
                 if url not in endpoints:
                     endpoints.append(url)
             elif (
-                category in ("chat", "embedding", "ml") or related_api
-            ) and (
-                "json" in ct or body.strip()[:1] in "{["
+                (inference or category in ("chat", "embedding", "ml"))
+                and ("json" in ct or body.strip()[:1] in "{[")
+                and not self._looks_auth_account_path(path)
             ):
-                # Handler reached with validation error => real API surface.
+                # Handler reached with validation error on an inference-shaped path.
                 evidence.append(EvidenceItem.make(
                     "error_generic_validation",
                     f"API validation response at {path} (HTTP {status})",
                     "probe", endpoint=url))
                 endpoints.append(url)
+            elif fw:
+                # Matched a generic validation fingerprint on a non-inference
+                # related-host URL — do not promote to live surface / ml_endpoints.
+                # Drop the evidence item we just appended via _fingerprint_error_body.
+                evidence[:] = [
+                    ev for ev in evidence
+                    if not (
+                        ev.key == "error_generic_validation"
+                        and ev.endpoint == url
+                    )
+                ]
 
         for h in AI_RESPONSE_HEADERS:
             if h in headers_low:
