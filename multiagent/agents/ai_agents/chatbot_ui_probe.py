@@ -29,9 +29,12 @@ try:
         Reachability,
         ScopeDecision,
         ScopePolicy,
+        SurfaceKind,
         classify_injection_scope,
+        classify_surface_kind,
         match_vendor_marker,
         registrable_domain,
+        side_effect_blocks_inject,
         same_origin as _same_origin_url,
     )
 except ImportError:
@@ -42,9 +45,12 @@ except ImportError:
             Reachability,
             ScopeDecision,
             ScopePolicy,
+            SurfaceKind,
             classify_injection_scope,
+            classify_surface_kind,
             match_vendor_marker,
             registrable_domain,
+            side_effect_blocks_inject,
             same_origin as _same_origin_url,
         )
     except ImportError:
@@ -54,9 +60,12 @@ except ImportError:
             Reachability,
             ScopeDecision,
             ScopePolicy,
+            SurfaceKind,
             classify_injection_scope,
+            classify_surface_kind,
             match_vendor_marker,
             registrable_domain,
+            side_effect_blocks_inject,
             same_origin as _same_origin_url,
         )
 
@@ -110,7 +119,6 @@ _WIDGET_PROVIDER_MARKERS: Tuple[Tuple[str, str], ...] = (
     ("js.usemessages.com", "HubSpot"),
     ("conversations-visitor", "HubSpot"),
     ("app.hubspot.com/conversations", "HubSpot"),
-    ("app.hubspot.com/feedback-web", "HubSpot"),
     ("cdn.livechatinc.com", "LiveChat"),
     ("static.olark.com", "Olark"),
     ("wchat.freshchat.com", "Freshchat"),
@@ -261,7 +269,10 @@ class ChatWidget:
     reachability: str = ""
     injection_policy: str = InjectionPolicy.INJECT.value
     scope_reason: str = ""
-    frame_url: str = ""  # set for iframe surfaces (CDP-reachable even if cross-origin)
+    frame_url: str = ""  # discovery hint only — re-discover at inject after launcher open
+    surface_kind: str = ""  # chat | support_queue | feedback | unknown
+    side_effect_blocked: bool = False
+    side_effect_reason: str = ""
     submit_allowed: bool = False
     gate_reason: str = ""
     locator: Dict = field(default_factory=dict)
@@ -283,6 +294,9 @@ class ChatWidget:
             "injection_policy": self.injection_policy,
             "scope_reason": self.scope_reason,
             "frame_url": self.frame_url,
+            "surface_kind": self.surface_kind,
+            "side_effect_blocked": self.side_effect_blocked,
+            "side_effect_reason": self.side_effect_reason,
             "submit_allowed": self.submit_allowed,
             "gate_reason": self.gate_reason,
             "locator": dict(self.locator or {}),
@@ -319,6 +333,9 @@ class ChatWidget:
             ),
             scope_reason=str(c.get("scope_reason") or ""),
             frame_url=str(c.get("frame_url") or ""),
+            surface_kind=str(c.get("surface_kind") or ""),
+            side_effect_blocked=bool(c.get("side_effect_blocked")),
+            side_effect_reason=str(c.get("side_effect_reason") or ""),
             submit_allowed=bool(c.get("submit_allowed")),
             gate_reason=str(c.get("gate_reason") or ""),
             locator=dict(c.get("locator") or {}),
@@ -410,14 +427,18 @@ def _policy_allows_inject(c: Dict) -> bool:
 
 
 def component_is_injectable(c: Dict) -> bool:
-    """True when policy authorizes inject AND evidence warrants an attempt.
+    """True when ownership policy, side-effect gate, AND evidence all pass.
 
-    Vendor skip is a default policy (overridable), not "Playwright cannot
-    reach cross-origin iframes." Evidence tier stays separate from policy.
+    Provider/iframe URL match alone is never enough — that stays passive_hint.
+    Support-queue widgets need authorize_support_queue even when ownership=inject.
     """
     if not isinstance(c, dict):
         return False
     if c.get("type") and c.get("type") != "chatbot_ui":
+        return False
+    if c.get("surface_kind") == SurfaceKind.FEEDBACK.value:
+        return False
+    if c.get("side_effect_blocked"):
         return False
     if not _policy_allows_inject(c):
         return False
@@ -425,9 +446,6 @@ def component_is_injectable(c: Dict) -> bool:
     if tier in _INJECTABLE_TIERS:
         return True
     if tier == EvidenceClass.PASSIVE_STRUCTURAL.value and c.get("submit_allowed"):
-        return True
-    # Same-site / explicitly authorized chat iframe: try inject even at hint tier.
-    if c.get("source") == "iframe" and c.get("frame_url"):
         return True
     return False
 
@@ -720,8 +738,10 @@ class ChatbotUIProbe:
         if target.injection_policy != InjectionPolicy.INJECT.value:
             result.error = f"policy_{target.injection_policy or 'blocked'}"
             return result
-        # DOM surfaces still need the side-effect gate; authorized iframes use frame_url.
-        if not target.frame_url and not target.submit_allowed:
+        if target.side_effect_blocked:
+            result.error = target.side_effect_reason or "side_effect_gate_blocked"
+            return result
+        if not target.submit_allowed and target.tier not in _INJECTABLE_TIERS:
             result.error = "side_effect_gate_blocked"
             return result
 
@@ -809,8 +829,9 @@ class ChatbotUIProbe:
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
             await page.wait_for_timeout(1200)
 
-            # Iframe chat surfaces: classify by ownership/policy, not "can't reach".
-            # Playwright/CDP can interact with cross-origin frames; skip is policy.
+            # Iframe hints: provider/URL match is passive_hint only — never
+            # promote to injectable chat without an editable + response loop.
+            # Surface kind separates feedback/survey from support-queue/chat.
             for frame in page.frames:
                 src = frame.url or ""
                 if not src or src in ("about:blank", url):
@@ -821,9 +842,17 @@ class ChatbotUIProbe:
                     if m in low:
                         marker, name = m, n
                         break
-                # Only record cross-origin OR vendor-marked frames as iframe surfaces.
-                if _same_origin(url, src) and not name:
+                kind = classify_surface_kind(src, marker)
+                # Also catch feedback even without vendor marker list entry.
+                if kind == SurfaceKind.UNKNOWN.value and "feedback" in low:
+                    kind = SurfaceKind.FEEDBACK.value
+                    name = name or "HubSpot"
+
+                if _same_origin(url, src) and not name and kind == SurfaceKind.UNKNOWN.value:
                     continue
+                if not name and kind == SurfaceKind.UNKNOWN.value and not _CHAT_PATH_RE.search(src):
+                    continue
+
                 decision = classify_injection_scope(
                     url,
                     src,
@@ -831,33 +860,50 @@ class ChatbotUIProbe:
                     is_vendor_marker=bool(name),
                     policy=self.scope_policy,
                 )
-                # Ignore boring cross-origin ads/analytics frames with no chat marker
-                # and no same-site product chat path.
-                if not name and decision.ownership != OwnershipClass.SAME_SITE.value:
-                    continue
-                if not name and not _CHAT_PATH_RE.search(src):
-                    continue
-                policy = decision.injection_policy
-                detail = (
-                    f"Chat iframe {src[:80]} "
-                    f"(ownership={decision.ownership}, reachability={decision.reachability}, "
-                    f"policy={policy}, {decision.reason})"
-                )
+                blocked, se_reason = side_effect_blocks_inject(kind, self.scope_policy)
+
+                if kind == SurfaceKind.FEEDBACK.value:
+                    detail = (
+                        f"Feedback/survey iframe {src[:80]} — not a conversational "
+                        f"chat surface (passive hint only)"
+                    )
+                elif kind == SurfaceKind.SUPPORT_QUEUE.value:
+                    detail = (
+                        f"Support-queue iframe {src[:80]} "
+                        f"(ownership={decision.ownership}, policy={decision.injection_policy}, "
+                        f"side_effect={'blocked:' + se_reason if blocked else 'authorized'})"
+                    )
+                else:
+                    detail = (
+                        f"Vendor/product iframe {src[:80]} "
+                        f"(kind={kind}, ownership={decision.ownership}, "
+                        f"reachability={decision.reachability}, policy={decision.injection_policy})"
+                    )
+
                 w = ChatWidget(
                     provider=name,
                     tier=EvidenceClass.PASSIVE_HINT.value,
-                    submit_allowed=(policy == InjectionPolicy.INJECT.value),
-                    gate_reason=decision.reason,
+                    # Provider match must not unlock submit — need behavioral confirm.
+                    submit_allowed=False,
+                    gate_reason=se_reason or "iframe_hint_awaiting_behavior",
                     confidence=_TIER_CONFIDENCE[EvidenceClass.PASSIVE_HINT.value],
                     source="iframe",
-                    frame_url=src,
+                    frame_url=src,  # discovery hint only
+                    surface_kind=kind,
+                    side_effect_blocked=blocked,
+                    side_effect_reason=se_reason,
                     detail=detail,
                     url=url,
                 )
                 w.apply_scope(decision)
                 widgets.append(w)
 
+            # Open launcher so conversation panel / editable frame can mount.
             await self._maybe_open_launcher(page)
+            await page.wait_for_timeout(1500)
+            # After open: look for editables in newly mounted frames (behavioral).
+            opened = await self._discover_editables_across_frames(page, url)
+            widgets.extend(opened)
 
             candidates = await self._enumerate_editables(page)
             # Structural classification + side-effect gate (no submit yet).
@@ -1223,65 +1269,246 @@ class ChatbotUIProbe:
             }"""
         )
 
-    async def _maybe_open_launcher(self, page) -> None:
+    async def _maybe_open_launcher(self, page) -> bool:
+        """Click chat launcher bubble so the conversation panel can mount.
+
+        HubSpot/Intercom/etc. only create the message textarea after the
+        launcher is opened — often in a freshly mounted frame.
+        """
         for launcher in (
             'button[aria-label*="chat" i]',
             'button[aria-label*="message" i]',
+            'button[aria-label*="open" i]',
             '[data-testid*="chat" i]',
+            '[data-test-id*="chat" i]',
+            '#hubspot-messages-iframe-container',
+            'iframe[data-test-id="chat-widget"]',
+            'div[role="button"][aria-label*="chat" i]',
         ):
             try:
                 loc = page.locator(launcher).first
-                if await loc.count() and await loc.is_visible():
-                    await loc.click(timeout=2000)
-                    await page.wait_for_timeout(800)
-                    return
+                if await loc.count() == 0:
+                    continue
+                if await loc.is_visible():
+                    await loc.click(timeout=2500)
+                    await page.wait_for_timeout(1200)
+                    return True
             except Exception:
                 continue
+        # Shadow-ish fallback: click elements whose accessible name looks like chat.
+        try:
+            clicked = await page.evaluate(
+                """() => {
+                const nodes = Array.from(document.querySelectorAll(
+                  'button, [role="button"], a, div'
+                ));
+                for (const el of nodes) {
+                  const t = (
+                    (el.getAttribute('aria-label') || '') + ' ' +
+                    (el.innerText || '') + ' ' +
+                    (el.id || '')
+                  ).toLowerCase();
+                  if (!/(chat|message|help|support|ask)/.test(t)) continue;
+                  const r = el.getBoundingClientRect();
+                  if (r.width < 8 || r.height < 8) continue;
+                  el.click();
+                  return true;
+                }
+                return false;
+                }"""
+            )
+            if clicked:
+                await page.wait_for_timeout(1200)
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _discover_editables_across_frames(
+        self, page, page_url: str,
+    ) -> List[ChatWidget]:
+        """After launcher open, find editables in page + frames (behavioral).
+
+        Does not trust discovery-time frame URLs — the conversation panel may
+        mount in a different frame than the loader/transport iframe.
+        """
+        found: List[ChatWidget] = []
+        roots = [("page", page, "")]
+        for frame in page.frames:
+            src = frame.url or ""
+            if not src or src in ("about:blank",):
+                continue
+            roots.append(("frame", frame, src))
+
+        for kind, root, frame_url in roots:
+            try:
+                # Enumerate inside this root via evaluate when same-ish; for
+                # cross-origin frames use locator probes.
+                has_input = False
+                input_sel = ""
+                for sel in (
+                    "textarea",
+                    '[contenteditable="true"]',
+                    'input:not([type="password"]):not([type="email"]):not([type="hidden"])',
+                    '[role="textbox"]',
+                ):
+                    try:
+                        loc = root.locator(sel).first
+                        if await loc.count() and await loc.is_visible():
+                            has_input = True
+                            input_sel = sel
+                            break
+                    except Exception:
+                        continue
+                if not has_input:
+                    continue
+
+                # Page-level editables need chat priors — avoid search/newsletter FPs
+                # after clicking a random "chat" marketing CTA.
+                if kind == "page":
+                    try:
+                        hintish = await root.evaluate(
+                            """(sel) => {
+                            const el = document.querySelector(sel);
+                            if (!el) return false;
+                            const blob = [
+                              el.getAttribute('placeholder') || '',
+                              el.getAttribute('aria-label') || '',
+                              el.id || '',
+                              el.getAttribute('data-testid') || '',
+                            ].join(' ').toLowerCase();
+                            return /(message|chat|ask|prompt|question|assistant)/.test(blob);
+                            }""",
+                            input_sel,
+                        )
+                    except Exception:
+                        hintish = False
+                    if not hintish:
+                        continue
+
+                surface_kind = classify_surface_kind(frame_url or page_url)
+                if surface_kind == SurfaceKind.FEEDBACK.value:
+                    continue
+                blocked, se_reason = side_effect_blocks_inject(
+                    surface_kind if surface_kind != SurfaceKind.UNKNOWN.value
+                    else SurfaceKind.CHAT.value,
+                    self.scope_policy,
+                )
+                # Open panel with a visible editable → structural chat evidence.
+                # Still blocked from submit if support-queue side-effect applies.
+                decision = classify_injection_scope(
+                    page_url,
+                    frame_url or page_url,
+                    provider="",
+                    is_vendor_marker=False,
+                    policy=self.scope_policy,
+                )
+                # If frame URL looks like support queue, keep that kind.
+                if frame_url and classify_surface_kind(frame_url) == SurfaceKind.SUPPORT_QUEUE.value:
+                    surface_kind = SurfaceKind.SUPPORT_QUEUE.value
+                    blocked, se_reason = side_effect_blocks_inject(
+                        surface_kind, self.scope_policy,
+                    )
+                elif surface_kind == SurfaceKind.UNKNOWN.value:
+                    surface_kind = SurfaceKind.CHAT.value
+                    blocked, se_reason = side_effect_blocks_inject(
+                        surface_kind, self.scope_policy,
+                    )
+
+                tier = EvidenceClass.PASSIVE_STRUCTURAL.value
+                submit_ok = (not blocked) and (
+                    decision.injection_policy == InjectionPolicy.INJECT.value
+                )
+                w = ChatWidget(
+                    input_selector=input_sel,
+                    locator={"tag": "textarea" if input_sel == "textarea" else "input"},
+                    tier=tier,
+                    submit_allowed=submit_ok,
+                    gate_reason=se_reason or ("opened_panel_editable" if submit_ok else "gated"),
+                    confidence=_TIER_CONFIDENCE[tier],
+                    source="dom" if kind == "page" else "iframe",
+                    frame_url=frame_url,
+                    surface_kind=surface_kind,
+                    side_effect_blocked=blocked,
+                    side_effect_reason=se_reason,
+                    detail=(
+                        "Passive-structural: editable found after opening chat launcher"
+                        + (f" (side_effect={se_reason})" if blocked else "")
+                    ),
+                    url=page_url,
+                )
+                w.apply_scope(decision)
+                if blocked:
+                    w.submit_allowed = False
+                found.append(w)
+            except Exception:
+                continue
+        return found
+
+    async def _prepare_open_chat(self, page, widget: ChatWidget) -> ChatWidget:
+        """Launcher → wait for panel → re-locate editable (do not trust frame_url)."""
+        await self._maybe_open_launcher(page)
+        await page.wait_for_timeout(1500)
+        rediscovered = await self._discover_editables_across_frames(page, widget.url or page.url)
+        # Prefer non-blocked structural/live candidates with a visible input.
+        usable = [
+            w for w in rediscovered
+            if w.input_selector and not w.side_effect_blocked
+            and (
+                w.submit_allowed
+                or w.tier in _INJECTABLE_TIERS
+                or w.tier == EvidenceClass.PASSIVE_STRUCTURAL.value
+            )
+        ]
+        if usable:
+            best = max(usable, key=lambda w: _TIER_CONFIDENCE.get(w.tier, 0.0))
+            # Carry authorization from original widget if rediscovery lost provider.
+            if widget.injection_policy == InjectionPolicy.INJECT.value:
+                best.injection_policy = widget.injection_policy
+                best.ownership = widget.ownership or best.ownership
+                best.scope = widget.scope or best.scope
+            return best
+        # Fall back to original only if it already has a working selector path.
+        return widget
 
     async def _resolve_input(self, page, widget: ChatWidget):
-        root = page
-        if widget.frame_url:
-            frame = None
-            for f in page.frames:
-                if (f.url or "") == widget.frame_url or (
-                    widget.frame_url and widget.frame_url in (f.url or "")
-                ):
-                    frame = f
-                    break
-            if frame is None:
-                # Playwright can target cross-origin frames; try URL prefix match.
-                for f in page.frames:
-                    fu = f.url or ""
-                    if fu and (
-                        fu.startswith(widget.frame_url[:60])
-                        or widget.frame_url.startswith(fu[:60])
-                    ):
-                        frame = f
-                        break
-            if frame is None:
-                return None, ""
-            root = frame
-
-        loc = StableLocator.from_dict(widget.locator)
-        candidates = loc.playwright_candidates() or [
+        """Locate a visible editable — search page then all frames (re-discover)."""
+        selectors = StableLocator.from_dict(widget.locator).playwright_candidates()
+        if widget.input_selector:
+            selectors = [widget.input_selector] + selectors
+        selectors = list(dict.fromkeys(selectors + [
             "textarea",
             '[contenteditable="true"]',
-            'input:not([type="password"]):not([type="email"])',
-        ]
-        for sel in candidates:
-            try:
-                handle = root.locator(sel).first
-                if await handle.count() and await handle.is_visible():
-                    return handle, sel
-            except Exception:
-                continue
-        if widget.input_selector:
-            try:
-                handle = root.locator(widget.input_selector).first
-                if await handle.count() and await handle.is_visible():
-                    return handle, widget.input_selector
-            except Exception:
-                pass
+            '[role="textbox"]',
+            'input:not([type="password"]):not([type="email"]):not([type="hidden"])',
+        ]))
+
+        roots = [page] + list(page.frames)
+
+        # Prefer a previously hinted frame first, then fall back to any frame.
+        if widget.frame_url:
+            preferred = []
+            rest = []
+            for r in roots:
+                fu = getattr(r, "url", None) or ""
+                if fu and (
+                    fu == widget.frame_url
+                    or widget.frame_url in fu
+                    or fu in widget.frame_url
+                ):
+                    preferred.append(r)
+                else:
+                    rest.append(r)
+            roots = preferred + rest
+
+        for root in roots:
+            for sel in selectors:
+                try:
+                    handle = root.locator(sel).first
+                    if await handle.count() and await handle.is_visible():
+                        return handle, sel
+                except Exception:
+                    continue
         return None, ""
 
     async def _type_only(self, page, cand: Dict[str, Any], text: str) -> bool:
@@ -1394,7 +1621,14 @@ class ChatbotUIProbe:
             page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
             await page.wait_for_timeout(1000)
-            await self._maybe_open_launcher(page)
+
+            # Open launcher + re-discover editable in the mounted conversation
+            # frame — do not trust discovery-time loader frame URLs.
+            widget = await self._prepare_open_chat(page, widget)
+            handle, _ = await self._resolve_input(page, widget)
+            if not handle:
+                await browser.close()
+                raise RuntimeError("input_not_rediscovered")
 
             control = await self._turn(page, widget, control_prompt)
             treatment = await self._turn(page, widget, treatment_prompt)
@@ -1751,7 +1985,62 @@ def ui_result_to_findings(
         })
         return confirmed, potential
 
-    # Detect-only path: policy-skipped vendors / weak hints are Info, not Medium PI.
+    # Detect-only path: policy-skipped vendors / support queues / weak hints → Info.
+    feedback_widgets = [
+        w for w in result.widgets
+        if w.surface_kind == SurfaceKind.FEEDBACK.value
+    ]
+    support_blocked = [
+        w for w in result.widgets
+        if w.side_effect_blocked
+        and w.surface_kind == SurfaceKind.SUPPORT_QUEUE.value
+    ]
+
+    if feedback_widgets:
+        potential.append({
+            "type": "Feedback/survey iframe (not a chat surface)",
+            "severity": "Info",
+            "status": "Informational",
+            "location": _loc(feedback_widgets, "feedback"),
+            "details": (
+                "Vendor feedback/survey iframe enumerated. Not a conversational "
+                "chat surface — provider match alone does not classify chat."
+            ),
+            "atlas": "AML.T0051 - LLM Prompt Injection",
+            "owasp": "LLM01:2025 - Prompt Injection",
+            "cwe": "CWE-77",
+            "remediation": "No chat-injection action; review feedback widgets separately if needed.",
+            "evidence": {
+                "outcome": "feedback_not_chat",
+                "verified": False,
+                "widgets": [w.to_dict() for w in feedback_widgets[:5]],
+                "channel": "chatbot_ui",
+            },
+        })
+
+    if support_blocked:
+        potential.append({
+            "type": "Support-queue chat widget (side-effect gate)",
+            "severity": "Info",
+            "status": "Informational",
+            "location": _loc(support_blocked, "support_queue"),
+            "details": (
+                "Live support/conversations surface passed ownership but is held "
+                "at the side-effect gate — submit delivers to a production queue. "
+                "Override with --authorize-support-queue only for a test inbox you own."
+            ),
+            "atlas": "AML.T0051 - LLM Prompt Injection",
+            "owasp": "LLM01:2025 - Prompt Injection",
+            "cwe": "CWE-77",
+            "remediation": "Authorize a non-production support queue before active injection.",
+            "evidence": {
+                "outcome": "support_queue_side_effect",
+                "verified": False,
+                "widgets": [w.to_dict() for w in support_blocked[:5]],
+                "channel": "chatbot_ui",
+            },
+        })
+
     if skipped_widgets:
         potential.append({
             "type": "Vendor chatbot widget (injection skipped by policy)",
@@ -1805,6 +2094,8 @@ def ui_result_to_findings(
     structural = [
         w for w in app_widgets
         if w.tier == EvidenceClass.PASSIVE_STRUCTURAL.value
+        and not w.side_effect_blocked
+        and w.surface_kind != SurfaceKind.FEEDBACK.value
     ]
     if injectable or structural:
         lead = injectable[0] if injectable else structural[0]

@@ -105,7 +105,8 @@ def test_reachability_is_independent_of_policy():
 
 
 def test_component_injectable_respects_policy_not_origin_alone():
-    same_site_iframe = ChatWidget(
+    # Hint-tier iframe alone is NOT injectable — need behavioral/structural evidence.
+    same_site_iframe_hint = ChatWidget(
         tier="passive_hint",
         scope="app_owned",
         ownership="same_site",
@@ -113,10 +114,25 @@ def test_component_injectable_respects_policy_not_origin_alone():
         injection_policy="inject",
         source="iframe",
         frame_url="https://chat.myapp.com/w",
+        surface_kind="chat",
         url="https://www.myapp.com/",
     ).to_dict()
-    assert component_is_injectable(same_site_iframe) is True
-    assert ui_warrants_vuln([same_site_iframe]) is True
+    assert component_is_injectable(same_site_iframe_hint) is False
+
+    same_site_opened = ChatWidget(
+        tier="passive_structural",
+        scope="app_owned",
+        ownership="same_site",
+        injection_policy="inject",
+        submit_allowed=True,
+        source="iframe",
+        frame_url="https://chat.myapp.com/panel",
+        surface_kind="chat",
+        input_selector="textarea",
+        url="https://www.myapp.com/",
+    ).to_dict()
+    assert component_is_injectable(same_site_opened) is True
+    assert ui_warrants_vuln([same_site_opened]) is True
 
     vendor = ChatWidget(
         tier="passive_hint",
@@ -126,6 +142,8 @@ def test_component_injectable_respects_policy_not_origin_alone():
         injection_policy="skip_inject",
         source="iframe",
         frame_url="https://app.hubspot.com/conversations",
+        surface_kind="support_queue",
+        side_effect_blocked=True,
         provider="HubSpot",
         url="https://www.klarna.com/",
     ).to_dict()
@@ -134,4 +152,60 @@ def test_component_injectable_respects_policy_not_origin_alone():
 
     vendor_auth = dict(vendor)
     vendor_auth["injection_policy"] = "inject"
+    vendor_auth["side_effect_blocked"] = False
+    vendor_auth["tier"] = "passive_structural"
+    vendor_auth["submit_allowed"] = True
     assert component_is_injectable(vendor_auth) is True
+
+
+def test_feedback_iframe_not_chat_and_not_injectable():
+    from multiagent.agents.ai_agents.chatbot_ui_scope import classify_surface_kind
+    assert classify_surface_kind(
+        "https://app.hubspot.com/feedback-web-fetcher/x",
+    ) == "feedback"
+    assert classify_surface_kind(
+        "https://app.hubspot.com/conversations-visitor/53/threads/utk/abc",
+    ) == "support_queue"
+
+    feedback = ChatWidget(
+        tier="passive_hint",
+        scope="app_owned",
+        ownership="same_site",
+        injection_policy="inject",
+        source="iframe",
+        frame_url="https://app.hubspot.com/feedback-web-fetcher",
+        surface_kind="feedback",
+        side_effect_blocked=True,
+        side_effect_reason="feedback_not_chat",
+        url="https://www.hubspot.com/",
+    ).to_dict()
+    assert component_is_injectable(feedback) is False
+
+
+def test_support_queue_blocked_until_authorized():
+    from multiagent.agents.ai_agents.chatbot_ui_scope import (
+        ScopePolicy,
+        side_effect_blocks_inject,
+    )
+    blocked, reason = side_effect_blocks_inject("support_queue", ScopePolicy())
+    assert blocked is True
+    assert reason == "support_queue_side_effect"
+    ok, reason2 = side_effect_blocks_inject(
+        "support_queue", ScopePolicy(authorize_support_queue=True),
+    )
+    assert ok is False
+    assert reason2 == ""
+
+    w = ChatWidget(
+        tier="passive_structural",
+        ownership="same_site",
+        injection_policy="inject",
+        submit_allowed=True,
+        surface_kind="support_queue",
+        side_effect_blocked=True,
+        side_effect_reason="support_queue_side_effect",
+        input_selector="textarea",
+    ).to_dict()
+    assert component_is_injectable(w) is False
+    w["side_effect_blocked"] = False
+    assert component_is_injectable(w) is True

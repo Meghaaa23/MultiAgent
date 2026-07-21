@@ -17,6 +17,7 @@ must not be conflated with scope.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Optional, Tuple
@@ -85,9 +86,67 @@ class ScopePolicy:
     """Runtime authorization overrides (CLI / scanner config)."""
     include_thirdparty: bool = False
     authorize_external: bool = False
+    # Live support / conversations queues message humans or triage bots.
+    # Ownership may authorize the org, but submit is still a real-world side effect.
+    authorize_support_queue: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+class SurfaceKind(str, Enum):
+    """What the iframe/product actually is — independent of vendor brand."""
+    CHAT = "chat"                      # conversational AI / chat UI
+    SUPPORT_QUEUE = "support_queue"    # live chat → human/agent queue
+    FEEDBACK = "feedback"              # survey / NPS / feedback fetcher
+    UNKNOWN = "unknown"
+
+
+# URL shapes that are explicitly NOT conversational chat.
+_FEEDBACK_URL_RE = re.compile(
+    r"feedback-web|feedback[_-]?fetcher|/survey|/nps\b|/csat\b|rating-form",
+    re.I,
+)
+# Live support / conversations products — ownership ≠ side-effect-free submit.
+_SUPPORT_QUEUE_URL_RE = re.compile(
+    r"conversations-visitor|/threads/utk|"
+    r"widget\.intercom|js\.driftt\.com|zendesk\.com|zopim|"
+    r"cdn\.livechatinc|tawk\.to|tidio\.co|static\.olark|"
+    r"wchat\.freshchat|usemessages\.com",
+    re.I,
+)
+
+
+def classify_surface_kind(url: str, marker: str = "") -> str:
+    """Classify iframe/product by URL shape — provider brand alone is not enough."""
+    blob = f"{url or ''} {marker or ''}"
+    if _FEEDBACK_URL_RE.search(blob):
+        return SurfaceKind.FEEDBACK.value
+    if _SUPPORT_QUEUE_URL_RE.search(blob):
+        return SurfaceKind.SUPPORT_QUEUE.value
+    if re.search(r"/chat|/assistant|/copilot|/conversation", blob, re.I):
+        return SurfaceKind.CHAT.value
+    return SurfaceKind.UNKNOWN.value
+
+
+def side_effect_blocks_inject(
+    surface_kind: str,
+    policy: Optional[ScopePolicy] = None,
+) -> Tuple[bool, str]:
+    """Second gate after ownership: does submit fire a real-world action?
+
+    Live support/conversations widgets deliver messages into production queues.
+    Default: block. Override with authorize_support_queue when the instance
+    routes to a test inbox the operator owns.
+    """
+    policy = policy or ScopePolicy()
+    if surface_kind == SurfaceKind.FEEDBACK.value:
+        return True, "feedback_not_chat"
+    if surface_kind == SurfaceKind.SUPPORT_QUEUE.value:
+        if policy.authorize_support_queue:
+            return False, ""
+        return True, "support_queue_side_effect"
+    return False, ""
 
 
 def hostname_of(url_or_host: str) -> str:

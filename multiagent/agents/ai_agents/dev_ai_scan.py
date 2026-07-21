@@ -52,8 +52,10 @@ async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
     print(f"\n  Chatbot UI widgets: {len(merged)}")
     for w in merged[:5]:
         print(
-            f"    - tier={w.get('tier') or '?'} ownership={w.get('ownership') or w.get('scope') or '?'} "
+            f"    - tier={w.get('tier') or '?'} kind={w.get('surface_kind') or '-'} "
+            f"ownership={w.get('ownership') or w.get('scope') or '?'} "
             f"policy={w.get('injection_policy') or '-'} "
+            f"side_effect={'blocked' if w.get('side_effect_blocked') else 'ok'} "
             f"submit={w.get('submit_allowed')} provider={w.get('provider') or '-'} "
             f"via={w.get('source')}"
         )
@@ -120,6 +122,15 @@ async def main():
             "registrable domain than the target (explicit client authorization)."
         ),
     )
+    parser.add_argument(
+        "--authorize-support-queue",
+        action="store_true",
+        help=(
+            "Authorize submit into live support/conversations widgets "
+            "(messages may reach human agents or production triage). "
+            "Use only when the queue routes to a test inbox you own."
+        ),
+    )
     args = parser.parse_args()
 
     target_url = args.target.rstrip("/")
@@ -127,6 +138,7 @@ async def main():
     scope_policy = ScopePolicy(
         include_thirdparty=bool(args.include_thirdparty),
         authorize_external=bool(args.authorize_external),
+        authorize_support_queue=bool(args.authorize_support_queue),
     )
 
     fp_agent = AIFingerprintAgent(timeout=8)
@@ -183,9 +195,8 @@ async def main():
     if not has_live and not has_ui and args.agent in ("infra", "vuln", "all"):
         print(
             "\n  No live AI surface / injectable chatbot UI — skipping infra / vuln "
-            "escalation (vendor widgets default to policy-skip; weak DOM hints do "
-            "not escalate; use --include-thirdparty / --authorize-external when "
-            "explicitly authorized, or --agent avid for brand-only AVID)."
+            "escalation (vendor widgets default to policy-skip; support queues need "
+            "--authorize-support-queue; weak DOM/iframe hints do not escalate)."
         )
         if args.agent != "avid":
             return
