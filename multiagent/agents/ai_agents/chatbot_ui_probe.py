@@ -6,7 +6,9 @@ Design contract (aligned with the API evidence taxonomy):
 2. Side-effect gate before any submit (skip password/email/sensitive forms).
 3. Map surfaces onto ordinal tiers — no hand-weighted selector ranker.
 4. Injection confirmation is differential (control vs treatment).
-5. Third-party cross-origin widgets are labeled, not injected.
+5. Scope policy (ownership + authorization) is separate from reachability:
+   Playwright can reach cross-origin iframes via CDP; skipping vendor
+   widgets is a policy default with overrides, not a capability wall.
 6. Persist behavioral/locator fingerprints, not brittle CSS paths.
 7. Reply capture uses a settle window (streaming-aware), not a single mutation.
 """
@@ -19,6 +21,44 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+
+try:
+    from .chatbot_ui_scope import (
+        InjectionPolicy,
+        OwnershipClass,
+        Reachability,
+        ScopeDecision,
+        ScopePolicy,
+        classify_injection_scope,
+        match_vendor_marker,
+        registrable_domain,
+        same_origin as _same_origin_url,
+    )
+except ImportError:
+    try:
+        from multiagent.agents.ai_agents.chatbot_ui_scope import (
+            InjectionPolicy,
+            OwnershipClass,
+            Reachability,
+            ScopeDecision,
+            ScopePolicy,
+            classify_injection_scope,
+            match_vendor_marker,
+            registrable_domain,
+            same_origin as _same_origin_url,
+        )
+    except ImportError:
+        from chatbot_ui_scope import (  # type: ignore
+            InjectionPolicy,
+            OwnershipClass,
+            Reachability,
+            ScopeDecision,
+            ScopePolicy,
+            classify_injection_scope,
+            match_vendor_marker,
+            registrable_domain,
+            same_origin as _same_origin_url,
+        )
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +87,13 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Threat model
+# Threat model (scope policy — not a Playwright capability claim)
 # ---------------------------------------------------------------------------
-# In scope: same-origin / app-owned LLM surfaces that may reach app data/tools.
-# Out of scope for injection: cross-origin vendor support widgets (Intercom,
-# Drift, Zendesk, …). They may be reported as third_party passive hints only.
+# Default inject: same registrable domain (eTLD+1) as the scan target.
+# Default skip: known vendor widgets on a different eTLD+1 (Intercom, Drift,
+# HubSpot-as-vendor, …) — override with ScopePolicy.include_thirdparty.
+# Default detect-only: other cross-eTLD+1 surfaces — override with
+# ScopePolicy.authorize_external. Evidence tier stays independent of policy.
 
 _WIDGET_PROVIDER_MARKERS: Tuple[Tuple[str, str], ...] = (
     ("intercom.io", "Intercom"),
@@ -200,14 +242,26 @@ class StableLocator:
 
 @dataclass
 class ChatWidget:
-    """Detected on-page chatbot interaction surface."""
+    """Detected on-page chatbot interaction surface.
+
+    Evidence tier (`tier`) and injection authorization (`injection_policy`)
+    are independent axes — a surface can be high-confidence detected and
+    still out of injection scope under the default policy.
+    """
     # In-session ephemeral selectors (not the persistence contract).
     input_selector: str = ""
     send_selector: str = ""
     reply_selector: str = ""
-    # Taxonomy / threat model
+    # Evidence taxonomy (detection confidence — not authorization)
     tier: str = EvidenceClass.PASSIVE_HINT.value
+    # Back-compat ownership label: app_owned | third_party | unknown
     scope: str = SurfaceScope.UNKNOWN.value
+    # Explicit scope-policy axes
+    ownership: str = ""
+    reachability: str = ""
+    injection_policy: str = InjectionPolicy.INJECT.value
+    scope_reason: str = ""
+    frame_url: str = ""  # set for iframe surfaces (CDP-reachable even if cross-origin)
     submit_allowed: bool = False
     gate_reason: str = ""
     locator: Dict = field(default_factory=dict)
@@ -224,6 +278,11 @@ class ChatWidget:
             "type": "chatbot_ui",
             "tier": self.tier,
             "scope": self.scope,
+            "ownership": self.ownership,
+            "reachability": self.reachability,
+            "injection_policy": self.injection_policy,
+            "scope_reason": self.scope_reason,
+            "frame_url": self.frame_url,
             "submit_allowed": self.submit_allowed,
             "gate_reason": self.gate_reason,
             "locator": dict(self.locator or {}),
@@ -248,6 +307,18 @@ class ChatWidget:
             reply_selector=str(c.get("reply_selector") or ""),
             tier=str(c.get("tier") or EvidenceClass.PASSIVE_HINT.value),
             scope=str(c.get("scope") or SurfaceScope.UNKNOWN.value),
+            ownership=str(c.get("ownership") or ""),
+            reachability=str(c.get("reachability") or ""),
+            injection_policy=str(
+                c.get("injection_policy")
+                or (
+                    InjectionPolicy.SKIP_INJECT.value
+                    if c.get("scope") == SurfaceScope.THIRD_PARTY.value
+                    else InjectionPolicy.INJECT.value
+                )
+            ),
+            scope_reason=str(c.get("scope_reason") or ""),
+            frame_url=str(c.get("frame_url") or ""),
             submit_allowed=bool(c.get("submit_allowed")),
             gate_reason=str(c.get("gate_reason") or ""),
             locator=dict(c.get("locator") or {}),
@@ -258,6 +329,16 @@ class ChatWidget:
             detail=str(c.get("detail") or ""),
             url=str(c.get("url") or fallback_url),
         )
+
+    def apply_scope(self, decision: ScopeDecision) -> "ChatWidget":
+        self.ownership = decision.ownership
+        self.reachability = decision.reachability
+        self.injection_policy = decision.injection_policy
+        self.scope_reason = decision.reason
+        self.scope = decision.scope_label
+        if decision.provider and not self.provider:
+            self.provider = decision.provider
+        return self
 
 
 @dataclass
@@ -312,22 +393,41 @@ _INJECTABLE_TIERS = frozenset({
 })
 
 
-def component_is_injectable(c: Dict) -> bool:
-    """True only for app-owned surfaces worth running UI injection against.
+def _policy_allows_inject(c: Dict) -> bool:
+    """Authorization axis — independent of evidence tier and of origin."""
+    policy = str(c.get("injection_policy") or "")
+    if policy == InjectionPolicy.INJECT.value:
+        return True
+    if policy in (
+        InjectionPolicy.SKIP_INJECT.value,
+        InjectionPolicy.DETECT_ONLY.value,
+    ):
+        return False
+    # Legacy rows without injection_policy: third_party → skip, else allow tier gate.
+    if c.get("scope") == SurfaceScope.THIRD_PARTY.value:
+        return False
+    return c.get("scope") == SurfaceScope.APP_OWNED.value
 
-    Third-party widgets and weak passive hints never escalate the vuln stage.
-    Passive-structural requires an explicit side-effect gate pass.
+
+def component_is_injectable(c: Dict) -> bool:
+    """True when policy authorizes inject AND evidence warrants an attempt.
+
+    Vendor skip is a default policy (overridable), not "Playwright cannot
+    reach cross-origin iframes." Evidence tier stays separate from policy.
     """
     if not isinstance(c, dict):
         return False
     if c.get("type") and c.get("type") != "chatbot_ui":
         return False
-    if c.get("scope") == SurfaceScope.THIRD_PARTY.value:
+    if not _policy_allows_inject(c):
         return False
     tier = str(c.get("tier") or "")
     if tier in _INJECTABLE_TIERS:
         return True
     if tier == EvidenceClass.PASSIVE_STRUCTURAL.value and c.get("submit_allowed"):
+        return True
+    # Same-site / explicitly authorized chat iframe: try inject even at hint tier.
+    if c.get("source") == "iframe" and c.get("frame_url"):
         return True
     return False
 
@@ -342,13 +442,7 @@ def ui_warrants_vuln(components: List[Dict]) -> bool:
 
 
 def _same_origin(page_url: str, other_url: str) -> bool:
-    try:
-        a, b = urlparse(page_url), urlparse(other_url)
-        if not b.netloc:
-            return True
-        return (a.scheme, a.hostname) == (b.scheme, b.hostname)
-    except Exception:
-        return False
+    return _same_origin_url(page_url, other_url)
 
 
 def _is_chat_shaped_url(url: str) -> bool:
@@ -364,17 +458,31 @@ def detect_chatbot_from_html(html: str, page_url: str = "") -> List[ChatWidget]:
 
     for marker, name in _WIDGET_PROVIDER_MARKERS:
         if marker in low:
-            widgets.append(ChatWidget(
+            # Prefer a concrete URL from the marker when possible for eTLD+1.
+            surface_guess = marker if "://" in marker or "." in marker else ""
+            if surface_guess and "://" not in surface_guess:
+                surface_guess = "https://" + surface_guess.split("/")[0]
+            decision = classify_injection_scope(
+                page_url or "https://example.invalid",
+                surface_guess,
+                provider=name,
+                is_vendor_marker=True,
+            )
+            w = ChatWidget(
                 provider=name,
                 tier=EvidenceClass.PASSIVE_HINT.value,
-                scope=SurfaceScope.THIRD_PARTY.value,
                 submit_allowed=False,
-                gate_reason="third_party_widget_marker",
+                gate_reason="vendor_marker_static_html",
                 confidence=_TIER_CONFIDENCE[EvidenceClass.PASSIVE_HINT.value],
                 source="static_html",
-                detail=f"Third-party chat marker '{marker}' in page HTML (out of injection scope)",
+                detail=(
+                    f"Vendor chat marker '{marker}' in page HTML "
+                    f"(policy={decision.injection_policy}, {decision.reason})"
+                ),
                 url=page_url,
-            ))
+            )
+            w.apply_scope(decision)
+            widgets.append(w)
             break
 
     has_textarea = bool(re.search(r"<textarea\b", low))
@@ -504,11 +612,13 @@ class ChatbotUIProbe:
         reply_wait_ms: int = 8000,
         settle_ms: int = 1200,
         max_discovery_submits: int = 1,
+        scope_policy: Optional[ScopePolicy] = None,
     ):
         self.timeout_ms = timeout_ms
         self.reply_wait_ms = reply_wait_ms
         self.settle_ms = settle_ms
         self.max_discovery_submits = max(0, max_discovery_submits)
+        self.scope_policy = scope_policy or ScopePolicy()
         self.scorer = SemanticScorer(enable_embeddings=False)
 
     async def detect(
@@ -557,9 +667,10 @@ class ChatbotUIProbe:
         if verbose and result.widgets:
             for w in result.widgets[:5]:
                 print(
-                    f"    [chatbot-ui] tier={w.tier} scope={w.scope} "
+                    f"    [chatbot-ui] tier={w.tier} ownership={w.ownership or w.scope} "
+                    f"policy={w.injection_policy or '-'} reach={w.reachability or '-'} "
                     f"submit={w.submit_allowed} provider={w.provider or '-'} "
-                    f"via={w.source} — {w.detail[:80]}"
+                    f"via={w.source} — {w.detail[:70]}"
                 )
         return result
 
@@ -584,24 +695,18 @@ class ChatbotUIProbe:
         result.detected = det.detected
         result.evidence_keys = list(det.evidence_keys)
 
-        candidates = [
-            w for w in det.widgets
-            if w.scope != SurfaceScope.THIRD_PARTY.value
-            and w.submit_allowed
-            and (
-                w.input_selector
-                or (w.locator and StableLocator.from_dict(w.locator).playwright_candidates())
-            )
-        ]
-        if widget and widget.scope != SurfaceScope.THIRD_PARTY.value:
-            # Prefer freshly discovered match; fall back to hint widget only if gated.
-            if not candidates and widget.submit_allowed:
-                candidates = [widget]
+        candidates = [w for w in det.widgets if widget_is_injectable(w)]
+        if widget and widget_is_injectable(widget) and not candidates:
+            candidates = [widget]
 
         if not candidates:
-            # Third-party only or ungated — do not inject.
-            if any(w.scope == SurfaceScope.THIRD_PARTY.value for w in det.widgets):
-                result.error = "third_party_out_of_scope"
+            policies = {w.injection_policy for w in det.widgets}
+            if InjectionPolicy.SKIP_INJECT.value in policies:
+                result.error = "vendor_widget_policy_skip"
+            elif InjectionPolicy.DETECT_ONLY.value in policies and not any(
+                w.injection_policy == InjectionPolicy.INJECT.value for w in det.widgets
+            ):
+                result.error = "external_detect_only"
             elif det.widgets:
                 result.error = "side_effect_gate_blocked"
             else:
@@ -612,10 +717,11 @@ class ChatbotUIProbe:
             candidates,
             key=lambda w: _TIER_CONFIDENCE.get(w.tier, 0.0),
         )
-        if target.scope == SurfaceScope.THIRD_PARTY.value:
-            result.error = "third_party_out_of_scope"
+        if target.injection_policy != InjectionPolicy.INJECT.value:
+            result.error = f"policy_{target.injection_policy or 'blocked'}"
             return result
-        if not target.submit_allowed:
+        # DOM surfaces still need the side-effect gate; authorized iframes use frame_url.
+        if not target.frame_url and not target.submit_allowed:
             result.error = "side_effect_gate_blocked"
             return result
 
@@ -703,26 +809,53 @@ class ChatbotUIProbe:
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
             await page.wait_for_timeout(1200)
 
-            # Third-party iframes: label only, never inject.
+            # Iframe chat surfaces: classify by ownership/policy, not "can't reach".
+            # Playwright/CDP can interact with cross-origin frames; skip is policy.
             for frame in page.frames:
                 src = frame.url or ""
-                if not src or src in ("about:blank", url) or _same_origin(url, src):
+                if not src or src in ("about:blank", url):
                     continue
                 low = src.lower()
-                for marker, name in _WIDGET_PROVIDER_MARKERS:
-                    if marker in low:
-                        widgets.append(ChatWidget(
-                            provider=name,
-                            tier=EvidenceClass.PASSIVE_HINT.value,
-                            scope=SurfaceScope.THIRD_PARTY.value,
-                            submit_allowed=False,
-                            gate_reason="cross_origin_third_party_iframe",
-                            confidence=_TIER_CONFIDENCE[EvidenceClass.PASSIVE_HINT.value],
-                            source="iframe",
-                            detail=f"Third-party iframe {src[:80]} (out of injection scope)",
-                            url=url,
-                        ))
+                marker, name = "", ""
+                for m, n in _WIDGET_PROVIDER_MARKERS:
+                    if m in low:
+                        marker, name = m, n
                         break
+                # Only record cross-origin OR vendor-marked frames as iframe surfaces.
+                if _same_origin(url, src) and not name:
+                    continue
+                decision = classify_injection_scope(
+                    url,
+                    src,
+                    provider=name,
+                    is_vendor_marker=bool(name),
+                    policy=self.scope_policy,
+                )
+                # Ignore boring cross-origin ads/analytics frames with no chat marker
+                # and no same-site product chat path.
+                if not name and decision.ownership != OwnershipClass.SAME_SITE.value:
+                    continue
+                if not name and not _CHAT_PATH_RE.search(src):
+                    continue
+                policy = decision.injection_policy
+                detail = (
+                    f"Chat iframe {src[:80]} "
+                    f"(ownership={decision.ownership}, reachability={decision.reachability}, "
+                    f"policy={policy}, {decision.reason})"
+                )
+                w = ChatWidget(
+                    provider=name,
+                    tier=EvidenceClass.PASSIVE_HINT.value,
+                    submit_allowed=(policy == InjectionPolicy.INJECT.value),
+                    gate_reason=decision.reason,
+                    confidence=_TIER_CONFIDENCE[EvidenceClass.PASSIVE_HINT.value],
+                    source="iframe",
+                    frame_url=src,
+                    detail=detail,
+                    url=url,
+                )
+                w.apply_scope(decision)
+                widgets.append(w)
 
             await self._maybe_open_launcher(page)
 
@@ -892,12 +1025,14 @@ class ChatbotUIProbe:
                 detail = "Passive-structural: editable + control + message-list/live co-located"
             else:
                 detail = "Passive-hint: editable field with weak chat priors"
-        return ChatWidget(
+        decision = classify_injection_scope(
+            url, url, policy=self.scope_policy,
+        )
+        w = ChatWidget(
             input_selector=str(cand.get("selector") or ""),
             send_selector=str(cand.get("send_selector") or ""),
             reply_selector=str(cand.get("reply_selector") or ""),
             tier=tier,
-            scope=SurfaceScope.APP_OWNED.value,
             submit_allowed=submit_allowed and bool(cand.get("gate_ok")),
             gate_reason="" if (submit_allowed and cand.get("gate_ok")) else str(
                 cand.get("gate_reason") or "gated",
@@ -909,6 +1044,11 @@ class ChatbotUIProbe:
             detail=detail,
             url=url,
         )
+        w.apply_scope(decision)
+        # Side-effect gate still constrains DOM submit even when policy allows inject.
+        if not (submit_allowed and cand.get("gate_ok")):
+            w.submit_allowed = False
+        return w
 
     @staticmethod
     def _side_effect_gate(cand: Dict[str, Any]) -> Tuple[bool, bool, str]:
@@ -1099,17 +1239,45 @@ class ChatbotUIProbe:
                 continue
 
     async def _resolve_input(self, page, widget: ChatWidget):
+        root = page
+        if widget.frame_url:
+            frame = None
+            for f in page.frames:
+                if (f.url or "") == widget.frame_url or (
+                    widget.frame_url and widget.frame_url in (f.url or "")
+                ):
+                    frame = f
+                    break
+            if frame is None:
+                # Playwright can target cross-origin frames; try URL prefix match.
+                for f in page.frames:
+                    fu = f.url or ""
+                    if fu and (
+                        fu.startswith(widget.frame_url[:60])
+                        or widget.frame_url.startswith(fu[:60])
+                    ):
+                        frame = f
+                        break
+            if frame is None:
+                return None, ""
+            root = frame
+
         loc = StableLocator.from_dict(widget.locator)
-        for sel in loc.playwright_candidates():
+        candidates = loc.playwright_candidates() or [
+            "textarea",
+            '[contenteditable="true"]',
+            'input:not([type="password"]):not([type="email"])',
+        ]
+        for sel in candidates:
             try:
-                handle = page.locator(sel).first
+                handle = root.locator(sel).first
                 if await handle.count() and await handle.is_visible():
                     return handle, sel
             except Exception:
                 continue
         if widget.input_selector:
             try:
-                handle = page.locator(widget.input_selector).first
+                handle = root.locator(widget.input_selector).first
                 if await handle.count() and await handle.is_visible():
                     return handle, widget.input_selector
             except Exception:
@@ -1233,10 +1401,25 @@ class ChatbotUIProbe:
             await browser.close()
             return control, treatment
 
+    async def _frame_root(self, page, widget: ChatWidget):
+        """Return page or CDP-reachable frame for this surface."""
+        if not widget.frame_url:
+            return page
+        for f in page.frames:
+            fu = f.url or ""
+            if not fu:
+                continue
+            if fu == widget.frame_url or widget.frame_url in fu or fu in widget.frame_url:
+                return f
+            if fu.startswith(widget.frame_url[:60]) or widget.frame_url.startswith(fu[:60]):
+                return f
+        return page
+
     async def _turn(self, page, widget: ChatWidget, text: str) -> str:
         handle, sel = await self._resolve_input(page, widget)
         if not handle:
             raise RuntimeError("input_not_rediscovered")
+        root = await self._frame_root(page, widget)
         before = await self._snapshot_replies(page, widget)
         try:
             await handle.fill(text, timeout=3000)
@@ -1247,7 +1430,7 @@ class ChatbotUIProbe:
         sent = False
         if widget.send_selector:
             try:
-                btn = page.locator(widget.send_selector).first
+                btn = root.locator(widget.send_selector).first
                 if await btn.count() and await btn.is_visible():
                     await btn.click(timeout=3000)
                     sent = True
@@ -1279,6 +1462,7 @@ class ChatbotUIProbe:
         return last_new
 
     async def _snapshot_replies(self, page, widget: ChatWidget) -> List[str]:
+        root = await self._frame_root(page, widget)
         texts: List[str] = []
         selectors = []
         if widget.reply_selector:
@@ -1292,7 +1476,7 @@ class ChatbotUIProbe:
         ])
         for sel in selectors:
             try:
-                locs = page.locator(sel)
+                locs = root.locator(sel)
                 n = min(await locs.count(), 20)
                 for i in range(n):
                     t = (await locs.nth(i).inner_text(timeout=800) or "").strip()
@@ -1470,11 +1654,28 @@ def ui_result_to_findings(
 
     app_widgets = [
         w for w in result.widgets
-        if w.scope != SurfaceScope.THIRD_PARTY.value
+        if w.injection_policy == InjectionPolicy.INJECT.value
+        or (
+            w.scope == SurfaceScope.APP_OWNED.value
+            and w.injection_policy != InjectionPolicy.SKIP_INJECT.value
+        )
     ]
-    third_widgets = [
+    skipped_widgets = [
         w for w in result.widgets
-        if w.scope == SurfaceScope.THIRD_PARTY.value
+        if w.injection_policy == InjectionPolicy.SKIP_INJECT.value
+        or (
+            w.ownership == OwnershipClass.VENDOR_WIDGET.value
+            and w.injection_policy != InjectionPolicy.INJECT.value
+        )
+        or (
+            w.scope == SurfaceScope.THIRD_PARTY.value
+            and w.injection_policy != InjectionPolicy.INJECT.value
+        )
+    ]
+    detect_only_widgets = [
+        w for w in result.widgets
+        if w.injection_policy == InjectionPolicy.DETECT_ONLY.value
+        and w not in skipped_widgets
     ]
 
     def _loc(widgets: List[ChatWidget], fallback: str = "widget") -> str:
@@ -1550,25 +1751,52 @@ def ui_result_to_findings(
         })
         return confirmed, potential
 
-    # Detect-only path: never promote third-party / weak hints to Medium PI.
-    if third_widgets:
+    # Detect-only path: policy-skipped vendors / weak hints are Info, not Medium PI.
+    if skipped_widgets:
         potential.append({
-            "type": "Third-party chatbot widget (out of scope)",
+            "type": "Vendor chatbot widget (injection skipped by policy)",
             "severity": "Info",
             "status": "Informational",
-            "location": _loc(third_widgets, "third_party"),
+            "location": _loc(skipped_widgets, "vendor"),
             "details": (
-                "Cross-origin / vendor support chatbot detected. "
-                "Excluded from injection under app-owned LLM threat model."
+                "Vendor / multi-tenant chatbot surface enumerated as attack-surface "
+                "evidence but excluded from active injection by default "
+                "(authorization/CFAA, attribution, blast radius). "
+                "Override with --include-thirdparty when explicitly authorized. "
+                "Reachability is separate: Playwright can interact with cross-origin "
+                "frames via CDP; this skip is policy, not capability."
             ),
             "atlas": "AML.T0051 - LLM Prompt Injection",
             "owasp": "LLM01:2025 - Prompt Injection",
             "cwe": "CWE-77",
-            "remediation": "Review third-party widget data sharing separately.",
+            "remediation": "Review vendor widget data sharing under a separate authorization.",
             "evidence": {
-                "outcome": "third_party_out_of_scope",
+                "outcome": "vendor_widget_policy_skip",
                 "verified": False,
-                "widgets": [w.to_dict() for w in third_widgets[:5]],
+                "widgets": [w.to_dict() for w in skipped_widgets[:5]],
+                "channel": "chatbot_ui",
+            },
+        })
+
+    if detect_only_widgets and not skipped_widgets:
+        potential.append({
+            "type": "External chatbot surface (detect-only)",
+            "severity": "Info",
+            "status": "Informational",
+            "location": _loc(detect_only_widgets, "external"),
+            "details": (
+                "Different registrable domain than the scan target. Detected but "
+                "not injected by default. Override with --authorize-external when "
+                "the client owns/authorizes that origin."
+            ),
+            "atlas": "AML.T0051 - LLM Prompt Injection",
+            "owasp": "LLM01:2025 - Prompt Injection",
+            "cwe": "CWE-77",
+            "remediation": "Authorize the external origin explicitly before active testing.",
+            "evidence": {
+                "outcome": "external_detect_only",
+                "verified": False,
+                "widgets": [w.to_dict() for w in detect_only_widgets[:5]],
                 "channel": "chatbot_ui",
             },
         })
@@ -1604,7 +1832,7 @@ def ui_result_to_findings(
                 "evidence_keys": result.evidence_keys,
             },
         })
-    elif app_widgets and not third_widgets:
+    elif app_widgets and not skipped_widgets:
         # Weak app-owned hints alone — informational, not a PI finding.
         potential.append({
             "type": "Weak chatbot UI prior (not confirmed)",

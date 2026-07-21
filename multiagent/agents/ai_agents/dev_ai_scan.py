@@ -14,6 +14,7 @@ from chatbot_ui_probe     import (
     ChatbotUIProbe,
     widgets_to_chat_components,
 )
+from chatbot_ui_scope     import ScopePolicy
 from openai import AzureOpenAI
 
 def get_openai_client():
@@ -25,9 +26,10 @@ def get_openai_client():
 
 
 async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
-                             auth_cookie: str, verbose: bool) -> dict:
+                             auth_cookie: str, verbose: bool,
+                             scope_policy=None) -> dict:
     """Detect on-page chatbot widgets (Playwright) and merge into fingerprint."""
-    probe = ChatbotUIProbe()
+    probe = ChatbotUIProbe(scope_policy=scope_policy or ScopePolicy())
     result = await probe.detect(
         target_url,
         html="",
@@ -50,7 +52,8 @@ async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
     print(f"\n  Chatbot UI widgets: {len(merged)}")
     for w in merged[:5]:
         print(
-            f"    - tier={w.get('tier') or '?'} scope={w.get('scope') or '?'} "
+            f"    - tier={w.get('tier') or '?'} ownership={w.get('ownership') or w.get('scope') or '?'} "
+            f"policy={w.get('injection_policy') or '-'} "
             f"submit={w.get('submit_allowed')} provider={w.get('provider') or '-'} "
             f"via={w.get('source')}"
         )
@@ -64,7 +67,7 @@ async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
             "passive_structural": "chatbot_ui_structural",
             "passive_hint": "chatbot_ui_hint",
         }.get(w.get("tier") or "", "chatbot_ui_hint")
-        if w.get("scope") == "third_party":
+        if w.get("ownership") == "vendor_widget" or w.get("scope") == "third_party":
             key = "chatbot_ui_third_party"
         if key in existing_keys:
             continue
@@ -101,10 +104,30 @@ async def main():
         action="store_true",
         help="Skip browser chatbot UI detection/injection",
     )
+    parser.add_argument(
+        "--include-thirdparty",
+        action="store_true",
+        help=(
+            "Authorize active injection into known vendor chat widgets on a "
+            "different eTLD+1 (Intercom/Drift/HubSpot-as-vendor/…). Default skips them."
+        ),
+    )
+    parser.add_argument(
+        "--authorize-external",
+        action="store_true",
+        help=(
+            "Authorize active injection into non-vendor surfaces on a different "
+            "registrable domain than the target (explicit client authorization)."
+        ),
+    )
     args = parser.parse_args()
 
     target_url = args.target.rstrip("/")
     auth_cookie = args.cookie or ""
+    scope_policy = ScopePolicy(
+        include_thirdparty=bool(args.include_thirdparty),
+        authorize_external=bool(args.authorize_external),
+    )
 
     fp_agent = AIFingerprintAgent(timeout=8)
     ai_fingerprint = await fp_agent.fingerprint(
@@ -119,6 +142,7 @@ async def main():
     if not args.skip_chatbot_ui:
         ai_fingerprint = await _enrich_chatbot_ui(
             ai_fingerprint, target_url, auth_cookie, verbose=True,
+            scope_policy=scope_policy,
         )
 
     print("\n========== RAW FINGERPRINT ==========")
@@ -159,8 +183,9 @@ async def main():
     if not has_live and not has_ui and args.agent in ("infra", "vuln", "all"):
         print(
             "\n  No live AI surface / injectable chatbot UI — skipping infra / vuln "
-            "escalation (third-party widgets and weak DOM hints do not escalate; "
-            "use --agent avid if you still want AVID on brand-only)."
+            "escalation (vendor widgets default to policy-skip; weak DOM hints do "
+            "not escalate; use --include-thirdparty / --authorize-external when "
+            "explicitly authorized, or --agent avid for brand-only AVID)."
         )
         if args.agent != "avid":
             return
@@ -188,7 +213,7 @@ async def main():
         if not has_live and not has_ui:
             print("\n  Skipping vuln — nothing to inject against.")
         else:
-            vuln_agent = AIVulnerabilityTester(timeout=10)
+            vuln_agent = AIVulnerabilityTester(timeout=10, scope_policy=scope_policy)
             vuln_result = await vuln_agent.test_all(
                 ai_fingerprint=ai_fingerprint,
                 target_url=target_url,

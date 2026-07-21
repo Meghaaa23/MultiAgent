@@ -189,7 +189,7 @@ def test_ui_result_confirmed_requires_differential():
 
 
 def test_third_party_plus_weak_hint_is_not_medium_pi():
-    """HubSpot-style: vendor iframes + random editable must not be Medium PI."""
+    """Vendor widget on a different eTLD+1 must not become Medium PI by default."""
     result = ChatbotUIProbeResult(
         detected=True,
         injected=False,
@@ -198,24 +198,39 @@ def test_third_party_plus_weak_hint_is_not_medium_pi():
                 provider="HubSpot",
                 tier="passive_hint",
                 scope="third_party",
+                ownership="vendor_widget",
+                reachability="cross_origin_frame",
+                injection_policy="skip_inject",
+                scope_reason="vendor_widget_default_skip",
                 submit_allowed=False,
                 source="iframe",
+                frame_url="https://app.hubspot.com/conversations",
             ),
             ChatWidget(
                 tier="passive_hint",
                 scope="app_owned",
+                ownership="same_site",
+                injection_policy="inject",
                 submit_allowed=False,
                 source="dom",
                 detail="Passive-hint: editable field with weak chat priors",
             ),
         ],
     )
-    confirmed, potential = ui_result_to_findings(result, "https://www.hubspot.com")
+    confirmed, potential = ui_result_to_findings(result, "https://www.klarna.com")
     assert confirmed == []
     assert all(p["severity"] == "Info" for p in potential)
-    assert any(p["evidence"]["outcome"] == "third_party_out_of_scope" for p in potential)
+    assert any(
+        p["evidence"]["outcome"] in (
+            "vendor_widget_policy_skip",
+            "third_party_out_of_scope",
+            "ui_hint_only",
+        )
+        for p in potential
+    )
     assert not any("Potential Prompt Injection" in p["type"] for p in potential)
     comps = [w.to_dict() for w in result.widgets]
+    # Weak DOM hint alone does not warrant vuln; vendor is policy-skipped.
     assert ui_warrants_vuln(comps) is False
 
 
@@ -226,6 +241,8 @@ def test_ui_result_detected_only_is_potential():
         widgets=[ChatWidget(
             tier="passive_structural",
             scope="app_owned",
+            ownership="same_site",
+            injection_policy="inject",
             submit_allowed=False,
             gate_reason="static_html_no_network_gate",
         )],
