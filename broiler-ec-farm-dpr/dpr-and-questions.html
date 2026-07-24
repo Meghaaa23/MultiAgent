@@ -1,0 +1,1077 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EC Broiler Contract Farm — DPR &amp; Expert Meeting Question Bank</title>
+<style>
+  /* ============ PAGE SETUP (A3 PORTRAIT) ============ */
+  @page {
+    size: A3 portrait;
+    margin: 16mm 15mm 20mm 15mm;
+    @bottom-left  { content: "EC Broiler Contract Farm — DPR & Question Bank"; font: 8.5pt 'Inter', 'Noto Sans', sans-serif; color: #64748b; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8.5pt 'Inter', 'Noto Sans', sans-serif; color: #64748b; }
+    @bottom-center{ content: "Indicative planning figures — validate every number in the meeting"; font: italic 8.5pt 'Inter', 'Noto Sans', sans-serif; color: #94a3b8; }
+  }
+  @page cover { margin: 0; @bottom-left { content: none } @bottom-right { content: none } @bottom-center { content: none } }
+
+  /* ============ BASE ============ */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', 'Noto Sans', 'DejaVu Sans', sans-serif;
+    font-size: 10.5pt; line-height: 1.42; color: #1e293b;
+  }
+  h1, h2, h3, h4 { font-family: 'Inter', 'Noto Sans', sans-serif; color: #14532d; margin: 0 0 4mm 0; }
+  h2 { font-size: 17pt; border-bottom: 2.5pt solid #14532d; padding-bottom: 1.5mm; margin-top: 0; letter-spacing: -0.2pt; }
+  h2 .secno { color: #b45309; }
+  h3 { font-size: 12.5pt; color: #166534; margin: 5mm 0 2mm 0; }
+  p { margin: 0 0 2.6mm 0; }
+  ul, ol { margin: 0 0 3mm 0; padding-left: 6mm; }
+  li { margin-bottom: 1.2mm; }
+  strong { color: #0f172a; }
+  .section { page-break-before: always; }
+  .no-break-before { page-break-before: auto; }
+  .keep { page-break-inside: avoid; }
+  .small { font-size: 9pt; color: #475569; }
+  .muted { color: #64748b; }
+
+  /* ============ TABLES ============ */
+  table { width: 100%; border-collapse: collapse; margin: 2mm 0 4mm 0; font-size: 9.7pt; }
+  th { background: #14532d; color: #ffffff; text-align: left; padding: 1.8mm 2.2mm; font-size: 9.3pt; }
+  td { border-bottom: 0.4pt solid #cbd5e1; padding: 1.6mm 2.2mm; vertical-align: top; }
+  tr:nth-child(even) td { background: #f4f8f4; }
+  tr { page-break-inside: avoid; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  .totalrow td { background: #dcefe0 !important; font-weight: bold; border-top: 1.2pt solid #14532d; }
+  .subhead td { background: #e2e8f0 !important; font-weight: bold; color: #14532d; }
+
+  /* ============ CALLOUTS ============ */
+  .callout { border-left: 3.5pt solid #b45309; background: #fff8eb; padding: 3mm 4mm; margin: 3mm 0; page-break-inside: avoid; }
+  .callout.green { border-left-color: #14532d; background: #f0f7f1; }
+  .callout.red { border-left-color: #b91c1c; background: #fef2f2; }
+  .callout h4 { margin: 0 0 1.5mm 0; font-size: 10.5pt; color: #92400e; }
+  .callout.green h4 { color: #14532d; }
+  .callout.red h4 { color: #b91c1c; }
+  .callout p, .callout li { font-size: 9.8pt; }
+
+  /* ============ COVER ============ */
+  .cover {
+    page: cover;
+    width: 297mm; height: 419mm;
+    background: #0f3d22;
+    color: #f8fafc;
+    padding: 26mm 24mm;
+  }
+  .cover .rule { border: none; border-top: 1.2pt solid #d9a441; margin: 6mm 0; }
+  .cover .kicker { font-size: 12pt; letter-spacing: 3pt; text-transform: uppercase; color: #d9a441; margin-bottom: 10mm; }
+  .cover h1 { font-size: 41pt; line-height: 1.12; color: #ffffff; margin: 0 0 6mm 0; letter-spacing: -0.5pt; }
+  .cover .subtitle { font-size: 15.5pt; color: #cde3d3; line-height: 1.5; margin-bottom: 12mm; }
+  .cover .glance { background: rgba(255,255,255,0.07); border: 0.6pt solid rgba(217,164,65,0.6); padding: 7mm 8mm; margin-bottom: 10mm; }
+  .cover .glance h3 { color: #d9a441; font-size: 13pt; margin: 0 0 4mm 0; letter-spacing: 1.2pt; text-transform: uppercase; }
+  .cover table { font-size: 11.5pt; }
+  .cover td { border-bottom: 0.4pt solid rgba(255,255,255,0.18); color: #eef4ef; padding: 2.2mm 2mm; background: none !important; }
+  .cover td.k { color: #a7c4b0; width: 42%; }
+  .cover .blanks { margin-top: 12mm; font-size: 12.5pt; color: #cde3d3; }
+  .cover .blanks .line { display: inline-block; border-bottom: 0.7pt solid #d9a441; min-width: 78mm; }
+  .cover .foot { margin-top: 14mm; font-size: 10pt; color: #8fae99; }
+
+  /* ============ PART DIVIDERS ============ */
+  .part {
+    page-break-before: always;
+    background: #14532d; color: #fff;
+    padding: 10mm 10mm; margin: 0 0 6mm 0;
+  }
+  .part .pno { color: #d9a441; font-size: 13pt; letter-spacing: 2.5pt; text-transform: uppercase; }
+  .part h2 { color: #fff; border: none; font-size: 26pt; margin: 2mm 0 2mm 0; padding: 0; }
+  .part p { color: #cde3d3; font-size: 11.5pt; margin: 0; }
+
+  /* ============ TWO-COL HELPERS ============ */
+  .twocol { column-count: 2; column-gap: 9mm; column-rule: 0.4pt solid #e2e8f0; }
+  .twocol .keep, .twocol li { break-inside: avoid; }
+
+  /* ============ FIGURES ============ */
+  .fig { margin: 3mm 0 4mm 0; page-break-inside: avoid; }
+  .fig .cap { font-size: 9pt; color: #475569; margin-top: 1.2mm; font-style: italic; }
+  svg text { font-family: 'Inter', 'Noto Sans', sans-serif; }
+
+  /* ============ QUESTION BANK ============ */
+  .qintro { font-size: 10pt; }
+  .qsec { margin-top: 7mm; }
+  .qsec h2 { font-size: 15.5pt; page-break-after: avoid; }
+  .qcols { column-count: 2; column-gap: 10mm; column-rule: 0.4pt solid #e2e8f0; }
+  .q { break-inside: avoid; margin-bottom: 4.6mm; }
+  .q .qt { font-size: 10.2pt; font-weight: 600; color: #1e293b; }
+  .q .qt::before { counter-increment: q; content: "Q" counter(q) ". "; color: #b45309; font-weight: 700; }
+  .q .why { font-size: 8.6pt; color: #64748b; font-style: italic; margin: 0.6mm 0 1mm 0; }
+  .q .ans { border-bottom: 0.4pt solid #94a3b8; height: 6.5mm; }
+  .q .ans + .ans { margin-top: 0; }
+  #qbank { counter-reset: q; }
+
+  .checkline { margin-bottom: 3.2mm; font-size: 10.2pt; break-inside: avoid; }
+  .checkline::before { content: "☐  "; color: #14532d; font-size: 11pt; }
+
+  /* scorecard */
+  .score td { padding: 2.2mm 2.2mm; }
+  .score .crit { width: 58%; }
+  .score .box { text-align: center; font-size: 12pt; color: #94a3b8; }
+
+  .noteslines .nl { border-bottom: 0.4pt solid #cbd5e1; height: 9.5mm; }
+</style>
+</head>
+<body>
+
+<!-- ==================== COVER ==================== -->
+<div class="cover">
+  <div class="kicker">Detailed Project Report + Field Validation Kit</div>
+  <h1>Environmentally Controlled (EC)<br>Broiler Contract Farm</h1>
+  <div class="subtitle">
+    A planning report for a tunnel-ventilated EC broiler shed on a <strong style="color:#fff">1.5-acre site</strong>,
+    operated under an integrator (company) contract — followed by a structured
+    <strong style="color:#fff">question bank of 150+ questions</strong> to put to an experienced EC contract farmer
+    before committing money.
+  </div>
+  <hr class="rule">
+  <div class="glance">
+    <h3>Project at a Glance (Indicative — To Be Validated)</h3>
+    <table>
+      <tr><td class="k">Land available</td><td>1.5 acres (~65,340 sq ft / ~6,070 m²)</td></tr>
+      <tr><td class="k">Proposed shed</td><td>1 × EC tunnel-ventilated shed, 350 ft × 45 ft (15,750 sq ft)</td></tr>
+      <tr><td class="k">Bird capacity</td><td>~24,000 broilers per batch (≈ 0.65 sq ft / bird)</td></tr>
+      <tr><td class="k">Business model</td><td>Contract growing for an integrator — company supplies chicks, feed &amp; medicines; farmer supplies shed, equipment, power, labour</td></tr>
+      <tr><td class="k">Batches per year</td><td>5.5 – 6 (≈ 40–45 day grow-out + 12–15 day cleanout)</td></tr>
+      <tr><td class="k">Indicative capital cost</td><td>₹1.25 – 1.45 crore (≈ ₹520 – 600 per bird capacity)</td></tr>
+      <tr><td class="k">Indicative net income</td><td>₹10 – 20 lakh / year before loan EMI (scenario-dependent — see Section 10)</td></tr>
+      <tr><td class="k">Indicative payback</td><td>6 – 10 years depending on contract rate, incentives &amp; subsidy</td></tr>
+    </table>
+  </div>
+  <div class="blanks">
+    Prepared by: <span class="line">&nbsp;</span><br><br>
+    Meeting with: <span class="line">&nbsp;</span><br><br>
+    Date &amp; place: <span class="line">&nbsp;</span>
+  </div>
+  <div class="foot">
+    Print format: A3 portrait &nbsp;|&nbsp; Part A: DPR &amp; site planning (pages 2–13) &nbsp;|&nbsp; Part B: Meeting question bank (pages 14 onward)<br>
+    All costs and rates in this document are indicative planning estimates for India (2025–26). They differ by state, integrator and vendor — the purpose of the meeting is to replace them with real, local numbers.
+  </div>
+</div>
+
+<!-- ==================== HOW TO USE ==================== -->
+<div class="section" id="howto">
+  <h2><span class="secno">§0</span> How to Use This Document in the Meeting</h2>
+  <div class="twocol">
+    <p><strong>What this document is.</strong> Part A is a working Detailed Project Report (DPR) for a single EC broiler shed on your 1.5 acres: site layout, shed drawings, equipment list, cost estimate, batch economics, timeline, licences and risks. Part B is a numbered question bank organised in the same order a farm actually gets built and run — from choosing the company, to construction, to placing chicks, to settlement day.</p>
+    <p><strong>How to open the conversation.</strong> Show him Part A first. Say: <em>“This is my plan on paper for my 1.5 acres. I want you to attack it — tell me where the numbers are wrong for our area, and what you would do differently.”</em> An experienced grower respects a person who has done homework, and he will correct real numbers far more openly than he would answer vague questions.</p>
+    <p><strong>How to work through Part B.</strong> Don’t read all 150 questions like an interview. Pick the sections that matter as the conversation flows, tick them off, and write his answers on the ruled lines. The <em>italic line under each question tells you why it matters and what a bad answer sounds like</em> — read it silently, not aloud.</p>
+    <div class="callout green keep">
+      <h4>The 5 questions that matter most (if you get nothing else, get these)</h4>
+      <ol>
+        <li><strong>“Can I see your last three batch settlement sheets from the company?”</strong> — real income, on paper, not memory.</li>
+        <li><strong>“What did your shed and equipment actually cost, item by item — and what would you not spend on again?”</strong></li>
+        <li><strong>“Show me a summer electricity bill and a winter one.”</strong> — EC economics live or die on power cost.</li>
+        <li><strong>“Who near us built an EC shed and regrets it — and exactly why?”</strong></li>
+        <li><strong>“If I start on my 1.5 acres today, what capacity, which company, which equipment vendor — and will you walk my land with me?”</strong></li>
+      </ol>
+    </div>
+    <div class="callout keep">
+      <h4>Documents to request from him (tick when seen)</h4>
+      <ul style="list-style:none; padding-left:1mm;">
+        <li>☐ &nbsp;Company contract / agreement copy (any integrator)</li>
+        <li>☐ &nbsp;Last 3 batch settlement / payment statements</li>
+        <li>☐ &nbsp;Electricity bills — one peak-summer batch, one winter batch</li>
+        <li>☐ &nbsp;Equipment invoices (fans, pads, controller, feeders)</li>
+        <li>☐ &nbsp;Civil contractor’s bill / rate list for his shed</li>
+        <li>☐ &nbsp;Daily record sheet / mortality register format he uses</li>
+        <li>☐ &nbsp;Controller settings chart (temperature by bird age)</li>
+        <li>☐ &nbsp;Vaccination &amp; medication schedule from his company</li>
+        <li>☐ &nbsp;Contact numbers: equipment vendor, civil contractor, company line supervisor</li>
+        <li>☐ &nbsp;Permission to visit his farm on a working day (fix a date)</li>
+      </ul>
+    </div>
+    <p><strong>After the meeting.</strong> Fill in the Go/No-Go scorecard on the last pages the same evening, while his answers are fresh. Do not decide in the meeting itself — decide against the scorecard, and only after visiting at least two working EC farms and speaking to at least two integrators’ area managers yourself.</p>
+  </div>
+</div>
+
+<!-- ==================== PART A DIVIDER ==================== -->
+<div class="part">
+  <div class="pno">Part A</div>
+  <h2>Detailed Project Report (DPR)</h2>
+  <p>EC broiler contract farm on 1.5 acres — site plan, shed design, equipment, costs, economics, timeline, compliance and risks. Every figure marked “indicative” is a 2025–26 planning estimate to be validated locally.</p>
+</div>
+
+<!-- ==================== 1. EXECUTIVE SUMMARY ==================== -->
+<div class="no-break-before" id="s1">
+  <h2><span class="secno">§1</span> Executive Summary</h2>
+  <div class="twocol">
+    <p>This report plans a <strong>single environmentally controlled (EC), tunnel-ventilated broiler shed of 350 ft × 45 ft (15,750 sq ft)</strong> on a 1.5-acre plot, growing <strong>~24,000 broiler birds per batch</strong> under a contract (integration) agreement with a poultry company. Under this model the company owns the birds and supplies day-old chicks (DOC), feed, medicines, vaccines and technical supervision, and lifts the grown birds; the farmer invests in land, shed, equipment, power, water, litter and labour, and is paid a <strong>growing charge per kg of live weight produced</strong>, plus performance incentives linked to feed conversion (FCR) and mortality.</p>
+    <p>EC sheds cost roughly 2–2.5× an open-sided shed of the same capacity, but stock ~40–60% more birds per sq ft, run more batches per year, keep performance stable through summer, and typically earn a <strong>higher contract growing rate (~₹8–10/kg vs ~₹6.5–7.5/kg for open sheds — verify locally)</strong>. The long-term logic of EC is: predictable bird performance → better FCR incentives → priority chick placement from the company → steadier annual income. The long-term risk of EC is: high fixed capital, total dependence on electricity, and total dependence on the integrator’s contract terms.</p>
+    <p><strong>Indicative project cost is ₹1.25–1.45 crore</strong> including shed civil work, EC equipment, feeding/drinking systems, generator, borewell, electricals and support buildings, plus ~₹5–6 lakh working capital. <strong>Indicative net income before loan EMI is ₹10–20 lakh/year</strong> (Section 10 gives conservative / base / good scenarios), giving a payback of roughly 6–10 years. These economics are highly sensitive to three numbers that only local, current experience can confirm: the <strong>growing charge per kg</strong>, the <strong>number of batches the company actually places per year</strong>, and the <strong>summer electricity bill</strong>. Confirming those three numbers is the central purpose of the meeting this document supports.</p>
+    <div class="callout keep">
+      <h4>Decision position</h4>
+      <p>This DPR is a <strong>pre-decision planning document</strong>, not a commitment. The stated intent: build for long-term profit, start only if (a) a reputable integrator confirms in writing the growing rate and batch placement frequency, (b) at least two working EC farmers in the district independently confirm the economics, and (c) total project cost including working capital can be funded with at least 25–30% own margin.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== 2. BUSINESS MODEL ==================== -->
+<div class="section" id="s2">
+  <h2><span class="secno">§2</span> The Contract (Integration) Model — Who Provides What</h2>
+  <p>Almost all organised broiler growing in India runs on the integration model. Understanding exactly where the boundary of responsibility lies — and where companies quietly shift costs onto farmers — is the single most important commercial homework before signing.</p>
+  <table>
+    <tr><th style="width:24%">Item</th><th style="width:38%">Company (Integrator) provides</th><th style="width:38%">Farmer provides</th></tr>
+    <tr><td><strong>Birds</strong></td><td>Day-old chicks (company owns the birds throughout)</td><td>Care, brooding and rearing of the birds</td></tr>
+    <tr><td><strong>Feed</strong></td><td>All feed (pre-starter, starter, finisher), delivered to farm</td><td>Unloading, safe dry storage, correct feeding</td></tr>
+    <tr><td><strong>Health</strong></td><td>Vaccines, medicines, vet/supervisor visits, treatment protocol</td><td>Administration as directed; sometimes shares cost of extra medicines — <em>check</em></td></tr>
+    <tr><td><strong>Infrastructure</strong></td><td>Nothing (some companies part-finance or arrange equipment loans — <em>check</em>)</td><td>Land, shed, EC equipment, generator, water system, store room</td></tr>
+    <tr><td><strong>Operations</strong></td><td>Technical guidance, placement &amp; lifting schedule</td><td>Litter/bedding, electricity, fuel, labour, brooding heat, disinfectants</td></tr>
+    <tr><td><strong>Marketing</strong></td><td>Lifts and sells all birds; market price risk is on company</td><td>No market risk, but also no upside when retail prices are high</td></tr>
+    <tr><td><strong>Payment</strong></td><td>Growing charge ₹/kg live weight + FCR/mortality incentives − penalties</td><td>Bears own operating costs out of the growing charge</td></tr>
+  </table>
+  <div class="twocol">
+    <h3>How the farmer is paid (typical structure — verify every element)</h3>
+    <ul>
+      <li><strong>Base growing charge:</strong> ~₹8–10 per kg live weight for EC sheds (open sheds ~₹6.5–7.5). Some companies pay a flat rate; others pay on a performance grid.</li>
+      <li><strong>Performance incentive:</strong> extra ₹0.5–2.0/kg for beating the standard FCR / production-efficiency targets; this is where good EC farmers make their real margin.</li>
+      <li><strong>Minimum growing charge (MGC):</strong> some contracts guarantee a floor amount per kg or per bird even in a bad batch — a very valuable clause; ask if it exists locally.</li>
+      <li><strong>Penalties/deductions:</strong> excess mortality beyond a slab (often &gt;4–5%), condemned/underweight birds, feed shortage/spillage, weight shrinkage disputes at lifting.</li>
+      <li><strong>Payment cycle:</strong> typically 7–15 days after final lifting; delays are a known industry complaint — ask farmers, not the company.</li>
+    </ul>
+    <h3>Integrators commonly operating in India (examples)</h3>
+    <p class="small">Suguna Foods, Venky’s (VH Group), Sneha Group, IB Group (ABIS), Skylark Hatcheries, Shanthi Poultry / SKM, Japfa Comfeed, CP (Charoen Pokphand), Baramati Agro, and strong regional integrators. <strong>Which of these actually places EC batches reliably in your district is a local fact — a core meeting question (Part B, Section 2).</strong></p>
+    <div class="callout red keep">
+      <h4>Contract clauses that decide your fate — read before signing anything</h4>
+      <ul>
+        <li>Who bears loss from <strong>mass mortality due to power/equipment failure</strong>? (Usually the farmer — this is why generator + alarms are non-negotiable.)</li>
+        <li>What happens if <strong>lifting is delayed beyond ~42–45 days</strong> — who pays for extra feed days, and how is weight loss/shrinkage treated?</li>
+        <li>Can the company <strong>skip placements</strong> (leave your shed empty) in a low-demand season without compensation? How many batches/year is it <em>obliged</em> to place?</li>
+        <li>Exit/termination terms — notice period, and whether your shed spec locks you to one company’s equipment standards.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== 3. LAND & SITE ==================== -->
+<div class="section" id="s3">
+  <h2><span class="secno">§3</span> Land &amp; Site Assessment — 1.5 Acres</h2>
+  <div class="twocol">
+    <p><strong>Available land:</strong> 1.5 acres = 65,340 sq ft ≈ 6,070 m². For drawing purposes this DPR assumes a rectangular plot of <strong>~440 ft × 148.5 ft</strong> with the long axis running east–west; the layout in §4 must be adapted to the plot’s real shape, road access and prevailing wind.</p>
+    <p><strong>What 1.5 acres realistically supports:</strong> one EC shed of 350 ft × 45 ft done properly, with correct clearances, support buildings, truck turning space and a sanitary disposal area. A second full-size shed would violate the recommended 50 ft+ inter-shed gap and crowd the fan discharge zone; treat expansion as a separate-land decision later (Part B, Section 15 asks the expert exactly this).</p>
+    <h3>Site selection checklist (score your plot)</h3>
+    <ul>
+      <li><strong>Water:</strong> assured 15,000–20,000 L/day in peak summer (drinking + evaporative pads + washing). Borewell yield test is mandatory before construction.</li>
+      <li><strong>Power:</strong> 3-phase connection of ~25–35 kW; distance to nearest transformer strongly affects connection cost. Check whether poultry qualifies for the agricultural tariff in your state — the tariff class can swing running cost by lakhs per year.</li>
+      <li><strong>Approach road:</strong> must take a 15–20 tonne feed truck and night-time lifting vehicles in all weather.</li>
+      <li><strong>Distance norms (commonly advised — verify local rules):</strong> ≥500 m from village habitation and water bodies; ≥100 m from highways; ideally ≥1 km from other poultry farms (biosecurity); away from wetlands/migratory-bird areas.</li>
+      <li><strong>Orientation &amp; wind:</strong> long axis east–west so side walls face north/south (less solar load); fan end pointing away from houses and your own gate (odour, dust, noise).</li>
+      <li><strong>Drainage &amp; flood:</strong> shed plinth ~2 ft above finished ground; the site must not waterlog — EC pads + wet litter is a disaster combination.</li>
+      <li><strong>Mobile network:</strong> the controller’s alarm auto-dialer must have signal — a real, frequently-forgotten criterion.</li>
+    </ul>
+    <div class="callout keep">
+      <h4>Ask the expert to physically walk your land</h4>
+      <p>The highest-value outcome of this meeting is not answers on paper — it is getting him to visit your 1.5 acres and mark shed position, gate, and fan direction with his own experience of local wind, rain and disease history. Part B, Section 14 is written for that walk.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== 4. SITE LAYOUT ==================== -->
+<div class="section" id="s4">
+  <h2><span class="secno">§4</span> Proposed Site Layout Plan (1.5 Acres)</h2>
+  <div class="fig">
+  <svg viewBox="0 0 1060 470" width="100%" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#334155"/></marker>
+      <marker id="arrW" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#0369a1"/></marker>
+    </defs>
+    <!-- plot -->
+    <rect x="40" y="55" width="950" height="321" fill="#f6faf4" stroke="#14532d" stroke-width="2.5"/>
+    <!-- fence hatch -->
+    <rect x="40" y="55" width="950" height="321" fill="none" stroke="#14532d" stroke-width="0.8" stroke-dasharray="7,4" transform="translate(4,4)"/>
+    <!-- green buffer north -->
+    <g fill="#86b791">
+      <circle cx="90" cy="72" r="7"/><circle cx="150" cy="70" r="7"/><circle cx="210" cy="73" r="7"/><circle cx="270" cy="70" r="7"/><circle cx="330" cy="72" r="7"/><circle cx="390" cy="70" r="7"/><circle cx="450" cy="73" r="7"/><circle cx="510" cy="70" r="7"/><circle cx="570" cy="72" r="7"/><circle cx="630" cy="70" r="7"/><circle cx="690" cy="73" r="7"/><circle cx="750" cy="70" r="7"/><circle cx="810" cy="72" r="7"/><circle cx="870" cy="70" r="7"/><circle cx="930" cy="72" r="7"/>
+    </g>
+    <text x="515" y="90" font-size="11" fill="#3f6212" text-anchor="middle">tree line / windbreak &amp; dust screen along north boundary</text>
+
+    <!-- internal road -->
+    <rect x="40" y="330" width="820" height="34" fill="#e7e0d3" stroke="#a8a29e" stroke-width="1"/>
+    <text x="560" y="351" font-size="12" fill="#57534e" text-anchor="middle">internal road (12 ft) — feed truck &amp; lifting vehicles, all-weather surface</text>
+
+    <!-- gate + wheel dip -->
+    <rect x="34" y="330" width="12" height="34" fill="#b45309"/>
+    <rect x="52" y="333" width="34" height="28" fill="#bfdbfe" stroke="#0369a1"/>
+    <text x="69" y="386" font-size="10.5" fill="#0369a1" text-anchor="middle">vehicle wheel dip</text>
+    <text x="30" y="322" font-size="11" fill="#7c2d12" text-anchor="start">GATE</text>
+
+    <!-- security cabin -->
+    <rect x="60" y="285" width="40" height="30" fill="#fde68a" stroke="#a16207"/>
+    <text x="80" y="303" font-size="9.5" fill="#713f12" text-anchor="middle">security</text>
+
+    <!-- office/store + generator -->
+    <rect x="60" y="120" width="70" height="52" fill="#dbeafe" stroke="#1d4ed8"/>
+    <text x="95" y="141" font-size="9.5" fill="#1e3a8a" text-anchor="middle">office +</text>
+    <text x="95" y="153" font-size="9.5" fill="#1e3a8a" text-anchor="middle">feed store</text>
+    <text x="95" y="165" font-size="9.5" fill="#1e3a8a" text-anchor="middle">(15×20 ft)</text>
+    <rect x="60" y="185" width="70" height="38" fill="#fecaca" stroke="#b91c1c"/>
+    <text x="95" y="202" font-size="9.5" fill="#7f1d1d" text-anchor="middle">generator rm</text>
+    <text x="95" y="214" font-size="9.5" fill="#7f1d1d" text-anchor="middle">82.5 kVA DG</text>
+
+    <!-- water -->
+    <circle cx="180" cy="132" r="14" fill="#bae6fd" stroke="#0369a1"/>
+    <text x="180" y="136" font-size="9" fill="#0c4a6e" text-anchor="middle">BW</text>
+    <rect x="205" y="118" width="52" height="28" fill="#bae6fd" stroke="#0369a1"/>
+    <text x="231" y="130" font-size="8.5" fill="#0c4a6e" text-anchor="middle">2 × 10,000 L</text>
+    <text x="231" y="141" font-size="8.5" fill="#0c4a6e" text-anchor="middle">tanks (raised)</text>
+    <text x="215" y="108" font-size="10" fill="#0369a1" text-anchor="middle">borewell + storage</text>
+
+    <!-- shed -->
+    <rect x="160" y="205" width="756" height="97" fill="#dcefe0" stroke="#14532d" stroke-width="2.5"/>
+    <text x="538" y="248" font-size="15" font-weight="bold" fill="#14532d" text-anchor="middle">EC BROILER SHED — 350 ft × 45 ft (15,750 sq ft) · ~24,000 birds</text>
+    <text x="538" y="268" font-size="10.5" fill="#166534" text-anchor="middle">long axis east–west · plinth 2 ft above ground · tunnel airflow west → east</text>
+    <!-- anteroom -->
+    <rect x="138" y="228" width="22" height="50" fill="#fef3c7" stroke="#a16207"/>
+    <text x="149" y="288" font-size="9" fill="#713f12" text-anchor="middle">anteroom /</text>
+    <text x="149" y="299" font-size="9" fill="#713f12" text-anchor="middle">control room</text>
+    <!-- pads -->
+    <rect x="170" y="198" width="97" height="8" fill="#f59e0b"/>
+    <rect x="170" y="301" width="97" height="8" fill="#f59e0b"/>
+    <text x="330" y="190" font-size="10" fill="#92400e" text-anchor="middle">cooling pads 45 ft × 6 ft (both sides)</text>
+    <line x1="272" y1="193" x2="268" y2="200" stroke="#92400e" stroke-width="0.9"/>
+    <!-- fans -->
+    <g fill="#ffffff" stroke="#b91c1c" stroke-width="1.6">
+      <circle cx="916" cy="215" r="6"/><circle cx="916" cy="233" r="6"/><circle cx="916" cy="251" r="6"/><circle cx="916" cy="269" r="6"/><circle cx="916" cy="287" r="6"/>
+    </g>
+    <text x="947" y="238" font-size="10" fill="#7f1d1d" transform="rotate(90 947 238)" text-anchor="middle">10 × 50″ exhaust fans</text>
+    <!-- airflow arrows -->
+    <line x1="290" y1="253" x2="410" y2="253" stroke="#0369a1" stroke-width="2" marker-end="url(#arrW)"/>
+    <line x1="590" y1="253" x2="710" y2="253" stroke="#0369a1" stroke-width="2" marker-end="url(#arrW)"/>
+    <!-- compost pit -->
+    <rect x="900" y="90" width="72" height="44" fill="#e9d5ff" stroke="#7c3aed"/>
+    <text x="936" y="108" font-size="9" fill="#4c1d95" text-anchor="middle">mortality</text>
+    <text x="936" y="120" font-size="9" fill="#4c1d95" text-anchor="middle">compost pit</text>
+    <text x="936" y="150" font-size="8.5" fill="#6b21a8" text-anchor="middle">(far corner, downwind)</text>
+    <!-- parking -->
+    <rect x="150" y="332" width="120" height="30" fill="none" stroke="#57534e" stroke-dasharray="4,3"/>
+    <text x="210" y="351" font-size="9.5" fill="#57534e" text-anchor="middle">truck turning / parking</text>
+
+    <!-- dimensions -->
+    <line x1="40" y1="34" x2="990" y2="34" stroke="#334155" stroke-width="1" marker-start="url(#arr)" marker-end="url(#arr)"/>
+    <text x="515" y="28" font-size="12" fill="#334155" text-anchor="middle">~440 ft (assumed — adapt to actual plot)</text>
+    <line x1="1012" y1="55" x2="1012" y2="376" stroke="#334155" stroke-width="1" marker-start="url(#arr)" marker-end="url(#arr)"/>
+    <text x="1030" y="220" font-size="12" fill="#334155" transform="rotate(90 1030 220)" text-anchor="middle">~148.5 ft</text>
+    <!-- clearances -->
+    <line x1="538" y1="95" x2="538" y2="203" stroke="#64748b" stroke-width="0.8" marker-start="url(#arr)" marker-end="url(#arr)"/>
+    <text x="548" y="150" font-size="9.5" fill="#64748b">≥45 ft clear</text>
+    <line x1="918" y1="253" x2="988" y2="253" stroke="#64748b" stroke-width="0.8" marker-end="url(#arr)"/>
+    <text x="953" y="245" font-size="9" fill="#64748b" text-anchor="middle">≥35 ft</text>
+    <!-- north arrow -->
+    <g transform="translate(985,415)">
+      <circle cx="0" cy="0" r="16" fill="#fff" stroke="#334155"/>
+      <path d="M0,-11 L5,7 L0,3 L-5,7 z" fill="#14532d"/>
+      <text x="0" y="34" font-size="11" fill="#334155" text-anchor="middle">N</text>
+    </g>
+    <!-- legend -->
+    <g transform="translate(50,400)" font-size="10" fill="#334155">
+      <rect x="0" y="0" width="14" height="10" fill="#dcefe0" stroke="#14532d"/><text x="20" y="9">EC shed</text>
+      <rect x="90" y="0" width="14" height="10" fill="#f59e0b"/><text x="110" y="9">cooling pads</text>
+      <circle cx="205" cy="5" r="5" fill="#fff" stroke="#b91c1c"/><text x="216" y="9">exhaust fans</text>
+      <rect x="300" y="0" width="14" height="10" fill="#dbeafe" stroke="#1d4ed8"/><text x="320" y="9">office / feed store</text>
+      <rect x="430" y="0" width="14" height="10" fill="#fecaca" stroke="#b91c1c"/><text x="450" y="9">generator</text>
+      <rect x="520" y="0" width="14" height="10" fill="#bae6fd" stroke="#0369a1"/><text x="540" y="9">water</text>
+      <rect x="590" y="0" width="14" height="10" fill="#e9d5ff" stroke="#7c3aed"/><text x="610" y="9">compost pit</text>
+      <rect x="690" y="0" width="14" height="10" fill="#e7e0d3" stroke="#a8a29e"/><text x="710" y="9">road</text>
+    </g>
+  </svg>
+  <div class="cap">Fig. 1 — Indicative layout on 1.5 acres (65,340 sq ft), drawn for an assumed 440 ft × 148.5 ft plot. Adapt positions to the real plot shape; keep the shed’s long axis east–west, fans pointing away from the gate/houses, and the compost pit at the far downwind corner.</div>
+  </div>
+  <table class="keep">
+    <tr><th>Area statement</th><th class="num">Size</th><th>Notes</th></tr>
+    <tr><td>EC shed footprint</td><td class="num">15,750 sq ft</td><td>350 ft × 45 ft; plinth raised ~2 ft</td></tr>
+    <tr><td>Anteroom / control room</td><td class="num">~200 sq ft</td><td>Controller, alarm panel, medicine fridge, records, footbath</td></tr>
+    <tr><td>Office + feed store</td><td class="num">~300 sq ft</td><td>Dry, rodent-proofed; feed on pallets, never on floor</td></tr>
+    <tr><td>Generator room</td><td class="num">~150 sq ft</td><td>82.5 kVA DG + AMF auto-start panel; fuel storage</td></tr>
+    <tr><td>Security cabin + worker room + toilet</td><td class="num">~250 sq ft</td><td>Workers should stay on site — night duty is not optional in EC</td></tr>
+    <tr><td>Water: borewell + 2 × 10,000 L tanks</td><td class="num">—</td><td>Raised tanks give gravity backup for nipple lines during pump failure</td></tr>
+    <tr><td>Internal road + truck turning</td><td class="num">~5,500 sq ft</td><td>12 ft wide, all-weather; lifting happens at night, often in rain</td></tr>
+    <tr><td>Mortality compost pit</td><td class="num">~2 pits, 6×4×6 ft</td><td>Far corner, downwind, lined; alternate-pit composting</td></tr>
+    <tr><td>Open / green / buffer</td><td class="num">balance</td><td>Windbreak trees on north &amp; west; keep fan discharge zone clear</td></tr>
+  </table>
+</div>
+
+<!-- ==================== 5. SHED DESIGN ==================== -->
+<div class="section" id="s5">
+  <h2><span class="secno">§5</span> Shed Design &amp; Construction Specification</h2>
+  <div class="fig">
+  <svg viewBox="0 0 1060 330" width="100%" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="arr2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#334155"/></marker></defs>
+    <!-- ground -->
+    <rect x="0" y="288" width="1060" height="30" fill="#e7e5e4"/>
+    <line x1="0" y1="288" x2="1060" y2="288" stroke="#78716c" stroke-width="1.5"/>
+    <text x="1005" y="305" font-size="10" fill="#57534e">ground level</text>
+    <!-- plinth block -->
+    <rect x="215" y="260" width="630" height="28" fill="#d6d3d1" stroke="#78716c"/>
+    <text x="530" y="279" font-size="10" fill="#44403c" text-anchor="middle">compacted fill + plinth ~2 ft above ground · PCC floor 3–4 in over rubble soling · rice-husk litter bed 3–4 in on top (yellow)</text>
+    <!-- floor line -->
+    <line x1="215" y1="260" x2="845" y2="260" stroke="#14532d" stroke-width="2"/>
+    <!-- litter -->
+    <rect x="220" y="252" width="620" height="8" fill="#fde68a"/>
+    <!-- side walls -->
+    <rect x="215" y="232" width="10" height="28" fill="#b45309"/>
+    <rect x="835" y="232" width="10" height="28" fill="#b45309"/>
+    <!-- curtain/panel walls -->
+    <rect x="215" y="148" width="10" height="84" fill="#cbd5e1" stroke="#64748b"/>
+    <rect x="835" y="148" width="10" height="84" fill="#cbd5e1" stroke="#64748b"/>
+    <!-- columns -->
+    <rect x="218" y="148" width="4" height="112" fill="#475569"/>
+    <rect x="838" y="148" width="4" height="112" fill="#475569"/>
+    <!-- roof -->
+    <path d="M200,155 L530,62 L860,155" fill="none" stroke="#334155" stroke-width="5"/>
+    <path d="M212,158 L530,69 L848,158" fill="none" stroke="#f59e0b" stroke-width="2.5"/>
+    <text x="530" y="52" font-size="11" fill="#334155" text-anchor="middle">GI/colour-coated sheet roof + 25 mm insulation (foil-faced) — ridge sealed (no ridge vent in EC)</text>
+    <!-- false ceiling -->
+    <line x1="225" y1="150" x2="835" y2="150" stroke="#0369a1" stroke-width="1.5" stroke-dasharray="8,5"/>
+    <text x="530" y="143" font-size="10" fill="#0369a1" text-anchor="middle">optional false ceiling at ~8–9 ft (reduces air volume → better tunnel velocity &amp; lower cooling load)</text>
+    <!-- feeder lines (3) -->
+    <g stroke="#166534" stroke-width="2">
+      <line x1="370" y1="150" x2="370" y2="240"/><line x1="530" y1="150" x2="530" y2="240"/><line x1="690" y1="150" x2="690" y2="240"/>
+    </g>
+    <g fill="#16a34a">
+      <path d="M358,240 h24 l-5,12 h-14 z"/><path d="M518,240 h24 l-5,12 h-14 z"/><path d="M678,240 h24 l-5,12 h-14 z"/>
+    </g>
+    <text x="530" y="112" font-size="9.5" fill="#0369a1" text-anchor="middle">4 nipple-drinker lines (~2,400 nipples) — blue</text>
+    <text x="530" y="128" font-size="9.5" fill="#166534" text-anchor="middle">3 pan-feeder lines (~420 pans) — green</text>
+    <!-- nipple lines (4) -->
+    <g stroke="#0369a1" stroke-width="2">
+      <line x1="295" y1="150" x2="295" y2="232"/><line x1="450" y1="150" x2="450" y2="232"/><line x1="610" y1="150" x2="610" y2="232"/><line x1="765" y1="150" x2="765" y2="232"/>
+    </g>
+    <g fill="#0369a1"><circle cx="295" cy="236" r="4"/><circle cx="450" cy="236" r="4"/><circle cx="610" cy="236" r="4"/><circle cx="765" cy="236" r="4"/></g>
+    <!-- dims -->
+    <line x1="215" y1="315" x2="845" y2="315" stroke="#334155" stroke-width="1" marker-start="url(#arr2)" marker-end="url(#arr2)"/>
+    <text x="530" y="311" font-size="11.5" fill="#334155" text-anchor="middle">45 ft clear width</text>
+    <line x1="120" y1="260" x2="120" y2="150" stroke="#334155" stroke-width="1" marker-start="url(#arr2)" marker-end="url(#arr2)"/>
+    <text x="108" y="208" font-size="10.5" fill="#334155" text-anchor="middle" transform="rotate(-90 108 208)">eave 8 ft</text>
+    <line x1="912" y1="260" x2="912" y2="66" stroke="#334155" stroke-width="1" marker-start="url(#arr2)" marker-end="url(#arr2)"/>
+    <text x="925" y="165" font-size="10.5" fill="#334155" text-anchor="middle" transform="rotate(90 925 165)">ridge ~14 ft</text>
+    <!-- wall labels -->
+    <text x="200" y="250" font-size="9.5" fill="#92400e" text-anchor="end">2 ft masonry wall</text>
+    <text x="200" y="190" font-size="9.5" fill="#475569" text-anchor="end">curtain / sandwich panel</text>
+    <text x="200" y="176" font-size="9.5" fill="#475569" text-anchor="end">(sealed air-tight in EC mode)</text>
+  </svg>
+  <div class="cap">Fig. 2 — Cross-section of the proposed 45 ft EC shed. In an EC shed, air-tightness is everything: every leak between pad and fan destroys tunnel velocity and cooling.</div>
+  </div>
+
+  <div class="fig">
+  <svg viewBox="0 0 1060 205" width="100%" xmlns="http://www.w3.org/2000/svg">
+    <defs><marker id="arrB" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#0369a1"/></marker></defs>
+    <rect x="80" y="45" width="900" height="116" fill="#f0f7f1" stroke="#14532d" stroke-width="2.5"/>
+    <rect x="56" y="70" width="24" height="66" fill="#fef3c7" stroke="#a16207"/>
+    <text x="68" y="178" font-size="10" fill="#713f12" text-anchor="middle">anteroom</text>
+    <rect x="92" y="38" width="110" height="8" fill="#f59e0b"/>
+    <rect x="92" y="160" width="110" height="8" fill="#f59e0b"/>
+    <text x="147" y="30" font-size="10.5" fill="#92400e" text-anchor="middle">wet cooling pads (6″ cellulose), both sides</text>
+    <g fill="#ffffff" stroke="#b91c1c" stroke-width="1.6">
+      <circle cx="972" cy="62" r="7"/><circle cx="972" cy="82" r="7"/><circle cx="972" cy="103" r="7"/><circle cx="972" cy="124" r="7"/><circle cx="972" cy="144" r="7"/>
+    </g>
+    <text x="1005" y="103" font-size="10.5" fill="#7f1d1d" transform="rotate(90 1005 103)" text-anchor="middle">fan wall: 10 × 50″</text>
+    <g stroke="#0369a1" stroke-width="2.5">
+      <line x1="230" y1="78" x2="420" y2="78" marker-end="url(#arrB)"/>
+      <line x1="230" y1="103" x2="420" y2="103" marker-end="url(#arrB)"/>
+      <line x1="230" y1="128" x2="420" y2="128" marker-end="url(#arrB)"/>
+      <line x1="560" y1="78" x2="750" y2="78" marker-end="url(#arrB)"/>
+      <line x1="560" y1="103" x2="750" y2="103" marker-end="url(#arrB)"/>
+      <line x1="560" y1="128" x2="750" y2="128" marker-end="url(#arrB)"/>
+    </g>
+    <text x="490" y="107" font-size="11.5" fill="#0369a1" text-anchor="middle">tunnel airflow 500–600 ft/min</text>
+    <text x="530" y="152" font-size="9.5" fill="#166534" text-anchor="middle">side-wall minimum-ventilation inlets (used for chicks in weeks 1–3, when tunnel mode is too cold)</text>
+    <line x1="255" y1="52" x2="345" y2="52" stroke="#166534" stroke-width="1.2" stroke-dasharray="5,4"/>
+    <line x1="455" y1="52" x2="545" y2="52" stroke="#166534" stroke-width="1.2" stroke-dasharray="5,4"/>
+    <line x1="655" y1="52" x2="745" y2="52" stroke="#166534" stroke-width="1.2" stroke-dasharray="5,4"/>
+    <text x="80" y="192" font-size="10" fill="#334155">PAD END (west — near gate/support zone)</text>
+    <text x="980" y="192" font-size="10" fill="#334155" text-anchor="end">FAN END (east — away from houses; discharge zone kept clear)</text>
+  </svg>
+  <div class="cap">Fig. 3 — Tunnel ventilation concept (plan view). Hot-weather mode: all air enters through wet pads at one end and exits through the fan wall at the other, moving at 2.5–3 m/s over the birds (wind-chill cooling). Cold/brooding mode: fans mostly off; small side inlets + minimum-vent fans on timers.</div>
+  </div>
+
+  <h3>Civil construction specification (indicative)</h3>
+  <table>
+    <tr><th style="width:22%">Element</th><th>Specification (to be confirmed with the expert &amp; the integrator’s shed standard)</th></tr>
+    <tr><td>Foundation &amp; columns</td><td>RCC/steel columns on isolated footings @ ~10 ft c/c; design for fan-wall and winch loads; cyclonic wind check per region</td></tr>
+    <tr><td>Plinth &amp; floor</td><td>Plinth ~2 ft above ground; rammed fill; 3–4 in PCC floor with smooth finish, gentle slope to wash-out points; rat-proof plinth band</td></tr>
+    <tr><td>Side walls</td><td>2 ft masonry parapet + sealed curtain or insulated sandwich panel up to 8 ft eave; EC mode requires near-air-tight sealing</td></tr>
+    <tr><td>Roof</td><td>Pre-engineered/tubular trusses; 0.47–0.5 mm colour-coated GI sheet; 25 mm foil-faced insulation (glass wool/XLPE bubble); sealed ridge; 3 ft overhangs</td></tr>
+    <tr><td>End walls</td><td>Pad-end: pad frames + anteroom + door; fan-end: masonry/panel wall with fan openings + service door; both air-sealed</td></tr>
+    <tr><td>Height</td><td>Eave ~8 ft, ridge ~14 ft; optional false ceiling at 8–9 ft to cut cooled air volume</td></tr>
+    <tr><td>Doors &amp; sealing</td><td>Anteroom double-door entry with footbath; all penetrations (cables, pipes) sealed; bird- and rat-netting on every opening</td></tr>
+    <tr><td>Aprons &amp; drains</td><td>3 ft concrete apron around shed; storm drain; separate wash-water soak pit (no discharge to open land)</td></tr>
+  </table>
+</div>
+
+<!-- ==================== 6. EQUIPMENT ==================== -->
+<div class="section" id="s6">
+  <h2><span class="secno">§6</span> EC Equipment Schedule (for 350 ft × 45 ft, ~24,000 birds)</h2>
+  <p>Quantities below come from standard tunnel-ventilation sizing: cross-section ≈ 45 ft × 8 ft (with false ceiling) = 360 sq ft; at 550 ft/min tunnel velocity the shed needs ≈ 198,000 CFM; a 50-inch fan delivers ~22,000–24,000 CFM at 0.05″ static pressure → 9 fans + margin. Pad area = CFM ÷ 375 ft/min face velocity ≈ 530 sq ft → 2 × (45 ft × 6 ft). <strong>Have the expert and at least two vendors re-check this sizing for your final drawings.</strong></p>
+  <table>
+    <tr><th style="width:26%">Item</th><th style="width:14%" class="num">Qty (indicative)</th><th style="width:38%">Specification notes</th><th style="width:22%" class="num">Indicative cost (₹ lakh)</th></tr>
+    <tr><td>Exhaust fans 50″</td><td class="num">10</td><td>Belt-drive, ~1.1 kW each, with shutters &amp; safety grill; +2 × 36″ minimum-vent fans</td><td class="num">7.5 – 10</td></tr>
+    <tr><td>Evaporative cooling pads</td><td class="num">~540 sq ft</td><td>6″ cellulose (150 mm), frames, distribution pipe, pump, sump, bleed-off valve</td><td class="num">5 – 7</td></tr>
+    <tr><td>Environment controller</td><td class="num">1 (+backup)</td><td>Staged fan control, temp+RH sensors (4–6 nos), static pressure sensor, alarm auto-dialer/SIM, curtain fail-safe drop</td><td class="num">2.5 – 4</td></tr>
+    <tr><td>Automatic pan feeding</td><td class="num">3 lines × 350 ft</td><td>~420 pans (55–65 birds/pan), hoppers, augers, winching; feed sensor end-switch</td><td class="num">10 – 13</td></tr>
+    <tr><td>Nipple drinking system</td><td class="num">4 lines × 350 ft</td><td>~2,400 nipples (10–12 birds/nipple) with drip cups, pressure regulators, medicator/doser, winching</td><td class="num">5.5 – 7</td></tr>
+    <tr><td>Brooding equipment</td><td class="num">for 24,000 chicks</td><td>Gas brooders/canopies (~1 per 800–1,000 chicks in brooding zone), chick guards, supplementary mini-drinkers &amp; trays</td><td class="num">2.5 – 3.5</td></tr>
+    <tr><td>Curtains / panels &amp; winches</td><td class="num">lot</td><td>Side sealing system, brooding partition curtains to shrink house for chicks</td><td class="num">2 – 3</td></tr>
+    <tr><td>Foggers (optional)</td><td class="num">lot</td><td>High-pressure fogging as pad supplement for extreme dry heat</td><td class="num">0.8 – 1.5</td></tr>
+    <tr><td>Weighing &amp; tools</td><td class="num">lot</td><td>Bird weighing scale, feed weighing, sprayer, flame gun, wheelbarrows, crates</td><td class="num">1 – 1.5</td></tr>
+    <tr class="totalrow"><td>Equipment subtotal</td><td class="num"></td><td></td><td class="num">≈ 37 – 50</td></tr>
+  </table>
+  <div class="callout keep">
+    <h4>Vendor rules of thumb (test these against his experience — Part B §5)</h4>
+    <ul>
+      <li>Buy fans/pads/controller from a vendor with a <strong>service technician stationed within a few hours</strong> — a controller failure with full-grown birds in May is measured in dead birds per hour.</li>
+      <li>Insist on <strong>spares on site</strong>: 1 spare fan motor, belts, pump, sensors, controller relay card.</li>
+      <li>Ask which brands the local integrator’s supervisors already know how to service — compatibility with company field staff matters more than a fancy import.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ==================== 7. UTILITIES ==================== -->
+<div class="no-break-before" id="s7">
+  <h2 style="margin-top:6mm"><span class="secno">§7</span> Utilities — Water, Power, Backup</h2>
+  <table>
+    <tr><th style="width:18%">Utility</th><th>Design basis (peak summer, 24,000 birds)</th></tr>
+    <tr><td><strong>Water — drinking</strong></td><td>~300–350 mL/bird/day at market age in heat ≈ 8,000–8,500 L/day</td></tr>
+    <tr><td><strong>Water — cooling pads</strong></td><td>3,000–6,000 L/day evaporation in dry peak summer (region-dependent)</td></tr>
+    <tr><td><strong>Water — washing &amp; misc.</strong></td><td>~1,000–2,000 L/day average; heavy at cleanout</td></tr>
+    <tr><td><strong>Total water</strong></td><td><strong>Design for 15,000–20,000 L/day</strong>; borewell yield test mandatory; 2 × 10,000 L storage (≥1 day buffer); water test for TDS, hardness, nitrates, coliforms</td></tr>
+    <tr><td><strong>Power — connected load</strong></td><td>Fans ~12 kW + pad &amp; water pumps ~3 kW + feeders/winches ~3 kW + lighting ~2 kW + misc ≈ <strong>~25 kW → apply for 30–35 kW three-phase</strong>; check poultry tariff category in your state</td></tr>
+    <tr><td><strong>Backup</strong></td><td>82.5 kVA silent DG with AMF (auto-start) panel — <em>auto-start is non-negotiable</em>; alarm auto-dialer + battery backup on controller; weekly no-load test run logged</td></tr>
+    <tr><td><strong>Consumption</strong></td><td>Indicative ₹3–5 per bird per batch in electricity (summer ≫ winter) → ₹0.7–1.2 lakh/batch; one of the three numbers to validate hardest in the meeting</td></tr>
+  </table>
+</div>
+
+<!-- ==================== 8. PROJECT COST ==================== -->
+<div class="section" id="s8">
+  <h2><span class="secno">§8</span> Project Cost Estimate (Capex)</h2>
+  <table>
+    <tr><th style="width:6%">#</th><th style="width:42%">Head</th><th class="num" style="width:17%">Indicative (₹ lakh)</th><th style="width:35%">Basis / notes</th></tr>
+    <tr><td>1</td><td>Site development — levelling, fencing, gate, internal road, wheel dip</td><td class="num">7 – 9</td><td>Plot-condition dependent</td></tr>
+    <tr><td>2</td><td>Shed civil work — 15,750 sq ft</td><td class="num">44 – 55</td><td>@ ~₹280–350 / sq ft incl. plinth, floor, walls, structure, roof</td></tr>
+    <tr><td>3</td><td>Roof insulation + sealing + false ceiling (optional)</td><td class="num">4 – 6</td><td>25 mm foil-faced; ceiling sheeting if adopted</td></tr>
+    <tr><td>4</td><td>EC equipment package (fans, pads, controller, curtains, foggers)</td><td class="num">18 – 26</td><td>From §6</td></tr>
+    <tr><td>5</td><td>Feeding + drinking systems + brooding</td><td class="num">18 – 24</td><td>From §6</td></tr>
+    <tr><td>6</td><td>Electricals — wiring, panels, lighting, earthing, connection charges / transformer share</td><td class="num">6 – 9</td><td>Transformer distance can move this a lot</td></tr>
+    <tr><td>7</td><td>DG set 82.5 kVA with AMF panel</td><td class="num">7 – 9</td><td>Silent canopy; fuel tank</td></tr>
+    <tr><td>8</td><td>Borewell, pumps, 2 × 10,000 L tanks, plumbing, water treatment (chlorinator)</td><td class="num">4 – 6</td><td>Yield test before civil start</td></tr>
+    <tr><td>9</td><td>Support buildings — anteroom, office/feed store, generator room, worker room, toilet</td><td class="num">6 – 8</td><td>~900 sq ft total simple construction</td></tr>
+    <tr><td>10</td><td>Biosecurity — footbaths, sprayers, compost pits, netting</td><td class="num">1.5 – 2.5</td><td></td></tr>
+    <tr><td>11</td><td>Tools, scales, crates, misc. equipment</td><td class="num">1 – 1.5</td><td></td></tr>
+    <tr><td>12</td><td>Preliminary &amp; pre-operative — approvals, insurance yr-1, interest during construction</td><td class="num">3 – 4</td><td></td></tr>
+    <tr><td>13</td><td>Contingency ~5%</td><td class="num">6 – 7</td><td></td></tr>
+    <tr class="totalrow"><td></td><td>Total fixed capital</td><td class="num">≈ 125 – 145</td><td>≈ ₹520–600 per bird of capacity</td></tr>
+    <tr><td>14</td><td>Working capital — litter, first batches’ power/labour/fuel buffer</td><td class="num">5 – 6</td><td>Company pays only after each batch settles</td></tr>
+    <tr class="totalrow"><td></td><td>Total project outlay</td><td class="num">≈ ₹1.30 – 1.50 crore</td><td></td></tr>
+  </table>
+  <div class="callout keep">
+    <h4>Cross-check in the meeting (Part B §4, §5, §12)</h4>
+    <p>Ask what he actually paid per sq ft of civil work and per bird of equipment, in which year, and what he would cut or add today. Quotes from vendors routinely run 15–25% above what experienced farmers negotiate. Also ask whether his integrator has a mandatory shed/equipment standard that changes this estimate.</p>
+  </div>
+</div>
+
+<!-- ==================== 9. OPERATING PLAN ==================== -->
+<div class="section" id="s9">
+  <h2><span class="secno">§9</span> Operating Plan — Batch Cycle, Brooding &amp; Benchmarks</h2>
+  <div class="twocol">
+    <h3>The batch cycle (~55–60 days per cycle → 5.5–6 batches/year)</h3>
+    <table>
+      <tr><th style="width:28%">Phase</th><th>What happens</th></tr>
+      <tr><td>Day −14 to −1</td><td>Litter removal &amp; sale, wash, disinfect (2-stage), fumigate, rodent control, repairs, fresh litter, pre-heat house, water-line sanitation</td></tr>
+      <tr><td>Day 0</td><td>Chick placement — house pre-heated to 32–33 °C floor temp; feed on paper; check crop-fill at 8 &amp; 24 hrs</td></tr>
+      <tr><td>Week 1</td><td>Brooding in partitioned zone; minimum ventilation only; target 7-day weight ≈ 4.2–4.5× day-old weight (~180–195 g)</td></tr>
+      <tr><td>Weeks 2–3</td><td>Expand house progressively; step temperature down ~2.5–3 °C/week; vaccination per company schedule</td></tr>
+      <tr><td>Weeks 4–6</td><td>Tunnel ventilation as heat load grows; daily weighing; feed intake tracking; lifting window ~day 38–45 at 2.2–2.5 kg</td></tr>
+      <tr><td>Lifting</td><td>Usually at night, over 1–4 days; supervise weighment jointly; get signed weight slips</td></tr>
+    </table>
+    <h3>Brooding / house temperature guide (typical — follow company chart)</h3>
+    <table>
+      <tr><th>Age</th><th class="num">Target temp</th><th class="num">RH</th></tr>
+      <tr><td>Day 1–3</td><td class="num">32–33 °C</td><td class="num">60–70%</td></tr>
+      <tr><td>Day 4–7</td><td class="num">30–31 °C</td><td class="num">60–70%</td></tr>
+      <tr><td>Week 2</td><td class="num">28–29 °C</td><td class="num">50–70%</td></tr>
+      <tr><td>Week 3</td><td class="num">26–27 °C</td><td class="num">50–70%</td></tr>
+      <tr><td>Week 4</td><td class="num">24–25 °C</td><td class="num">50–70%</td></tr>
+      <tr><td>Week 5+</td><td class="num">21–24 °C (effective, incl. wind-chill)</td><td class="num">50–70%</td></tr>
+    </table>
+    <h3>Performance benchmarks a good EC farm should hit</h3>
+    <table>
+      <tr><th>Metric</th><th class="num">Target</th><th>Notes</th></tr>
+      <tr><td>Livability</td><td class="num">≥ 96%</td><td>Mortality ≤ 4%; week-1 mortality ≤ 1%</td></tr>
+      <tr><td>Average live weight</td><td class="num">2.2 – 2.5 kg</td><td>At 38–45 days, per company lifting plan</td></tr>
+      <tr><td>FCR</td><td class="num">1.55 – 1.70</td><td>Feed kg ÷ live weight kg; the incentive driver</td></tr>
+      <tr><td>Production index (PEF/EEF)</td><td class="num">330 – 400+</td><td>= (Livability% × avg wt kg) ÷ (age days × FCR) × 100</td></tr>
+      <tr><td>Batches per year</td><td class="num">5.5 – 6</td><td>Depends on company placement, not just your readiness</td></tr>
+    </table>
+    <h3>Daily routine (indicative, 2 workers + owner/supervisor)</h3>
+    <ul class="small" style="font-size:9.6pt">
+      <li><strong>05:30–08:00</strong> walk the house, remove mortality &amp; record, check crop fill/behaviour, flush water lines, check controller readings vs thermometer.</li>
+      <li><strong>Through day</strong> feed line checks, litter turning/de-caking wet spots, pad &amp; fan checks, water meter reading, minimum-vent settings by age.</li>
+      <li><strong>17:00–19:00</strong> second full walk-through, weigh sample birds (fixed weekdays), record feed delivered/consumed, check alarms &amp; generator readiness.</li>
+      <li><strong>Night</strong> at least one night check; alarm auto-dialer tested weekly. EC farming is a 24×7 duty — this is a lifestyle question for the meeting (Part B §10).</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ==================== 10. ECONOMICS ==================== -->
+<div class="section" id="s10">
+  <h2><span class="secno">§10</span> Revenue Model &amp; Profitability (Indicative Scenarios)</h2>
+  <p><strong>Per-batch arithmetic (base case):</strong> 24,000 chicks placed × 96% livability = 23,040 birds × 2.30 kg = <strong>~53,000 kg live weight</strong>. At a growing charge of ₹8.50/kg → gross ₹4.50 lakh/batch, before incentives.</p>
+  <table>
+    <tr><th style="width:34%">Per-batch item</th><th class="num" style="width:16%">Conservative</th><th class="num" style="width:16%">Base</th><th class="num" style="width:16%">Good</th><th style="width:18%">Driver</th></tr>
+    <tr><td>Growing charge (₹/kg)</td><td class="num">8.00</td><td class="num">8.50</td><td class="num">9.00</td><td>Company &amp; region</td></tr>
+    <tr><td>Live weight produced (kg)</td><td class="num">50,000</td><td class="num">53,000</td><td class="num">56,000</td><td>Livability × weight</td></tr>
+    <tr><td>Gross growing income (₹ lakh)</td><td class="num">4.00</td><td class="num">4.50</td><td class="num">5.04</td><td></td></tr>
+    <tr><td>FCR / performance incentive (₹ lakh)</td><td class="num">0.00</td><td class="num">0.35</td><td class="num">0.85</td><td>₹0–1.5/kg extra</td></tr>
+    <tr class="subhead"><td colspan="5">Farmer’s batch expenses</td></tr>
+    <tr><td>Labour (2 workers + relief, ~2 months)</td><td class="num">0.75</td><td class="num">0.70</td><td class="num">0.70</td><td>Local wages</td></tr>
+    <tr><td>Electricity + DG fuel</td><td class="num">1.30</td><td class="num">1.00</td><td class="num">0.85</td><td>Season, tariff class</td></tr>
+    <tr><td>Litter / bedding</td><td class="num">0.60</td><td class="num">0.55</td><td class="num">0.50</td><td>Rice-husk price</td></tr>
+    <tr><td>Brooding fuel (LPG/coal)</td><td class="num">0.40</td><td class="num">0.35</td><td class="num">0.30</td><td>Season</td></tr>
+    <tr><td>Disinfectants, meds share, repairs, misc.</td><td class="num">0.50</td><td class="num">0.45</td><td class="num">0.40</td><td></td></tr>
+    <tr class="totalrow"><td>Total batch expenses (₹ lakh)</td><td class="num">3.55</td><td class="num">3.05</td><td class="num">2.75</td><td></td></tr>
+    <tr><td>Litter/manure sale per batch (₹ lakh)</td><td class="num">0.40</td><td class="num">0.60</td><td class="num">0.90</td><td>~60–70 t/batch; local demand</td></tr>
+    <tr class="totalrow"><td>Net per batch (₹ lakh)</td><td class="num">0.85</td><td class="num">2.40</td><td class="num">4.04</td><td></td></tr>
+    <tr><td>Batches per year</td><td class="num">5.0</td><td class="num">5.5</td><td class="num">6.0</td><td>Company placement!</td></tr>
+    <tr class="totalrow"><td>Net income per year, before EMI &amp; depreciation (₹ lakh)</td><td class="num">≈ 4.3</td><td class="num">≈ 13.2</td><td class="num">≈ 24.2</td><td></td></tr>
+    <tr><td>Simple payback on ₹1.35 cr</td><td class="num">not viable</td><td class="num">≈ 10 yrs</td><td class="num">≈ 5.5 yrs</td><td></td></tr>
+  </table>
+  <div class="callout red keep">
+    <h4>Read this table honestly</h4>
+    <p>The spread between scenarios is enormous — that is the true nature of this business. EC contract farming is <strong>only</strong> a good long-term investment if your district’s real numbers sit at “Base” or better: growing charge ≥ ₹8.5/kg <em>with</em> incentives actually paid, ≥5.5 batches placed per year, and summer power under control. If local reality is the “Conservative” column, the project does not service a loan. <strong>The whole purpose of Part B, Section 12 is to find out which column your district lives in — from a man who has the settlement sheets to prove it.</strong></p>
+  </div>
+  <p class="small">Sensitivity: every ₹0.5/kg on the growing charge ≈ ₹1.4–1.6 lakh/year; every extra batch/year ≈ ₹2–4 lakh; every ₹0.5 lakh of summer electricity per batch ≈ ₹2.7 lakh/year. Litter sale income is real but variable — many farmers fund their litter purchase entirely from litter sale.</p>
+</div>
+
+<!-- ==================== 11. FUNDING ==================== -->
+<div class="no-break-before" id="s11">
+  <h2 style="margin-top:6mm"><span class="secno">§11</span> Funding Plan &amp; Subsidy Schemes</h2>
+  <div class="twocol">
+    <table>
+      <tr><th>Source</th><th>Indicative structure</th></tr>
+      <tr><td>Own margin</td><td>25–35% of project cost (₹35–50 lakh) — banks rarely go below this for first-time poultry borrowers</td></tr>
+      <tr><td>Term loan</td><td>65–75%, tenor 7–9 years with 6–12 month moratorium; secured by land + shed + equipment</td></tr>
+      <tr><td>Working capital</td><td>Small cash-credit limit or own funds (₹5–6 lakh)</td></tr>
+    </table>
+    <h3>Schemes to investigate (rules change — verify current status)</h3>
+    <ul>
+      <li><strong>AHIDF</strong> (Animal Husbandry Infrastructure Development Fund): 3% interest subvention, credit guarantee cover; check current eligibility for contract broiler grow-out sheds.</li>
+      <li><strong>NABARD refinance / state poultry venture capital schemes:</strong> some states run capital subsidy or interest subsidy for poultry sheds; district animal husbandry office is the entry point.</li>
+      <li><strong>Integrator-linked finance:</strong> some companies arrange equipment on instalments or give bank comfort letters confirming the contract — ask which companies do this locally (Part B §2).</li>
+      <li><strong>Insurance:</strong> shed + equipment fire/storm policy is standard; bird insurance usually not needed (company owns birds) — but confirm who insures against mass mortality events.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ==================== 12. TIMELINE ==================== -->
+<div class="section" id="s12">
+  <h2><span class="secno">§12</span> Implementation Timeline (Indicative ~6 Months to First Chick)</h2>
+  <table>
+    <tr><th style="width:14%">Stage</th><th style="width:56%">Key actions</th><th style="width:30%">Gate before next stage</th></tr>
+    <tr><td>Month 0</td><td>Meet 2–3 integrators’ area managers; visit 2+ working EC farms; borewell yield test; soil check; finalise company &amp; get shed spec + draft contract</td><td>Written confirmation of growing rate, placement frequency, shed standard</td></tr>
+    <tr><td>Month 1</td><td>Approvals (panchayat NOC, SPCB check, electricity application); final drawings; contractor + equipment vendor selection (2–3 quotes each); loan sanction</td><td>Loan sanctioned; power feasibility confirmed</td></tr>
+    <tr><td>Months 2–4</td><td>Civil works: earthwork, plinth, columns, roof, floor, walls, support buildings; water system</td><td>Shed weather-tight; power connection released</td></tr>
+    <tr><td>Month 4–5</td><td>Equipment installation: fans, pads, controller, feed/water lines; DG commissioning; full-load trial of tunnel mode; staff hiring &amp; training</td><td>48-hr dry run of all systems incl. auto-start &amp; alarms</td></tr>
+    <tr><td>Month 5–6</td><td>Wash-disinfect-fumigate; litter in; company pre-placement audit; pre-heat</td><td>Company placement confirmation</td></tr>
+    <tr><td>Month 6</td><td><strong>First chick placement</strong></td><td>—</td></tr>
+  </table>
+  <p class="small">Ask the expert how long his build actually took and where it got stuck (usually: electricity connection, or the company delaying first placement). Budget interest-during-construction accordingly.</p>
+</div>
+
+<!-- ==================== 13. LICENCES ==================== -->
+<div class="no-break-before" id="s13">
+  <h2 style="margin-top:6mm"><span class="secno">§13</span> Licences, Approvals &amp; Compliance (India — verify state rules)</h2>
+  <table>
+    <tr><th style="width:34%">Item</th><th>Notes</th></tr>
+    <tr><td>Gram panchayat / local body NOC &amp; building permission</td><td>First stop; also settles any local objection early</td></tr>
+    <tr><td>Land-use status</td><td>Poultry is generally treated as an agricultural activity, but conversion/permission rules differ by state — confirm in writing</td></tr>
+    <tr><td>State Pollution Control Board</td><td>Consent requirements kick in above state-specific bird thresholds; even below threshold, follow manure &amp; wastewater norms; keep the compost pit compliant</td></tr>
+    <tr><td>Electricity connection</td><td>3-phase 30–35 kW; ask specifically about the tariff category for poultry in your state — this decides lakhs/year</td></tr>
+    <tr><td>Groundwater / borewell permission</td><td>Needed in CGWA-notified blocks; check your block’s status</td></tr>
+    <tr><td>DG set norms</td><td>Emission/noise-compliant canopy set; registration where required</td></tr>
+    <tr><td>Insurance</td><td>Shed + equipment (fire, storm); worker accident cover</td></tr>
+    <tr><td>Records</td><td>Daily mortality register, feed register, medicine/vaccine log, visitor log — the company will audit these anyway; they also protect you in disputes</td></tr>
+  </table>
+</div>
+
+<!-- ==================== 14. RISKS ==================== -->
+<div class="section" id="s14">
+  <h2><span class="secno">§14</span> Risk Register &amp; Mitigation</h2>
+  <table>
+    <tr><th style="width:22%">Risk</th><th style="width:10%" class="num">Severity</th><th style="width:34%">What actually happens</th><th style="width:34%">Mitigation</th></tr>
+    <tr><td>Power failure in tunnel mode</td><td class="num">Extreme</td><td>With full-grown birds at 35 °C+, fans off for 20–30 minutes can kill thousands; the farmer usually bears this loss</td><td>Auto-start DG (AMF) + tested weekly; alarm auto-dialer to 3 phones; curtain fail-safe drop; spare fan motor on site</td></tr>
+    <tr><td>Disease outbreak (RD/IBD/CRD, E. coli)</td><td class="num">High</td><td>A broken vaccination or biosecurity lapse can push mortality past penalty slabs and kill the batch margin</td><td>Strict entry control, single-age flock, 12–15 day cleanout, footbaths, rodent control, company vet protocol followed exactly</td></tr>
+    <tr><td>Company under-placement</td><td class="num">High</td><td>Shed sits empty between batches; fixed costs and EMI continue</td><td>Choose integrator with local track record of 5.5–6 placements/yr; get placement commitment language; keep a second company relationship warm</td></tr>
+    <tr><td>Payment delay / settlement disputes</td><td class="num">Medium–High</td><td>Weighment shrinkage disputes, deduction surprises, 30–60 day delays hurt working capital</td><td>Joint weighment with signed slips; understand every deduction line before signing contract; talk to that company’s existing farmers</td></tr>
+    <tr><td>Summer performance collapse</td><td class="num">Medium</td><td>Undersized fans/pads → heat stress → FCR and mortality penalties precisely in the season EC was built for</td><td>Do not shave ventilation sizing to save capex; validate sizing with expert + 2 vendors (§6)</td></tr>
+    <tr><td>Chick / feed quality variation</td><td class="num">Medium</td><td>Poor DOC batches or delayed feed deliveries wreck FCR through no fault of yours</td><td>Record everything at delivery (weights, counts, feed bags); photo evidence; raise complaints same-day in writing</td></tr>
+    <tr><td>Neighbour / odour complaints</td><td class="num">Medium</td><td>Fly and smell complaints can escalate to panchayat action</td><td>Fan discharge away from houses, dry litter management, prompt mortality composting, tree screen</td></tr>
+    <tr><td>Bird flu (AI) events</td><td class="num">Low freq / high impact</td><td>Movement bans or culling zones stop placements regardless of contract</td><td>Cash buffer ≥ 6 months of EMI; insurance where available; strict biosecurity is also your best defence</td></tr>
+    <tr><td>Interest rate / tariff increases</td><td class="num">Medium</td><td>EMI and power are the two big fixed outflows</td><td>Fix realistic DSCR at sanction; pursue agricultural tariff classification; solar top-up later if roof suitable</td></tr>
+  </table>
+</div>
+
+<!-- ==================== 15. ASSUMPTIONS ==================== -->
+<div class="no-break-before" id="s15">
+  <h2 style="margin-top:6mm"><span class="secno">§15</span> Assumptions &amp; Disclaimer</h2>
+  <div class="twocol">
+    <ul class="small" style="font-size:9.8pt">
+      <li>All financial figures are indicative planning estimates for India, 2025–26, and vary significantly by state, district, integrator and vendor. They are stated to make the meeting concrete, not to promise outcomes.</li>
+      <li>Plot assumed roughly rectangular (~440 × 148.5 ft) with road access on the short (west) side; the layout must be re-drawn for the real plot before any construction.</li>
+      <li>Capacity assumes ~0.65 sq ft/bird EC stocking; the integrator’s standard may differ and governs.</li>
+      <li>Scenario economics assume the company reliably places batches; no allowance made for a first “learning batch” performing below benchmarks (in practice, budget for it).</li>
+      <li>No revenue assumed from anything other than growing charges, incentives and litter sale.</li>
+      <li>This document is not legal, financial or veterinary advice. Contract terms must be reviewed before signing; scheme eligibility (AHIDF etc.) must be confirmed with the bank and department at the time of application.</li>
+    </ul>
+    <div class="callout green keep">
+      <h4>What would make this a “go”</h4>
+      <p>Written rate + placement confirmation from a reputable integrator · two independent farmers confirming Base-case-or-better economics · water and power feasibility proven on the plot · funding closed with ≥25–30% own margin and 6 months’ EMI buffer · and the expert’s answers in Part B not raising any red flag you cannot mitigate.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PART B DIVIDER ==================== -->
+<div class="part">
+  <div class="pno">Part B</div>
+  <h2>Meeting Question Bank — 161 Questions</h2>
+  <p>Organised in build-and-run order. Tick questions as you cover them and write answers on the ruled lines. The italic line under each question is for you — it says why the question matters and what a weak answer sounds like. Don’t read it aloud.</p>
+</div>
+
+<div id="qbank">
+
+<!-- ========== Q SECTION 1 ========== -->
+<div class="qsec no-break-before" style="margin-top:0">
+  <h2><span class="secno">B1</span> His Experience &amp; Credibility</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">How many years have you been growing broilers, and how many of those in EC sheds?</div><div class="why">You want ≥3 years EC specifically, through at least 2 full summers.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What is your current setup — how many sheds, what size, how many birds per batch?</div><div class="why">Anchors every later number he gives you to a known scale.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Which company are you contracted with now, and which ones have you worked with before? Why did you switch?</div><div class="why">Switch reasons reveal the real problems: payment delays, placement gaps, rate cuts.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Did you start directly with EC or convert from open sheds? If you converted — what pushed you?</div><div class="why">Converters can quantify the EC-vs-open difference from their own books.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How many batches have you completed in EC in total? Roughly how many were loss-making or break-even?</div><div class="why">An honest grower admits bad batches. “Never had a bad batch” is a red flag on the whole conversation.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Can I visit your farm on a normal working day — ideally during a batch, and once during cleanout?</div><div class="why">Fix a date now. A working visit teaches more than this whole meeting.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Do you advise or help new farmers set up? On what basis — friendship, consultancy fee, or commission from vendors?</div><div class="why">Not disqualifying, but you must know whose interest he represents when he names vendors.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">If you were starting today, from zero, with my budget — would you still choose EC broiler contract farming? Why or why not?</div><div class="why">Ask early, watch the hesitation, then ask again at the end of the meeting.</div><div class="ans"></div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 2 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B2</span> Choosing the Company &amp; Contract Terms</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">Which integrators actually place EC batches in our district, and how would you rank them for a new farmer?</div><div class="why">National brand names mean nothing if their local branch under-places or pays late.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What growing charge per kg are EC farmers here getting right now? What was it 2 and 5 years ago?</div><div class="why">The trend matters as much as the level — is the rate keeping up with power and wage costs?</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How exactly is the incentive calculated — FCR grid, production index, mortality slabs? Can you show me a real calculation?</div><div class="why">The incentive grid is where EC earns its premium; get the actual table, not a summary.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is there a minimum growing charge (floor) that protects me in a bad batch that wasn’t my fault?</div><div class="why">Some companies have MGC clauses; some don’t. This one clause changes your downside massively.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How many batches per year does your company actually place in your shed? Any gaps — which months?</div><div class="why">5.5–6 real placements is the business case; 4 placements quietly kills it.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Does the contract oblige the company to place a minimum number of batches per year? What happens if they don’t?</div><div class="why">Usually it doesn’t — which means placement depends on relationship and shed reputation. Confirm.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Who bears the loss if birds die from a power or equipment failure on my side? Where is that written?</div><div class="why">Almost always the farmer. You need to hear it plainly to take the generator/alarm spend seriously.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What is the mortality allowance before penalties start, and how steep are the penalties?</div><div class="why">Typical slabs start around 4–5%; know the exact grid.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">If lifting is delayed beyond the target age, who pays for the extra feed days and the FCR damage?</div><div class="why">Late lifting wrecks FCR through no fault of yours; good contracts adjust the standard for age.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How is live weight measured at lifting — whose scale, who supervises, how is shrinkage handled, and what disputes have you had?</div><div class="why">Weighment is the classic dispute zone. His war stories tell you what to insist on.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What deductions appear on settlement sheets that new farmers don’t expect?</div><div class="why">Condemned birds, feed “shortage”, crate handling, catching charges — surface all of them now.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Does the company inspect and approve the shed before signing? What did they force you to change or buy?</div><div class="why">Some integrators mandate equipment specs or brands — this can move your capex by lakhs.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Can a new farmer negotiate the rate, or is it take-it-or-leave-it? What negotiating power does an EC shed give?</div><div class="why">EC sheds are scarce and companies compete for them in many districts — find out if that’s true here.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What are the exit/termination terms — notice period, and what happens to a batch in progress?</div><div class="why">You are building a ₹1.3+ crore asset against a contract that may allow 30-day exit. Understand the mismatch.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Have you ever been without placements for more than a month? What did you do?</div><div class="why">His coping strategy (second company, direct farming) is your contingency plan.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">If I want, will you introduce me to your company’s area manager — and to one more company’s?</div><div class="why">Two competing term-sheets is the single best negotiating position a new farmer can have.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 3 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B3</span> Payments, Settlement &amp; Cash Flow</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">How many days after final lifting do you actually receive payment? Worst delay you’ve faced?</div><div class="why">Contract may say 7–10 days; reality may be 30–45. Plan working capital on reality.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Can I see your last three settlement sheets and have you walk me through every line?</div><div class="why">The single most valuable 15 minutes of this meeting. Photograph them if he permits.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">On a typical batch, what do you spend from your own pocket before any money comes in?</div><div class="why">Litter + power + labour + fuel ≈ ₹2.5–3.5 lakh at this scale. Verify against §10 of my DPR.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you manage cash between batches, especially across a placement gap?</div><div class="why">Reveals the real working-capital buffer needed — usually more than DPRs admit.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is payment by cheque/NEFT against invoice? Any TDS or deductions I should understand for tax?</div><div class="why">Also ask how he treats this income for tax — poultry income treatment matters at this scale.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Have you ever had a settlement dispute? How was it resolved and how long did it take?</div><div class="why">The dispute process (and whether farmers ever win) tells you the real power balance.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Do incentives get paid with the settlement or later? Have promised incentives ever been quietly dropped?</div><div class="why">Incentive slippage is a known complaint. His answer calibrates the “Base” scenario in my DPR.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What does the company do if a batch fails from their side — bad chicks or bad feed? Any compensation ever paid?</div><div class="why">Listen for a concrete story, not a policy. Concrete stories are how you learn the truth.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What annual income, honestly, should a well-run 24,000-bird EC farm here expect — after all farm expenses, before loan EMI?</div><div class="why">Compare directly against §10: conservative 4, base 13, good 24 (₹ lakh). Which column is real here?</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">And what does a badly-run one earn? What separates the two — in one sentence?</div><div class="why">His one sentence is usually the most valuable line of the whole meeting. Write it down word for word.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 4 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B4</span> Shed Construction — Lessons from His Build</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">What are your shed’s exact dimensions, and what would you change about them today?</div><div class="why">Width, height and false-ceiling decisions are nearly irreversible. Learn from his regrets.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What did your civil work cost per sq ft, and in which year? What would it cost today?</div><div class="why">Calibrates my §8 estimate of ₹280–350/sq ft. Ask what’s included in his figure.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Did you use a contractor experienced in poultry sheds, or a general contractor? How did that go?</div><div class="why">Poultry-specific details (air-tightness, fan wall, plinth) are where general contractors fail.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Where did your builder cut corners that you only discovered later?</div><div class="why">Classic answers: leaky sealing, weak fan-wall framing, floor slope wrong, no rat-proofing.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Roof insulation — what type did you use, and is it worth the money in our climate?</div><div class="why">Insulation is ~₹4–6 lakh in my plan; his summer controller data answers whether it pays.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">False ceiling — do you have one? Would you add one today?</div><div class="why">Cuts cooled-air volume and improves tunnel velocity; adds cost and maintenance. Local verdict needed.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Solid side walls or curtains? What fails first, and what happens in a storm?</div><div class="why">Curtain failure in a storm = instant environment loss. Ask about his worst weather night.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What plinth height did you build, and has water ever entered the shed?</div><div class="why">Wet litter events trace back to plinth and drainage decisions made on day one.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What floor finish do you have, and how does it hold up to washing and disinfection every cycle?</div><div class="why">A floor that pits or ponds harbours disease between batches.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Which direction do your pads and fans face, and how did you decide? Any odour or neighbour issues?</div><div class="why">Cross-check against my Fig. 1 assumptions — fans away from houses, long axis east–west.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How air-tight is your shed really? How do you find and fix leaks?</div><div class="why">Static-pressure test knowledge separates real EC operators from open-shed thinking in an EC building.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What did you build around the shed — anteroom, store, generator room, worker room? Sizes?</div><div class="why">Validates my §4 area statement; support buildings are commonly under-planned.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How long did your construction actually take, and what caused delays?</div><div class="why">Compare to my §12 six-month plan; the usual culprits are power connection and monsoon.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Will you share your civil contractor’s and shed fabricator’s contacts — and should I use them?</div><div class="why">A proven local team is worth more than a cheaper quote.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 5 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B5</span> EC Equipment &amp; Vendors</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">Which brands do you run — fans, pads, controller, feeders, drinkers — and what did the full package cost?</div><div class="why">Calibrates §6 (₹37–50 lakh). Ask per-item, not just the total.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">If you re-bought today, what would you buy again and what would you replace with something else?</div><div class="why">The “would not buy again” list is pure gold — usually pads, pumps or a fragile controller.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How many exhaust fans for a 350 × 45 ft shed with ~24,000 birds — does my plan of 10 × 50″ plus 2 minimum-vent fans look right for our summers?</div><div class="why">Direct check on my §6 sizing. If he says more, ask him to show the arithmetic.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What has failed on your farm — fans, belts, pumps, sensors, controller — and how often?</div><div class="why">Builds your spares list and maintenance budget.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">When equipment fails at 2 a.m. with grown birds inside — what exactly happens, step by step, on your farm?</div><div class="why">You’re testing whether his emergency drill is real: alarms → who wakes → manual overrides → vendor call.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How fast does your equipment vendor’s service technician actually arrive? Is there anyone competent nearby?</div><div class="why">Service radius should drive vendor choice more than a 5% price difference.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Which spares do you keep on site at all times?</div><div class="why">Typical minimum: fan motor, belts, pad pump, thermostat/sensor, controller relay card, nipples, fuses.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Which environment controller do you trust, and what are its weaknesses? Can I photograph your settings chart?</div><div class="why">His age-wise settings chart is a ready-made operating manual for your first batches.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you set minimum ventilation for chicks in weeks 1–3? Biggest mistake new EC farmers make there?</div><div class="why">Classic killer: chilling chicks with tunnel fans, or suffocating them by over-sealing. Get his rule of thumb.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Cooling pads — how long do they last, how do you stop scaling/algae, and what does replacement cost?</div><div class="why">Pad life (3–7 years) depends on water quality and bleed-off discipline; a hidden recurring cost.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Do you use foggers in addition to pads? When do pads alone fail in our climate?</div><div class="why">In humid regions pads lose effect exactly when you need them; his answer is region-specific truth.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Feed pans or manual feeding at my scale — is 3 lines × 350 ft with ~420 pans correct? Nipples at 10–12 birds each?</div><div class="why">Direct check of §6 quantities.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is there any equipment you’d call a waste of money for a first-time EC farmer?</div><div class="why">Vendors will happily sell you automation you can’t maintain yet.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 6 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B6</span> Power &amp; Backup</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">What is your sanctioned load and which tariff category are you on? What does poultry qualify for in this state?</div><div class="why">Agricultural vs commercial tariff can be a 2–3× difference on the biggest operating cost.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What is your electricity bill for a peak-summer batch versus a winter batch? Can I see the bills?</div><div class="why">One of the three make-or-break numbers. My plan assumes ₹0.85–1.3 lakh/batch — correct it with his bills.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How many power cuts do you get, how long, and in which months?</div><div class="why">Sets your DG fuel budget and how battle-tested your auto-start must be.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What generator capacity do you run for your shed size, and does it start automatically? Ever failed to start?</div><div class="why">Validates my 82.5 kVA + AMF spec. His failure story defines your weekly test discipline.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What alarm system do you use — auto-dialer, siren, app? What woke you the last time it mattered?</div><div class="why">A real incident story proves the system works; “never needed it” usually means untested.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How much diesel does a bad summer month cost you?</div><div class="why">DG fuel is the forgotten line item in most projections.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Has anyone here added solar? Does it make sense with our tariff and the fans’ daytime load?</div><div class="why">Fans peak exactly when solar peaks — worth exploring once the farm is stable.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 7 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B7</span> Water</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">How much water does your farm consume per day at peak — birds plus pads plus washing?</div><div class="why">Checks my 15,000–20,000 L/day design basis for 24,000 birds.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Have you ever run short of water in summer? What’s your backup?</div><div class="why">A tanker plan sounds fine until pads are drinking 5,000 L/day in May.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Did you test your water quality? What TDS/hardness is acceptable for birds and for pads?</div><div class="why">Hard water scales pads and nipples; high TDS hurts performance. Get his local thresholds.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Do you chlorinate or sanitise drinking water? How do you clean water lines between batches and during a batch?</div><div class="why">Biofilm in nipple lines is a silent FCR killer; his routine becomes your SOP.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Raised storage tanks or pressure pumps for the nipple lines? What happens when the pump fails?</div><div class="why">Gravity-fed backup (my §4 plan) is cheap insurance — confirm it works in practice.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you track daily water intake, and what does a sudden drop tell you?</div><div class="why">Water-intake drop is the earliest disease alarm — 24–48 hours before mortality shows it.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 8 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B8</span> Chicks &amp; Brooding</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">How do you judge a chick lot at delivery — what do you check in the first 10 minutes?</div><div class="why">Weight (38–42 g+), uniformity, alertness, navel healing, legs. His checklist becomes yours.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Can you refuse or record a complaint against a visibly poor chick lot? Have you done it — what happened?</div><div class="why">Your FCR and mortality — and hence income — start with DOC quality you don’t control.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Which hatcheries does your company draw from, and do some send consistently better chicks?</div><div class="why">Farmers know hatchery reputations; companies won’t volunteer this.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What day-old weight and 7-day weight do you target? What does a bad 7-day weight predict?</div><div class="why">7-day weight ≈ 4.2–4.5× DOC weight; miss it and the whole batch underperforms.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Walk me through your brooding setup — partition area, heaters per 1,000 chicks, paper feeding, mini-drinkers.</div><div class="why">Compare with my §6 brooding list before I buy anything.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What brooding fuel do you use (LPG/coal/electric) and what does brooding cost per batch, summer vs winter?</div><div class="why">My §10 assumes ₹0.3–0.4 lakh/batch — correct it for this climate.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you pre-heat the shed before placement, and to what floor temperature?</div><div class="why">Cold floors chill chicks from below — a classic first-batch mistake in concrete-floor EC sheds.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you check crop fill at 8 and 24 hours, and what do you do if it’s poor?</div><div class="why">Crop-fill scoring is the earliest measure of a good start; ask him to demonstrate on the farm visit.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What week-1 mortality is normal here, and at what number do you call the company vet?</div><div class="why">≤1% is the usual norm; his escalation threshold shows how hands-on the company really is.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">In an EC shed, how do you give chicks fresh air without chilling them in weeks 1–2?</div><div class="why">Minimum ventilation is the hardest EC skill; his settings are worth photographing.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">When do you start expanding the brooding area, and how do you avoid piling/smothering during moves?</div><div class="why">Practical craft that never appears in manuals.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What’s the single biggest brooding mistake you made in your early batches?</div><div class="why">Cheaper to learn from his ₹2 lakh mistake than repeat it.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 9 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B9</span> Feed &amp; Medication</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">How does feed arrive — bags or bulk? How often, and how much buffer stock do you hold?</div><div class="why">Feed delivery gaps force fasting or panic calls; sizing my store room depends on this.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Pre-starter, starter, finisher — what quantities per 1,000 birds does your company budget, and do you ever run short?</div><div class="why">“Feed shortage” deductions at settlement often trace to sloppy receiving records — see next question.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you record feed receipts and prove consumption at settlement? Ever been charged for feed you dispute?</div><div class="why">Weigh and log every delivery. His dispute stories define your record-keeping SOP.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you judge feed quality batch to batch? What do you do when a lot looks bad or birds go off feed?</div><div class="why">You can’t change the feed, but you can document and escalate — ask how that works in practice.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you store feed against rats, moisture and mould, especially in monsoon?</div><div class="why">Mouldy feed = mycotoxins = FCR and health damage you will be blamed for.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What daily feed-intake pattern tells you a flock is on track, and what drop makes you act?</div><div class="why">Feed intake with water intake is your daily dashboard; get his numbers by age.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Who administers vaccines — your team or company staff? Which route (water/spray/eye-drop) at which ages?</div><div class="why">Vaccination failures show up two weeks later as “your fault”. Know the split of responsibility.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Which medicines/supplements do you buy from your own pocket, and what does that cost per batch?</div><div class="why">Contracts say company pays for medicine; farmers everywhere quietly top up. Get the real figure.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Do you use a water medicator/doser? Any dosing mistakes that taught you something?</div><div class="why">Medicator discipline (flush lines after!) is small craft with big consequences.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How strict is your company on antibiotic use and withdrawal periods before lifting?</div><div class="why">Residue violations are becoming serious; a company that polices this is a good long-term partner.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 10 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B10</span> Daily Operations &amp; Labour</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">How many workers do you employ per shed, what do you pay, and do they live on the farm?</div><div class="why">My §10 assumes 2 workers ≈ ₹0.7 lakh/batch. Night presence is essential in EC — confirm arrangements.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How hard is it to find and keep poultry workers here? What makes them stay?</div><div class="why">Labour churn mid-batch is an underrated operational risk.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What does your own daily routine look like during a batch — hours on the farm, and can you ever travel?</div><div class="why">This is the lifestyle question. EC farming ties an owner down; hear it from him before committing.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Can this farm be run with a manager while I keep another income, or does the owner’s eye decide profit?</div><div class="why">Most experienced growers say the owner’s daily walk-through is worth ₹1–2/kg. Test that belief.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What records do you keep daily, and what does the company audit?</div><div class="why">Mortality, feed, water, temperature, medicine logs — ask to photograph his formats.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you weigh birds through the batch — sample size, frequency, and how close is your estimate to the lifting weight?</div><div class="why">Accurate weekly weighing drives feed planning and lifting negotiation.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What happens at lifting night — how many catchers, whose crates, what do you supervise personally?</div><div class="why">Catching damage and weighment are where a good batch leaks money in its final hours.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you manage litter during the batch — turning, de-caking, wet spots under drinkers?</div><div class="why">Litter condition is the best single proxy for house management quality.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What do you do in the 12–15 day gap between batches, step by step?</div><div class="why">His cleanout SOP (wash → disinfect → fumigate → rest → fresh litter) becomes your §9 checklist.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What tasks do new farmers underestimate the most?</div><div class="why">Open question — the answers are usually about nights, records and the cleanout grind.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 11 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B11</span> Health, Biosecurity &amp; Mortality</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">Which diseases actually hit farms in this area, and in which seasons?</div><div class="why">Local disease pressure (RD, IBD, CRD, E. coli, coccidiosis) is a district fact no manual can give you.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What does a normal mortality curve look like week by week in your shed?</div><div class="why">Typical: slightly higher week 1, low weeks 2–4, watch weeks 5–6 (ascites/heat). Get his numbers.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What was your worst disease outbreak — what caused it, what did it cost, and what changed afterwards?</div><div class="why">The “what changed afterwards” is the transferable lesson.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What biosecurity do you actually practise daily — not the textbook version?</div><div class="why">Footbaths that are actually charged, visitor rules actually enforced, dedicated footwear. Watch for honesty.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you dispose of daily mortality, and does composting attract complaints or predators?</div><div class="why">Validates my compost-pit plan in §4 — placement, lining, alternating pits.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you control rats, wild birds and flies?</div><div class="why">Rats eat feed and carry disease between batches; netting and bait-station layout is learned craft.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How quickly does the company vet respond when you report a problem? Good enough?</div><div class="why">Vet responsiveness is a big differentiator between integrators.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Do you send birds for post-mortem when mortality spikes? Where?</div><div class="why">A grower who uses post-mortems manages by evidence, not guesswork — learn his channel.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do you handle heat-stress days beyond design — say 44 °C+? What extra steps, and what losses anyway?</div><div class="why">Even EC sheds have limits; his extreme-day playbook is your insurance manual.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Ascites and leg problems in fast-growing birds — do you see them, and how do you manage growth rate?</div><div class="why">Feed-restriction/lighting programs in weeks 2–3 are a subtle skill with direct FCR impact.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Has bird flu ever affected operations here — movement bans, culling zones, placement stops?</div><div class="why">Even one regional AI event per decade must be in your cash-buffer planning.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">If my farm is within a kilometre of another poultry farm, how much does that actually matter?</div><div class="why">Textbook says ≥1 km; reality in dense poultry belts differs. His view affects my site scoring in §3.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 12 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B12</span> Real Performance &amp; Money — His Numbers</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">What FCR do you achieve, batch after batch? Best ever, worst ever?</div><div class="why">Target 1.55–1.70 in EC. Consistency matters more than the best number.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What average lifting weight and age does your company prefer, and how does that affect your rate?</div><div class="why">2.2 vs 2.5 kg programs have different FCR standards and incentive maths.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What production index (PEF/EEF) do you hit, and at what number do incentives really start paying?</div><div class="why">Cross-check the incentive grid from B2 against his achieved numbers.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What is your all-in expense per batch — labour, power, litter, fuel, misc — for your shed size?</div><div class="why">Scale his figure to 24,000 birds and correct my §10 expense block.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What did your last full year actually net you, before EMI? And the year before?</div><div class="why">The direct calibration of my §10 scenarios. Settlement sheets from B3 back this up.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What do you earn from litter/manure per batch, and who buys it?</div><div class="why">60–70 tonnes/batch at this scale; my plan assumes ₹0.4–0.9 lakh — get the local market truth.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Tell me about your worst batch ever — numbers included. What exactly went wrong?</div><div class="why">The downside case, from someone who lived it, is the most important input to my loan decision.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">And your best batch — what lined up to make it happen?</div><div class="why">Shows the realistic upside and what “everything right” actually requires.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What total capital did you put in, and how long did it truly take to recover?</div><div class="why">Compare with my §10 payback of 6–10 years. If he says 3, ask to see how; if he says 12, ask why.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Did you take a bank loan? Which bank, what rate, and how was the sanction experience for a poultry project?</div><div class="why">A poultry-friendly branch and a supportive manager are worth identifying by name.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Did you get any subsidy — AHIDF, NABARD, state scheme? What worked, what was paperwork pain?</div><div class="why">Scheme reality vs scheme brochure. His experience saves months.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is your shed and equipment insured? What does it cost and has a claim ever paid out?</div><div class="why">Claims experience is the only real test of an insurance policy.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How did your first two batches perform versus your current batches?</div><div class="why">Sets my expectation for a learning curve — budget for below-benchmark early batches.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">If power, feed prices and rates stay as they are — is EC contract growing still worth entering in 2026?</div><div class="why">The industry-cycle question. Listen for whether rates have kept pace with costs.</div><div class="ans"></div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 13 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B13</span> Risks, Failures &amp; Red Flags</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">Who in this area built a broiler farm — EC or open — and regrets it? What exactly went wrong?</div><div class="why">Failure post-mortems beat success stories for decision value. Get names/situations, not generalities.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Of the farms that failed, how many failed because of the company versus their own management?</div><div class="why">Separates contract risk from execution risk — they need different defences.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What is the single biggest risk in this business that outsiders never see coming?</div><div class="why">Open question; common answers are placement gaps, night discipline, or the summer power bill.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Have integrators here ever cut growing rates or worsened terms after farmers invested? What recourse did farmers have?</div><div class="why">Asset-specific investment against a short-notice contract is THE structural risk of this model.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is there a farmers’ association or WhatsApp group of contract growers here? Can I join before deciding?</div><div class="why">Collective knowledge (and collective bargaining) — plus a way to verify everything from this meeting.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What would make you exit this business? Have you ever come close?</div><div class="why">His exit triggers are your risk register, from the inside.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">If a batch is wiped out mid-cycle — disease or accident — what exactly happens: money, next placement, morale?</div><div class="why">Walk through the worst case mechanically before it can happen to you.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What should be in my emergency fund before I place my first chick?</div><div class="why">Test my plan of working capital + 6 months of EMI buffer.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Knowing me and my situation — what worries you most about ME doing this?</div><div class="why">Invite personal criticism. The answer may be the most useful sentence of the day.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What percentage of new EC farms here would you say are doing well after 3 years?</div><div class="why">A base rate for success in your district — the number every investor should ask and few do.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 14 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B14</span> My 1.5-Acre Plan — His Verdict (show him Part A)</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">For my 1.5 acres, what shed size and capacity would YOU build — is my 350 × 45 ft / ~24,000-bird plan right?</div><div class="why">He may push smaller (easier management) or larger (companies prefer bigger EC units). Hear the reasoning.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is one big shed better than two smaller ones on my land, all things considered?</div><div class="why">My §3 concludes one shed; two sheds allow multi-age flexibility but break biosecurity spacing on 1.5 acres.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Review my layout (Fig. 1) — gate, road, shed orientation, pad/fan direction, compost pit. What would you move?</div><div class="why">Ten minutes of his pen on my drawing is worth the whole meeting.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Review my capex table (§8) — which lines are wrong for our district, high or low?</div><div class="why">Have him initial the corrected numbers; this becomes v2 of the DPR.</div><div class="ans"></div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is my ventilation sizing right for our worst summer week — 10 × 50″ fans, ~540 sq ft of pads (§6)?</div><div class="why">Under-sizing here is the most expensive mistake available to me.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Which company would you send me to first for THIS plan, and what rate should I not accept below?</div><div class="why">A concrete anchor number for negotiations.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is my 6-month build timeline (§12) realistic here? What will actually delay me?</div><div class="why">Local answers: electricity connection lead time, monsoon months to avoid pouring concrete, vendor queues.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What approvals did YOU actually need — panchayat, pollution board, electricity, borewell (§13)?</div><div class="why">The lived compliance list for this district, versus my generic one.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Will you walk my land with me before I finalise drawings? What would you charge / how can I make it worth your time?</div><div class="why">Close the meeting with a concrete next step and respect his time honestly.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">If I proceed, would you mentor my first two batches — daily phone access, weekly visit? On what terms?</div><div class="why">First-batch mentorship is the cheapest insurance a new EC farmer can buy.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">And bluntly: with everything you now know about my land, money and situation — should I do this?</div><div class="why">Ask it plainly. Then be quiet and let him talk.</div><div class="ans"></div><div class="ans"></div></div>
+  </div>
+</div>
+
+<!-- ========== Q SECTION 15 ========== -->
+<div class="qsec">
+  <h2><span class="secno">B15</span> Long-Term View &amp; Scaling</h2>
+  <div class="qcols">
+    <div class="q"><div class="qt">After how many stable batches would you expand, and would you expand here or buy land elsewhere?</div><div class="why">My 1.5 acres is effectively single-shed; expansion means new land — factor that into the long-term plan.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Where is the broiler industry here headed — are integrators pushing everyone toward EC? What happens to rates as EC supply grows?</div><div class="why">Today’s EC premium may compress as more EC sheds come up; his read on the cycle matters.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Do experienced farmers ever move from contract to independent (own chicks, own marketing)? Should that ever be my path?</div><div class="why">Independent farming has market risk but full margin; usually only sensible at scale with market access.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What automation or upgrades gave you the best return after the basic setup?</div><div class="why">Sequencing capex: what to buy on day one versus after batch 10.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Is there value in adding related income — manure processing, or leasing shed downtime?</div><div class="why">Small side streams that improve payback without distracting from the core.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">How do rising feed and electricity costs shape the next 10 years of contract growing?</div><div class="why">The structural squeeze question — growing charges must track costs or margins erode.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">What would a 10-year successful version of my farm look like, in your eyes?</div><div class="why">Paints the destination: batches/yr, performance level, debt cleared, second unit or not.</div><div class="ans"></div></div>
+    <div class="q"><div class="qt">Who else should I talk to before deciding — farmers, vendors, company staff? Will you make the introductions?</div><div class="why">Leave the meeting with a named list; triangulate everything you heard today.</div><div class="ans"></div></div>
+  </div>
+</div>
+
+</div><!-- /qbank -->
+
+<!-- ==================== SCORECARD ==================== -->
+<div class="section" id="scorecard">
+  <h2><span class="secno">§C</span> After the Meeting — Go / No-Go Scorecard</h2>
+  <p>Fill this the same evening. Rule: <strong>every “must-pass” item needs a YES backed by evidence</strong> (a document, a settlement sheet, a second farmer’s confirmation) — not by optimism. Three or more “unsure” answers = you are not ready to decide; go gather the missing facts first.</p>
+  <table class="score">
+    <tr><th class="crit">Criterion</th><th style="width:10%">Type</th><th style="width:8%">YES</th><th style="width:8%">NO</th><th style="width:8%">Unsure</th><th>Evidence / note</th></tr>
+    <tr><td>Growing charge for EC here is ≥ ₹8.5/kg with a real, paid incentive grid (seen on settlement sheets)</td><td>Must-pass</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>At least one integrator reliably places ≥ 5.5 batches/year in EC sheds in this district</td><td>Must-pass</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Two independent working EC farmers confirm Base-case-or-better annual net (₹13 lakh+ at my scale)</td><td>Must-pass</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Summer electricity per batch confirmed from real bills, and my tariff category is clear</td><td>Must-pass</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>My plot passes: water yield tested, 3-phase power feasible, all-weather access, distance norms OK</td><td>Must-pass</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Funding closes with ≥ 25–30% own margin PLUS working capital PLUS 6 months’ EMI buffer</td><td>Must-pass</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>I (or a committed family member) can genuinely give this 24×7 attention for the first year</td><td>Must-pass</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Capex validated: expert’s corrected numbers keep total within ₹1.5 crore including contingency</td><td>Strong</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>A proven local civil contractor and equipment vendor (with fast service) are identified</td><td>Strong</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>The expert (or equivalent) agrees to mentor my first two batches</td><td>Strong</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Contract reviewed: mortality slabs, lifting-delay clause, deductions, exit terms all understood</td><td>Strong</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Failure base-rate acceptable: most new EC farms here are doing well after 3 years</td><td>Strong</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Labour plan realistic: 2 on-site workers findable at budgeted wages</td><td>Supporting</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Subsidy/scheme path (AHIDF/state) checked with the bank — bonus, not a dependency</td><td>Supporting</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+    <tr><td>Neighbour/odour risk assessed; fan direction and compost plan will not create disputes</td><td>Supporting</td><td class="box">☐</td><td class="box">☐</td><td class="box">☐</td><td></td></tr>
+  </table>
+  <div class="callout green keep">
+    <h4>Decision rule</h4>
+    <p><strong>GO</strong> — all 7 must-pass = YES with evidence, and ≥3 of 5 “strong” = YES. &nbsp;•&nbsp; <strong>WAIT</strong> — must-pass items unsure → assign each a fact-finding action and a date; revisit in 4–6 weeks. &nbsp;•&nbsp; <strong>NO-GO</strong> — any must-pass is a firm NO that cannot be fixed (rate too low, placements unreliable, funding thin). Walking away from a ₹1.4 crore mistake is a profit, not a failure.</p>
+  </div>
+  <h3>Committed next steps (fill before leaving the meeting)</h3>
+  <table>
+    <tr><th style="width:52%">Action</th><th style="width:24%">Who</th><th style="width:24%">By date</th></tr>
+    <tr><td>Visit his farm on a working day</td><td></td><td></td></tr>
+    <tr><td>Meet integrator area manager #1 (name: ____________ )</td><td></td><td></td></tr>
+    <tr><td>Meet integrator area manager #2 (name: ____________ )</td><td></td><td></td></tr>
+    <tr><td>Borewell yield test + water quality test on my plot</td><td></td><td></td></tr>
+    <tr><td>Electricity feasibility enquiry (load + tariff category)</td><td></td><td></td></tr>
+    <tr><td>Bank discussion — project loan appetite + AHIDF/scheme check</td><td></td><td></td></tr>
+    <tr><td>Expert walks my 1.5 acres; layout marked on ground</td><td></td><td></td></tr>
+    <tr><td>Get 2 civil quotes + 2 equipment quotes against §6/§8 specs</td><td></td><td></td></tr>
+  </table>
+</div>
+
+<!-- ==================== NOTES ==================== -->
+<div class="section" id="notes">
+  <h2><span class="secno">§D</span> Meeting Notes</h2>
+  <div class="noteslines">
+    <div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div>
+    <div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div><div class="nl"></div>
+    <div class="nl"></div><div class="nl"></div>
+  </div>
+  <h3 style="margin-top:8mm">Contacts collected</h3>
+  <table>
+    <tr><th style="width:28%">Name</th><th style="width:26%">Role (vendor / farmer / company)</th><th style="width:22%">Phone</th><th style="width:24%">Note</th></tr>
+    <tr><td>&nbsp;</td><td></td><td></td><td></td></tr>
+    <tr><td>&nbsp;</td><td></td><td></td><td></td></tr>
+    <tr><td>&nbsp;</td><td></td><td></td><td></td></tr>
+    <tr><td>&nbsp;</td><td></td><td></td><td></td></tr>
+    <tr><td>&nbsp;</td><td></td><td></td><td></td></tr>
+    <tr><td>&nbsp;</td><td></td><td></td><td></td></tr>
+    <tr><td>&nbsp;</td><td></td><td></td><td></td></tr>
+    <tr><td>&nbsp;</td><td></td><td></td><td></td></tr>
+  </table>
+</div>
+
+</body>
+</html>
