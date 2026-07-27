@@ -572,34 +572,71 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     lines.append(" 8.1 Detected AI/ML Components")
     lines.append("")
 
+    try:
+        from multiagent.agents.ai_agents.ai_fingerprint import _is_inference_path
+    except Exception:
+        def _is_inference_path(path: str) -> bool:  # type: ignore
+            low = (path or "").lower()
+            return any(
+                x in low
+                for x in ("/chat", "/completions", "/generate", "/messages",
+                          "/ask", "/predict", "/embedding", "/inference", "/run")
+            )
+
+    def _path_of(url: str) -> str:
+        try:
+            from urllib.parse import urlparse
+            return urlparse(url).path or url
+        except Exception:
+            return url
+
     ml_eps = list(ai_fp.get("ml_endpoints") or [])
     auth_eps = ai_fp.get("auth_required_paths") or []
     auth_urls = set()
+    auth_rows = []
     for a in auth_eps:
         if isinstance(a, dict):
             u = a.get("endpoint") or a.get("url")
             if u:
                 auth_urls.add(u)
+                auth_rows.append((u, a.get("status_code", 401)))
         elif a:
             auth_urls.add(str(a))
+            auth_rows.append((str(a), 401))
 
-    if ml_eps or auth_urls:
-        lines.append("ML Inference / Chat Surfaces:")
-        shown = set()
-        for ep in ml_eps[:8]:
-            shown.add(ep)
-            tag = " [AUTH REQUIRED]" if ep in auth_urls else ""
+    chat_eps = []
+    meta_eps = []
+    seen = set()
+    for ep in ml_eps:
+        if not ep or ep in seen:
+            continue
+        seen.add(ep)
+        row = (ep, " [AUTH REQUIRED]" if ep in auth_urls else "")
+        if _is_inference_path(_path_of(ep)):
+            chat_eps.append(row)
+        else:
+            meta_eps.append(row)
+    for u, st in auth_rows:
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        tag = f" [AUTH REQUIRED, HTTP {st}]"
+        if _is_inference_path(_path_of(u)):
+            chat_eps.append((u, tag))
+        else:
+            meta_eps.append((u, tag))
+
+    if chat_eps:
+        lines.append("Chat / Inference Surfaces:")
+        for ep, tag in chat_eps[:8]:
             lines.append(f"- `{ep}`{tag}")
-        for a in auth_eps[:8]:
-            if isinstance(a, dict):
-                u = a.get("endpoint") or a.get("url") or ""
-                st = a.get("status_code", 401)
-            else:
-                u, st = str(a), 401
-            if u and u not in shown:
-                lines.append(f"- `{u}` [AUTH REQUIRED, HTTP {st}]")
         lines.append("")
-    else:
+    if meta_eps:
+        lines.append("Auth-gated API / Metadata Surfaces:")
+        for ep, tag in meta_eps[:8]:
+            lines.append(f"- `{ep}`{tag}")
+        lines.append("")
+    if not chat_eps and not meta_eps:
         lines.append("No concrete ML/chat endpoints confirmed yet.")
         lines.append("")
 

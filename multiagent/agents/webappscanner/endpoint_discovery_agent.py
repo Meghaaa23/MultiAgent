@@ -404,21 +404,32 @@ class EndpointDiscoveryAgent:
                 except Exception:
                     pass
 
-            # Soft-404 / SPA catch-all: HTML shell matching calibrated lengths.
-            # Never demote API/GraphQL/swagger surfaces — GET may return an HTML
-            # playground/shell that looks like the SPA but is still a real route.
+            # Soft-404 / SPA catch-all for HTML shells.
+            # API/GraphQL paths: demote only when body is a bare SPA shell with
+            # no JSON and no GraphQL UI markers (playground / __schema).
             path_hint = ep.get("url") or ""
+            ct_l = (ep.get("content_type") or "").lower()
             if (
                 self._soft_mode
-                and not _is_api_surface_path(path_hint)
-                and "text/html" in (ep.get("content_type") or "").lower()
+                and "text/html" in ct_l
                 and looks_like_spa_shell(body)
+                and self._body_matches_soft404(len(body))
             ):
-                if self._body_matches_soft404(len(body)):
-                    ep["interesting"]   = False
+                if _is_api_surface_path(path_hint):
+                    if any(m in body_lower for m in _GRAPHQL_UI_MARKERS):
+                        ep["interesting"] = True
+                        ep["api_surface"] = True
+                        ep["verification"] = "GraphQL UI markers detected"
+                        return ep
+                    ep["interesting"] = False
                     ep["spa_catch_all"] = True
-                    ep["verification"]  = "SPA/soft-404 catch-all (body matches baseline)"
+                    ep["excluded"] = True
+                    ep["verification"] = "SPA/soft-404 catch-all (body matches baseline)"
                     return ep
+                ep["interesting"] = False
+                ep["spa_catch_all"] = True
+                ep["verification"] = "SPA/soft-404 catch-all (body matches baseline)"
+                return ep
 
             # Directory listing
             if "index of /" in body_lower or "<title>directory listing" in body_lower:

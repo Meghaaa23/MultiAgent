@@ -124,7 +124,7 @@ LIVE_SURFACE_EVIDENCE_KEYS = {
 
 _INFERENCE_PATH_RE = re.compile(
     r"/(?:chat|completions?|generate|messages|ask|predict(?:ion)?|"
-    r"embeddings?|inference|invoke|run)\b",
+    r"embeddings?|inference|invoke|run|agents?|convos?|conversations?)\b",
     re.I,
 )
 
