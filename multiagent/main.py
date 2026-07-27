@@ -226,17 +226,23 @@ async def web_search_wrapper(query: str) -> List[Dict]:
 # THREAT MODELING AGENT
 # ============================================================================
 
+threat_modeling_init_error = None
 try:
     active_client, _ = get_active_client()
     threat_modeling_agent = ThreatModelingAgent(
-        mongodb_client=mongo_client,
+        mongodb_client=mongo_client,  # may be None when Atlas offline — agent still starts
         openai_client=active_client,
         vectorstore=vectorstore,
         web_search_function=web_search_wrapper,
     )
     logger.info("✓ Threat Modeling Agent initialized")
 except Exception as e:
-    logger.warning(f"Threat Modeling Agent init failed: {e}")
+    threat_modeling_init_error = f"{type(e).__name__}: {e}"
+    logger.warning(
+        "Threat Modeling Agent init failed: %s\n%s",
+        e,
+        traceback.format_exc(),
+    )
     threat_modeling_agent = None
 
 logger.info("✓ All agents initialized")
@@ -469,6 +475,7 @@ async def health_check():
         "agents":          "ready",
         "autogen":         "enabled",
         "threat_modeling": "available" if threat_modeling_agent else "not initialized",
+        "threat_modeling_init_error": threat_modeling_init_error,
         "web_scanning":    "enabled",
         "kb_required_for_scan": False,
         "scan_vector_kb": (
@@ -852,7 +859,10 @@ async def query_stream(request: StreamQueryRequest):
             await asyncio.sleep(0)
 
             if not threat_modeling_agent:
-                yield _format_sse("error", {"message": "Agent not initialized"})
+                detail = threat_modeling_init_error or "unknown init failure — check server logs"
+                yield _format_sse("error", {
+                    "message": f"Agent not initialized: {detail}",
+                })
                 return
 
             is_security = threat_modeling_agent.is_security_query(question)
@@ -1105,7 +1115,8 @@ async def scan_web_application(request: Request):
         if not target_url:
             raise HTTPException(status_code=400, detail="Missing target_url")
         if not threat_modeling_agent:
-            raise HTTPException(status_code=503, detail="Scanner not available")
+            detail = threat_modeling_init_error or "unknown init failure — check server logs"
+            raise HTTPException(status_code=503, detail=f"Scanner not available: {detail}")
 
         logger.info(f"SCAN: {target_url}")
 
@@ -1156,7 +1167,8 @@ async def threat_modeling_query(request: Request):
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
         if not threat_modeling_agent:
-            raise HTTPException(status_code=503, detail="Agent not available")
+            detail = threat_modeling_init_error or "unknown init failure — check server logs"
+            raise HTTPException(status_code=503, detail=f"Agent not available: {detail}")
 
         if not threat_modeling_agent.is_security_query(question):
             return JSONResponse({

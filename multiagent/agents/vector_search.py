@@ -1,7 +1,6 @@
 # agents/vector_search.py
 
 from typing import List, Dict, Optional
-from sentence_transformers import SentenceTransformer
 
 
 class VectorSearch:
@@ -15,25 +14,30 @@ class VectorSearch:
         self.db_name = "multiagentllm"
         self.collection_name = collection_name
         self._disabled = mongodb_client is None
+        self.embedding_model = None
 
         if self._disabled:
             self.db = None
             self.collection = None
-            self.embedding_model = None
             print("⚠ VectorSearch disabled — MongoDB client unavailable")
             return
 
         self.db = self.mongo_client[self.db_name]
         self.collection = self.db[self.collection_name]
-
-        # Use same local model as RAG collection
-        self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
+        # Lazy-load SentenceTransformer on first embed (scan path never needs it)
         print(f"✓ VectorSearch initialized: {self.db_name}.{self.collection_name}")
-        print("  Using local embeddings: all-MiniLM-L6-v2")
+        print("  Embedding model will load on first search")
+
+    def _ensure_embedding_model(self):
+        if self.embedding_model is not None:
+            return
+        from sentence_transformers import SentenceTransformer
+        self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        print("  Loaded local embeddings: all-MiniLM-L6-v2")
 
     def get_embedding(self, text: str) -> List[float]:
         """Generate embedding using local model"""
+        self._ensure_embedding_model()
         embedding = self.embedding_model.encode(text, convert_to_numpy=True)
         return embedding.tolist()
 
