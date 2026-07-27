@@ -71,7 +71,13 @@ class AuthGatedChatHandler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path in ("/api/chat", "/api/ask", "/api/messages",
                     "/v1/chat/completions", "/api/chat/completions"):
-            self._json(401, {"message": "Unauthorized"})
+            data = json.dumps({"message": "Unauthorized"}).encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
         self._html()
 
@@ -297,6 +303,104 @@ def test_bare_405_not_meaningful():
     assert AIFingerprintAgent._is_meaningful_405(
         {"allow": "POST, OPTIONS", "content-type": "text/plain"}, ""
     ) is True
+
+
+def test_blanket_403_matching_canary_not_meaningful():
+    from multiagent.agents.ai_agents.ai_fingerprint import ProbeCanary
+    canary = ProbeCanary(get_status=301, post_status=403, post_body_prefix="Forbidden")
+    assert AIFingerprintAgent._is_meaningful_auth(
+        403, {"content-type": "text/html"}, "<html>nope</html>", canary,
+    ) is False
+    # Differential auth challenge still counts.
+    assert AIFingerprintAgent._is_meaningful_auth(
+        401, {"www-authenticate": "Bearer", "content-type": "application/json"},
+        '{"error":"invalid_api_key"}', canary,
+    ) is True
+    # Status differs from canary POST ⇒ real auth gate.
+    assert AIFingerprintAgent._is_meaningful_auth(
+        401, {"content-type": "application/json"}, '{"message":"Unauthorized"}',
+        ProbeCanary(get_status=200, post_status=200, post_body_prefix="<html>"),
+    ) is True
+
+
+def test_protocol_path_only_does_not_claim_framework():
+    agent = AIFingerprintAgent(run_behavioral_probes=False)
+    # Seed-path membership alone must not become OpenAI-compatible @ 0%.
+    result = agent._identify_framework(
+        "", "", {},
+        ["/v1/chat/completions", "/v1/completions", "/api/chat/completions"],
+        [],
+    )
+    assert result.get("framework") in ("", None)
+    assert float(result.get("framework_confidence") or 0) == 0.0
+
+
+class MarketingAiTitleWith403WafCatchAll(BaseHTTPRequestHandler):
+    """Freshworks-style FP: AI marketing copy + redirect-all GET + blanket POST 403."""
+
+    SHELL = (
+        "<!DOCTYPE html><html><head>"
+        "<title>FreshDemo: Unified Service Operations for the AI era</title>"
+        "<meta name='description' content='AI-powered service software'>"
+        "</head><body><h1>Welcome</h1></body></html>"
+    )
+
+    def _html(self):
+        data = self.SHELL.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _redirect(self):
+        self.send_response(301)
+        self.send_header("Location", "/")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _forbid(self):
+        self.send_response(403)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "9")
+        self.end_headers()
+        self.wfile.write(b"Forbidden")
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path in ("/", ""):
+            self._html()
+            return
+        self._redirect()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        self._forbid()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_marketing_site_403_waf_catchall_not_ai():
+    port = _free_port()
+    srv = _run_server(MarketingAiTitleWith403WafCatchAll, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["is_ai_powered"] is False
+        assert result["ml_endpoints"] == []
+        assert result.get("framework") in ("", None)
+        assert not any(
+            e.get("key") == "ml_endpoint_401_403"
+            for e in result.get("evidence_items") or []
+        )
+        assert result.get("auth_required_paths") in ([], None) or len(
+            result.get("auth_required_paths") or []
+        ) == 0
+    finally:
+        srv.shutdown()
 
 
 def test_generated_sitemap_not_ai_path():

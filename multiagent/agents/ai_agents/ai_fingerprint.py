@@ -13,6 +13,35 @@ from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Negative-control path — must never exist on a real target.
+SCANNER_CANARY_PATH = (
+    "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
+)
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+@dataclass
+class ProbeCanary:
+    """Negative-control baseline for seed-path probes.
+
+    CDN/WAF marketing sites often return the same status for every unknown
+    path (301 catch-all) or every POST (blanket 403). Anything matching the
+    canary is noise, not an auth-gated AI surface.
+    """
+    get_status: int = 0
+    post_status: int = 0
+    get_body_prefix: str = ""
+    post_body_prefix: str = ""
+
+    @property
+    def redirect_catch_all(self) -> bool:
+        return self.get_status in _REDIRECT_STATUSES
+
+    @property
+    def post_waf_catch_all(self) -> bool:
+        return self.post_status in (401, 403)
+
 
 EVIDENCE_WEIGHTS: Dict[str, int] = {
     "openapi_schema":           18,
@@ -423,9 +452,11 @@ class FingerprintReport:
             "is_ai_powered":          self.is_ai_powered,
             "confidence":             self.confidence,
             "evidence_score":         self.evidence_score,
-            "framework":              self.framework,
+            "framework":              self.framework if self.framework_confidence > 0 else "",
             "framework_confidence":   round(self.framework_confidence * 100, 1),
-            "framework_signals":      self.framework_signals,
+            "framework_signals":      (
+                self.framework_signals if self.framework_confidence > 0 else []
+            ),
             "protocol":               self.protocol,
             "inference_server":       self.inference_server,
             "infra_layer":            self.infra_layer,
@@ -469,11 +500,14 @@ class FingerprintReport:
         print(f"  AI Fingerprint Report")
         print(f"{'='*w}")
         print(f"  Confidence       : {self.confidence.upper()} (score={self.evidence_score})")
-        if self.framework:
+        if self.framework and self.framework_confidence > 0:
             pct = f"{self.framework_confidence*100:.0f}%"
             print(f"  Framework        : {self.framework}  (confidence {pct})")
             if self.framework_signals:
                 print(f"  Matched signals  : {', '.join(self.framework_signals)}")
+        elif self.framework and self.framework_confidence <= 0:
+            # Path-only / unconfirmed protocol labels must not look authoritative.
+            pass
         if self.protocol:
             print(f"  Protocol         : {self.protocol}")
         if self.infra_layer and self.infra_layer != self.framework:
@@ -1007,6 +1041,73 @@ class AIFingerprintAgent:
                     return True
         return False
 
+    @staticmethod
+    def _is_meaningful_auth(
+        status: int,
+        headers_low: Dict,
+        body: str,
+        canary: Optional[ProbeCanary] = None,
+    ) -> bool:
+        """401/403 counts as auth-gated AI only when it differs from WAF noise.
+
+        Blanket CDN/WAF 403 on every POST (Freshworks-style) must not escalate.
+        """
+        if status not in (401, 403):
+            return False
+        # Negative control: same status as canary POST ⇒ WAF/bot wall, not an API.
+        if canary and canary.post_status and status == canary.post_status:
+            # Still allow through if the body/headers look like a real API auth challenge.
+            www = (headers_low.get("www-authenticate") or "").strip()
+            body = body or ""
+            ct = (headers_low.get("content-type") or "").lower()
+            if www:
+                return True
+            if "json" in ct and body.strip()[:1] in ("{", "["):
+                for pattern, _, _ in ERROR_FINGERPRINTS:
+                    if pattern.search(body):
+                        return True
+                if any(re.search(p, body, re.I) for p in AI_RESPONSE_BODY_PATTERNS):
+                    return True
+                # Generic {"message":"Unauthorized"} with JSON is weak but OK when
+                # canary body is not JSON (differential content).
+                canary_prefix = (canary.post_body_prefix or "").lstrip()
+                if canary_prefix[:1] not in ("{", "["):
+                    return True
+            return False
+        return True
+
+    async def _calibrate_probe_canary(self, base: str) -> ProbeCanary:
+        """GET + POST negative controls before trusting seed-path statuses."""
+        loop = asyncio.get_event_loop()
+        url = base.rstrip("/") + SCANNER_CANARY_PATH
+        try:
+            get_status, _, get_body = await loop.run_in_executor(
+                None, lambda: self._fetch(url, method="GET", allow_redirects=False))
+        except Exception:
+            get_status, get_body = 0, ""
+        try:
+            post_status, _, post_body = await loop.run_in_executor(
+                None,
+                lambda: self._fetch(
+                    url, method="POST", data=b"{}", allow_redirects=False,
+                ),
+            )
+        except Exception:
+            post_status, post_body = 0, ""
+        canary = ProbeCanary(
+            get_status=get_status or 0,
+            post_status=post_status or 0,
+            get_body_prefix=(get_body or "")[:120],
+            post_body_prefix=(post_body or "")[:120],
+        )
+        if canary.redirect_catch_all or canary.post_waf_catch_all:
+            logger.info(
+                "[fingerprint] canary baseline get=%s post=%s redirect_all=%s post_waf=%s",
+                canary.get_status, canary.post_status,
+                canary.redirect_catch_all, canary.post_waf_catch_all,
+            )
+        return canary
+
     async def _probe_openapi(self, base: str, verbose: bool) -> Dict:
         evidence:     List[EvidenceItem] = []
         endpoints:    List[str]          = []
@@ -1212,6 +1313,14 @@ class AIFingerprintAgent:
         loop = asyncio.get_event_loop()
         confirmed = 0
 
+        canary = await self._calibrate_probe_canary(base)
+        if verbose and (canary.redirect_catch_all or canary.post_waf_catch_all):
+            print(
+                f"    [canary] GET={canary.get_status} POST={canary.post_status} "
+                f"(redirect_all={canary.redirect_catch_all}, "
+                f"post_waf={canary.post_waf_catch_all})"
+            )
+
         ordered = (
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "schema"] +
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "chat"] +
@@ -1222,13 +1331,35 @@ class AIFingerprintAgent:
             url = base + path
             try:
                 status, resp_headers, body = await loop.run_in_executor(
-                    None, lambda: self._fetch(url))
+                    None, lambda: self._fetch(url, allow_redirects=False))
+                # Redirect-all CDNs: same 3xx as canary is not an endpoint hit.
+                if (
+                    canary.redirect_catch_all
+                    and status in _REDIRECT_STATUSES
+                    and status == canary.get_status
+                ):
+                    return {}
                 if status in (404, 405) and category in ("chat", "embedding", "ml", "graphql"):
                     status, resp_headers, body = await loop.run_in_executor(
-                        None, lambda: self._fetch(url, data=b"{}", method="POST"))
+                        None,
+                        lambda: self._fetch(
+                            url, data=b"{}", method="POST", allow_redirects=False,
+                        ),
+                    )
+                # Also try POST when GET is a catch-all redirect (no resource).
+                elif (
+                    status in _REDIRECT_STATUSES
+                    and category in ("chat", "embedding", "ml", "graphql")
+                ):
+                    status, resp_headers, body = await loop.run_in_executor(
+                        None,
+                        lambda: self._fetch(
+                            url, data=b"{}", method="POST", allow_redirects=False,
+                        ),
+                    )
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
-                    auth_signals)
+                    auth_signals, canary=canary)
             except Exception:
                 return None
 
@@ -1261,6 +1392,7 @@ class AIFingerprintAgent:
             "endpoints":   list(dict.fromkeys(endpoints)),
             "frameworks":  list(dict.fromkeys(frameworks)),
             "auth_signals": auth_signals,
+            "canary": canary,
         }
 
     def _evaluate_probe_response(
@@ -1272,12 +1404,22 @@ class AIFingerprintAgent:
         headers: Dict,
         body: str,
         auth_signals: List[AuthSignal],
+        canary: Optional[ProbeCanary] = None,
     ) -> Dict:
         evidence:  List[EvidenceItem] = []
         endpoints: List[str]          = []
         frameworks: List[str]         = []
 
         if status == 0:
+            return {}
+
+        # Same redirect as canary GET ⇒ catch-all, not a real path.
+        if (
+            canary
+            and canary.redirect_catch_all
+            and status in _REDIRECT_STATUSES
+            and status == canary.get_status
+        ):
             return {}
 
         headers_low = {k.lower(): v for k, v in headers.items()}
@@ -1307,6 +1449,12 @@ class AIFingerprintAgent:
                     f"Chunked transfer at {path}", "probe", endpoint=url))
 
         if status in (401, 403):
+            if not self._is_meaningful_auth(status, headers_low, body or "", canary):
+                return {
+                    "evidence": evidence,
+                    "endpoints": endpoints,
+                    "frameworks": frameworks,
+                }
             auth_type = self._detect_auth_type(headers_low, body_l)
             auth_signals.append(AuthSignal(
                 endpoint=url, auth_type=auth_type,
@@ -1560,12 +1708,24 @@ class AIFingerprintAgent:
 
         if not best_fw and best_protocol:
             best_fw = best_protocol
+            best_score = scores.get(best_protocol, 0)
             best_protocol = ""
 
-        fw_confidence = min(best_score / MAX_POSSIBLE_SCORE, 1.0) if best_fw else 0.0
-        fw_signals    = matched_signals.get(best_fw, [])
+        # Protocol path-membership alone (no body/header) is not enough to
+        # claim a framework — those paths often came from WAF noise.
+        if best_fw in PROTOCOL_ONLY_LABELS:
+            fw_signals_tmp = matched_signals.get(best_fw, [])
+            non_path = [s for s in fw_signals_tmp if not s.startswith("path:")]
+            if not non_path and best_score > 0:
+                # Keep as weak protocol hint only when score is path-only.
+                best_protocol = best_fw
+                best_fw = ""
+                best_score = 0
 
-        if best_fw and best_score >= 3:
+        fw_confidence = min(best_score / MAX_POSSIBLE_SCORE, 1.0) if best_fw else 0.0
+        fw_signals    = matched_signals.get(best_fw, []) if best_fw else []
+
+        if best_fw and best_score >= 3 and fw_confidence > 0:
             pct = f"{fw_confidence*100:.0f}%"
             evidence.append(EvidenceItem.make(
                 "framework_identified",
@@ -1574,23 +1734,32 @@ class AIFingerprintAgent:
 
         INFERENCE_SERVER_NAMES = set(FRAMEWORK_SIGNATURES.keys()) - PROTOCOL_ONLY_LABELS
         infra = ""
-        for fw_name in [best_fw] + sorted(scores.keys(), key=lambda x: scores.get(x,0), reverse=True):
+        for fw_name in ([best_fw] if best_fw else []) + sorted(
+            scores.keys(), key=lambda x: scores.get(x, 0), reverse=True
+        ):
+            if not fw_name:
+                continue
             sig = FRAMEWORK_SIGNATURES.get(fw_name, {})
             if sig.get("paths") and any(
                 any(p in kp for kp in known_paths)
                 for p in sig.get("paths", [])
                 if any(x in p for x in ["/api/", "/v1/", "/v2/"])
             ):
-                infra = fw_name
-                break
+                # Only attribute infra when framework confidence is real.
+                if fw_name == best_fw and fw_confidence > 0:
+                    infra = fw_name
+                    break
+                if fw_name not in PROTOCOL_ONLY_LABELS:
+                    infra = fw_name
+                    break
 
         return {
             "evidence":            evidence,
-            "framework":           best_fw,
+            "framework":           best_fw if fw_confidence > 0 else "",
             "framework_confidence": fw_confidence,
             "framework_signals":   fw_signals,
             "protocol":            best_protocol,
-            "inference_server":    infra or best_fw,
+            "inference_server":    infra if fw_confidence > 0 else (infra if infra and infra not in PROTOCOL_ONLY_LABELS else ""),
         }
 
     def _infer_capabilities(
@@ -1725,6 +1894,7 @@ class AIFingerprintAgent:
         max_bytes: int = 8192,
         method: str = "GET",
         data: Optional[bytes] = None,
+        allow_redirects: bool = True,
     ) -> Tuple[int, Dict, str]:
         try:
             req = urllib.request.Request(
@@ -1736,7 +1906,15 @@ class AIFingerprintAgent:
                 },
                 method=method,
             )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            if allow_redirects:
+                opener = urllib.request.build_opener()
+            else:
+                class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+                        return None
+
+                opener = urllib.request.build_opener(_NoRedirect)
+            with opener.open(req, timeout=self.timeout) as resp:
                 body = resp.read(max_bytes).decode("utf-8", errors="replace")
                 return resp.status, dict(resp.headers), body
         except urllib.error.HTTPError as exc:
