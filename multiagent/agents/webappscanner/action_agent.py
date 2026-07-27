@@ -433,12 +433,30 @@ class ActionAgent:
                               stack_keywords: List[str],
                               evidence: Optional[Dict] = None) -> Dict:
         evidence = evidence or {}
-        xfo_present = evidence.get("checked_headers") is not None
-        evidence_note = (
-            "Captured response had no X-Frame-Options / frame-ancestors CSP directive."
-            if xfo_present else
-            "[NO EVIDENCE CAPTURED — frame-blocking headers were not verified against a live response]"
+        hdrs = evidence.get("response_headers") or {}
+        hdrs_lower = {str(k).lower(): str(v) for k, v in hdrs.items()}
+        # Scanners write response_headers with "(missing)" — that IS captured evidence.
+        headers_were_checked = (
+            evidence.get("checked_headers") is not None
+            or bool(hdrs)
+            or evidence.get("confirmation_method") == "header"
         )
+        xfo = hdrs_lower.get("x-frame-options", "")
+        csp = hdrs_lower.get("content-security-policy", "")
+        missing_xfo = (not xfo) or xfo.strip().lower() in ("(missing)", "missing", "")
+        missing_fa  = "frame-ancestors" not in (csp or "").lower()
+
+        if headers_were_checked and missing_xfo and missing_fa:
+            evidence_note = (
+                "Captured response had no X-Frame-Options / frame-ancestors CSP directive."
+            )
+        elif headers_were_checked:
+            evidence_note = "Frame-blocking headers were inspected on the live response."
+        else:
+            evidence_note = (
+                "[NO EVIDENCE CAPTURED — frame-blocking headers were not verified "
+                "against a live response]"
+            )
 
         poc = (
             '<!DOCTYPE html>\n'
@@ -473,7 +491,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "html",
-            "evidence_captured": xfo_present,
+            "evidence_captured": headers_were_checked,
             "fix_snippet":    fix_snippet,
             "fix_language":   self._fix_language(stack_key),
             "fix_context":    self._fix_context(stack_key, "X-Frame-Options"),
@@ -484,8 +502,21 @@ class ActionAgent:
                      stack_keywords: List[str],
                      evidence: Optional[Dict] = None) -> Dict:
         evidence = evidence or {}
+        hdrs = evidence.get("response_headers") or {}
+        hdrs_lower = {str(k).lower(): str(v) for k, v in hdrs.items()}
+
         reflected_origin = evidence.get("reflected_origin")
-        acao_value       = evidence.get("access_control_allow_origin")
+        acao_value = (
+            evidence.get("access_control_allow_origin")
+            or hdrs.get("Access-Control-Allow-Origin")
+            or hdrs_lower.get("access-control-allow-origin")
+        )
+        if not reflected_origin:
+            req = str(evidence.get("request") or "")
+            # e.g. GET http://x (Origin: https://evil-cors-test.example.com)
+            m = re.search(r"Origin:\s*(https?://[^\s)]+)", req, re.I)
+            if m:
+                reflected_origin = m.group(1).strip()
 
         if reflected_origin and acao_value:
             evidence_block = (
@@ -493,11 +524,19 @@ class ActionAgent:
                 f" Server responded:    Access-Control-Allow-Origin: {acao_value}\n"
                 f" → Attacker-controlled origin was reflected back."
             )
+            evidence_captured = True
+        elif acao_value:
+            evidence_block = (
+                f" Observed Access-Control-Allow-Origin: {acao_value}\n"
+                f" (Origin probe recorded in finding evidence)"
+            )
+            evidence_captured = True
         else:
             evidence_block = (
                 " [NO EVIDENCE CAPTURED — an Origin probe request was not sent/recorded; "
                 "this finding is pattern-based only and needs manual confirmation]"
             )
+            evidence_captured = False
 
         poc = (
             '# PoC 1: Verify CORS misconfiguration with curl\n'
@@ -560,7 +599,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
-            "evidence_captured": bool(reflected_origin and acao_value),
+            "evidence_captured": evidence_captured,
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,

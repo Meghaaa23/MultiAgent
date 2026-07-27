@@ -289,14 +289,18 @@ def _build_section_2(stack, endpoints, cves):
         lines.append(f"\nUnconfirmed hints (excluded): {', '.join(unverified[:5])}")
 
     lines.append("\n Attack Surface")
-    interesting = [e for e in (endpoints or []) if e.get("interesting")]
+    interesting = [
+        e for e in (endpoints or [])
+        if e.get("interesting") and not e.get("spa_catch_all")
+        and e.get("note") != "spa-catch-all"
+    ]
     if interesting:
         functional, admin, discovery = [], [], []
         for ep in interesting:
             url_lower = ep.get("url", "").lower()
             if any(x in url_lower for x in ["sitemap", "robots.txt"]):
                 discovery.append(ep)
-            elif any(x in url_lower for x in ["admin", "dashboard", "manage", "wp-admin"]):
+            elif ep.get("admin_panel"):
                 admin.append(ep)
             else:
                 functional.append(ep)
