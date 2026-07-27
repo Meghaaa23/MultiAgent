@@ -16,7 +16,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_core.documents import Document
@@ -32,7 +31,6 @@ from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermi
 from autogen_agentchat.messages import TextMessage, UserMessage
 from autogen_core.models import CreateResult, RequestUsage
 from autogen_agentchat.base import Response, TaskResult
-import certifi
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,21 +136,28 @@ app.add_middleware(
 # MONGODB & VECTOR STORE
 # ============================================================================
 
-mongodb_uri = os.getenv("MONGODB_ATLAS_URI")
+from agents.mongo_support import create_mongo_client, ping_mongo, sanitize_retrieval_error
+
+mongodb_uri = os.getenv("MONGODB_ATLAS_URI") or os.getenv("MONGODB_URI")
 if not mongodb_uri:
     raise ValueError("MONGODB_ATLAS_URI environment variable is required")
 
-try:
-    logger.info("Connecting to MongoDB Atlas...")
-    mongo_client = MongoClient(
-        mongodb_uri,
-        tls=True,
-        tlsAllowInvalidCertificates=True,
-        tlsCAFile=certifi.where(),
+logger.info("Connecting to MongoDB Atlas (fail-fast TLS)...")
+mongo_client = create_mongo_client(mongodb_uri)
+mongo_ok, mongo_detail = ping_mongo(mongo_client)
+if mongo_ok:
+    logger.info("✓ MongoDB Atlas ping OK")
+else:
+    logger.warning(
+        "✗ MongoDB Atlas unreachable — RAG/KB disabled; web+AI scan still runs. Detail: %s",
+        mongo_detail[:300],
     )
-    logger.info("✓ MongoDB client initialized")
-except Exception as e:
-    logger.warning(f"MongoDB initialization warning: {e}")
+    # Keep client=None so callers skip KB instead of waiting on dead TLS repeatedly.
+    try:
+        if mongo_client is not None:
+            mongo_client.close()
+    except Exception:
+        pass
     mongo_client = None
 
 if mongo_client:
@@ -169,7 +174,7 @@ if mongo_client:
         logger.error(f"Failed to initialize vectorstore: {e}")
         vectorstore = None
 else:
-    logger.error("MongoDB not available")
+    logger.error("MongoDB not available — continuing without knowledge base")
     vectorstore = None
 
 # ============================================================================
@@ -450,22 +455,20 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    try:
-        mongo_client.admin.command('ping')
-        mongo_status = "connected"
-    except Exception as e:
-        mongo_status = f"error: {str(e)}"
+    ok, detail = ping_mongo(mongo_client)
+    mongo_status = "connected" if ok else f"error: {detail[:240]}"
 
     return {
-        "status":          "healthy",
+        "status":          "healthy" if ok else "degraded",
         "mongodb":         mongo_status,
         "vectorstore":     "initialized" if vectorstore else "unavailable",
         "agents":          "ready",
         "autogen":         "enabled",
         "threat_modeling": "available" if threat_modeling_agent else "not initialized",
         "web_scanning":    "enabled",
-        "ai_backdoor":     "enabled",   # ← new
-        "avid_lookup":     "enabled",   # ← new
+        "kb_required_for_scan": False,
+        "ai_backdoor":     "enabled",
+        "avid_lookup":     "enabled",
         "active_sessions": len(session_teams),
     }
 
@@ -476,6 +479,8 @@ async def health_check():
 @app.get("/documents")
 async def list_all_documents():
     try:
+        if mongo_client is None:
+            return {"total_documents": 0, "documents": [], "error": "MongoDB offline"}
         col      = mongo_client["multiagentllm"]["RAG"]
         pipeline = [
             {"$group": {"_id": "$filename", "count": {"$sum": 1},
@@ -728,16 +733,22 @@ async def query_with_full_autogen(request: Request):
         elif session_documents.get(session_id):
             search_filenames = session_documents[session_id]
 
-        # Retrieve context from KB
+        # Retrieve context from KB (optional — scan path does not depend on this)
         try:
-            db_answer         = await answer_question_from_db(
-                question=question, filenames=search_filenames
-            )
-            retrieved_context = str(db_answer)
-            logger.info(f"Retrieved {len(retrieved_context)} chars from KB")
+            if not vectorstore and not mongo_client:
+                retrieved_context = (
+                    "Knowledge base unavailable (MongoDB Atlas offline). "
+                    "Answer from general security knowledge; cite that KB was skipped."
+                )
+            else:
+                db_answer         = await answer_question_from_db(
+                    question=question, filenames=search_filenames
+                )
+                retrieved_context = str(db_answer)
+                logger.info(f"Retrieved {len(retrieved_context)} chars from KB")
         except Exception as e:
             logger.error(f"Retrieval error: {e}")
-            retrieved_context = f"Error retrieving context: {str(e)}"
+            retrieved_context = sanitize_retrieval_error(e)
 
         # AutoGen conversation
         try:
@@ -848,12 +859,18 @@ async def query_stream(request: StreamQueryRequest):
                     search_filenames = session_documents[session_id]
 
                 try:
-                    db_answer = await answer_question_from_db(
-                        question=question, filenames=search_filenames
-                    )
-                    retrieved_context = str(db_answer)
+                    if not vectorstore and not mongo_client:
+                        retrieved_context = (
+                            "Knowledge base unavailable (MongoDB Atlas offline). "
+                            "Answer from general security knowledge; cite that KB was skipped."
+                        )
+                    else:
+                        db_answer = await answer_question_from_db(
+                            question=question, filenames=search_filenames
+                        )
+                        retrieved_context = str(db_answer)
                 except Exception as e:
-                    retrieved_context = f"Error: {str(e)}"
+                    retrieved_context = sanitize_retrieval_error(e)
 
                 yield _format_sse("progress", {
                     "phase": "knowledge_gathering", "step": 2, "total_steps": 4,

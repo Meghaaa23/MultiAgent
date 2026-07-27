@@ -704,11 +704,13 @@ class ThreatModelingAgent:
 
     def __init__(self, mongodb_client=None, openai_client=None,
                  vectorstore=None, web_search_function=None):
-        self.mongo_client = mongodb_client or pymongo.MongoClient(
-            os.getenv("MONGODB_URI"),
-            tls=True,
-            tlsAllowInvalidCertificates=True
-        )
+        # Prefer injected client from main.py. KB is optional — web/AI scan still runs.
+        if mongodb_client is not None:
+            self.mongo_client = mongodb_client
+        else:
+            from .mongo_support import create_mongo_client
+            self.mongo_client = create_mongo_client()
+
         if openai_client:
             self.openai_client = openai_client
             self.llm_model     = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
@@ -725,8 +727,13 @@ class ThreatModelingAgent:
             collection_name="security_knowledge_base",
         )
         self.user_vectorstore = vectorstore
-        self.db               = self.mongo_client["multiagentllm"]
-        self.rag_collection   = self.db["RAG"]
+        if self.mongo_client is not None:
+            self.db             = self.mongo_client["multiagentllm"]
+            self.rag_collection = self.db["RAG"]
+        else:
+            self.db             = None
+            self.rag_collection = None
+            print("⚠ ThreatModelingAgent: MongoDB offline — KB enrichment disabled")
         self.web_scanner      = WebScannerAgent(
             openai_client=self.openai_client,
             llm_model=self.llm_model,
@@ -1068,7 +1075,7 @@ Answer:"""
 
     async def _search_user_docs(self, query: str, filenames: List[str] = None,
                                 top_k: int = 2) -> List[Dict]:
-        if not self.user_vectorstore:
+        if not self.user_vectorstore or self.rag_collection is None:
             return []
         try:
             mongo_filter = {"filename": {"$in": filenames}} if filenames else {}
