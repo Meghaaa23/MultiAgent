@@ -46,6 +46,12 @@ _ADMIN_STRONG_MARKERS = (
     "administrator login", "site administration",
 )
 
+_GRAPHQL_UI_MARKERS = (
+    "graphiql", "graphql playground", "graphql-playground",
+    "__schema", "apollo-server", "altair-graphql",
+    "graphql-ide", '"data":{"__schema"',
+)
+
 
 def looks_like_spa_shell(body: str) -> bool:
     if not body:
@@ -812,9 +818,41 @@ class EndpointDiscoveryAgent:
                             "verification": "SPA catch-all — not a real admin endpoint",
                         }
 
-                # GraphQL / API HTML responses stay interesting even if soft-404
-                # lengths match (playground / schema UIs share the SPA shell).
+                # GraphQL / API: keep only when the body looks like a real API
+                # or GraphQL UI — bare SPA shells on /graphql are soft-404 FPs.
                 if _is_api_surface_path(path) and status == 200:
+                    body = await self._fetch_text(url) or ""
+                    body_l = body.lower()
+                    ct_l = (content_type or "").lower()
+                    is_json_api = "json" in ct_l and body.strip()[:1] in ("{", "[")
+                    is_graphql_ui = any(m in body_l for m in _GRAPHQL_UI_MARKERS)
+                    if is_json_api or is_graphql_ui:
+                        return {
+                            "url": url, "method": "GET", "source": "probe",
+                            "status": status, "final_url": final_url or url,
+                            "interesting": True, "auth_required": auth_required,
+                            "params": [], "content_type": content_type,
+                            "is_sensitive": is_sensitive,
+                            "api_surface": True,
+                            "verification": "API/GraphQL surface confirmed",
+                        }
+                    if (
+                        self._soft_mode
+                        and looks_like_spa_shell(body)
+                        and self._body_matches_soft404(len(body))
+                    ):
+                        return {
+                            "url": url, "method": "GET", "source": "probe",
+                            "status": status, "final_url": final_url or url,
+                            "interesting": False, "auth_required": False,
+                            "spa_catch_all": True, "params": [],
+                            "content_type": content_type,
+                            "note": "spa-catch-all",
+                            "excluded": True,
+                            "exclude_reason": "SPA/soft-404 catch-all (body matches baseline)",
+                            "verification": "SPA/soft-404 catch-all (body matches baseline)",
+                        }
+                    # Unknown HTML on an API path — keep as interesting probe hit.
                     return {
                         "url": url, "method": "GET", "source": "probe",
                         "status": status, "final_url": final_url or url,
@@ -822,7 +860,7 @@ class EndpointDiscoveryAgent:
                         "params": [], "content_type": content_type,
                         "is_sensitive": is_sensitive,
                         "api_surface": True,
-                        "verification": "API/GraphQL surface kept despite SPA soft-404 mode",
+                        "verification": "API/GraphQL path returned non-JSON HTML",
                     }
 
             return {

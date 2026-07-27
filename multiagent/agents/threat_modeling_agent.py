@@ -572,10 +572,35 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     lines.append(" 8.1 Detected AI/ML Components")
     lines.append("")
 
-    if ai_fp.get("ml_endpoints"):
-        lines.append("ML Inference Endpoints:")
-        for ep in ai_fp["ml_endpoints"][:5]:
-            lines.append(f"- `{ep}`")
+    ml_eps = list(ai_fp.get("ml_endpoints") or [])
+    auth_eps = ai_fp.get("auth_required_paths") or []
+    auth_urls = set()
+    for a in auth_eps:
+        if isinstance(a, dict):
+            u = a.get("endpoint") or a.get("url")
+            if u:
+                auth_urls.add(u)
+        elif a:
+            auth_urls.add(str(a))
+
+    if ml_eps or auth_urls:
+        lines.append("ML Inference / Chat Surfaces:")
+        shown = set()
+        for ep in ml_eps[:8]:
+            shown.add(ep)
+            tag = " [AUTH REQUIRED]" if ep in auth_urls else ""
+            lines.append(f"- `{ep}`{tag}")
+        for a in auth_eps[:8]:
+            if isinstance(a, dict):
+                u = a.get("endpoint") or a.get("url") or ""
+                st = a.get("status_code", 401)
+            else:
+                u, st = str(a), 401
+            if u and u not in shown:
+                lines.append(f"- `{u}` [AUTH REQUIRED, HTTP {st}]")
+        lines.append("")
+    else:
+        lines.append("No concrete ML/chat endpoints confirmed yet.")
         lines.append("")
 
     if ai_fp.get("ml_libraries"):
@@ -631,7 +656,16 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
                 "",
             ]
     else:
-        lines.append("No AI-specific vulnerabilities confirmed via active testing.")
+        if auth_urls or any(
+            isinstance(a, dict) and a.get("status_code") in (401, 403)
+            for a in auth_eps
+        ):
+            lines.append(
+                "No AI-specific vulnerabilities confirmed — inference/chat "
+                "surfaces require authentication (unauthenticated scan)."
+            )
+        else:
+            lines.append("No AI-specific vulnerabilities confirmed via active testing.")
         lines.append("")
 
     lines.append(" 8.3 AI-Specific CVEs from AVID Database")
@@ -664,10 +698,25 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     lines.append("")
 
     if not strategic:
-        lines.append(
-            "No strategic recommendations generated — "
-            "no AI-specific attack surfaces identified during active scanning."
-        )
+        if ml_eps or auth_urls or ai_fp.get("atlas_techniques"):
+            lines.append(
+                "Auth-gated or signal-detected AI surfaces were found, but no "
+                "injectable open chat endpoint was reachable in this scan."
+            )
+            lines.append(
+                "Re-run with authenticated session cookies to exercise prompt "
+                "injection (AML.T0051) against live inference paths."
+            )
+            if ai_fp.get("atlas_techniques"):
+                lines.append("")
+                lines.append("ATLAS techniques indicated by current signals:")
+                for tech in ai_fp["atlas_techniques"]:
+                    lines.append(f"- {tech}")
+        else:
+            lines.append(
+                "No strategic recommendations generated — "
+                "no AI-specific attack surfaces identified during active scanning."
+            )
         return "\n".join(lines)
 
     for rec in strategic:

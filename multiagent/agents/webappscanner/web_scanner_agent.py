@@ -662,6 +662,13 @@ class WebScannerAgent:
             elif ep.get("interesting"):
                 report_endpoints.append(ep)
 
+        # Merge AI-fingerprint surfaces into the attack-surface list so §2
+        # matches §8 (fingerprinter probes paths discovery may not list).
+        if ai_fingerprint:
+            report_endpoints = self._merge_ai_surfaces_into_endpoints(
+                report_endpoints, ai_fingerprint, target_url,
+            )
+
         return {
             "target_url":             target_url,
             "stack":                  stack,
@@ -693,6 +700,97 @@ class WebScannerAgent:
             "action_results": action_results,
             "headers_capture_failed": headers_capture_failed,
         }
+
+    @staticmethod
+    def _merge_ai_surfaces_into_endpoints(
+        endpoints: List[Dict],
+        ai_fingerprint: Dict,
+        target_url: str,
+    ) -> List[Dict]:
+        """Ensure AI-discovered inference/auth paths appear in attack surface."""
+        existing = {
+            (e.get("url") or "").rstrip("/")
+            for e in endpoints
+            if e.get("url")
+        }
+        merged = list(endpoints)
+
+        auth_by_url: Dict[str, Dict] = {}
+        for sig in ai_fingerprint.get("auth_required_paths") or []:
+            if isinstance(sig, dict):
+                url = (sig.get("endpoint") or sig.get("url") or "").rstrip("/")
+                if url:
+                    auth_by_url[url] = sig
+
+        def _normalize(ep: str) -> str:
+            if isinstance(ep, str) and ep.startswith("http"):
+                return ep
+            base = target_url.rstrip("/")
+            path = ep if str(ep).startswith("/") else f"/{ep}"
+            return base + path
+
+        def _upsert(url: str, status, auth_required: bool, source: str):
+            key = (url or "").rstrip("/")
+            if not key:
+                return
+            for e in merged:
+                if (e.get("url") or "").rstrip("/") == key:
+                    if auth_required:
+                        e["auth_required"] = True
+                        e["access_controlled"] = True
+                    if status not in (None, "?", ""):
+                        e["status"] = status
+                    e.setdefault("source", source)
+                    e["interesting"] = True
+                    return
+            if key in existing:
+                return
+            existing.add(key)
+            merged.append({
+                "url": url,
+                "method": "GET",
+                "source": source,
+                "status": status if status not in (None, "") else "?",
+                "interesting": True,
+                "auth_required": bool(auth_required),
+                "access_controlled": bool(auth_required),
+                "category": "ai_surface",
+                "params": [],
+            })
+
+        for ep in ai_fingerprint.get("ml_endpoints") or []:
+            url = _normalize(ep)
+            key = url.rstrip("/")
+            sig = auth_by_url.get(key)
+            _upsert(
+                url,
+                (sig or {}).get("status_code", "?"),
+                bool(sig) or key in auth_by_url,
+                "ai_fingerprint",
+            )
+
+        for key, sig in auth_by_url.items():
+            _upsert(
+                key,
+                sig.get("status_code", 401),
+                True,
+                "ai_fingerprint",
+            )
+
+        for rec in ai_fingerprint.get("classified_endpoints") or []:
+            if not isinstance(rec, dict):
+                continue
+            url = rec.get("url") or ""
+            if not url:
+                continue
+            _upsert(
+                url,
+                rec.get("status_code", "?"),
+                bool(rec.get("auth_required")),
+                "ai_fingerprint",
+            )
+
+        return merged
 
     async def _get_real_headers(self, url: str, verbose: bool = False) -> tuple:
         """
