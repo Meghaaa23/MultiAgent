@@ -333,19 +333,66 @@ class WebScannerAgent:
 
             raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
             confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers"))
-            is_ai_powered = raw_is_ai and (confidence == "high" or has_concrete)
+            _KNOWN_AI_UI = {
+                "LibreChat", "Open WebUI", "LobeChat", "AnythingLLM",
+                "Dify", "Flowise", "Langflow", "Ollama",
+            }
+            framework = (ai_fingerprint.get("framework") or "").strip()
+            if not framework:
+                for cand in ai_fingerprint.get("frameworks_detected") or []:
+                    name = cand.get("name") if isinstance(cand, dict) else cand
+                    if name in _KNOWN_AI_UI:
+                        framework = name
+                        break
+            auth_paths   = ai_fingerprint.get("auth_required_paths") or []
+            known_ai_ui  = framework in _KNOWN_AI_UI
+            has_concrete = bool(
+                ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("ai_headers")
+                or auth_paths
+            )
+            # Escalate when fingerprint says AI, OR a known chat-UI brand is
+            # confirmed (LibreChat title alone should not stay an unverified hint).
+            is_ai_powered = bool(raw_is_ai) and (
+                confidence in ("high", "medium", "very_high")
+                or has_concrete
+                or known_ai_ui
+            )
+            if known_ai_ui:
+                is_ai_powered = True
+                ai_fingerprint["is_ai_powered"] = True
+                if not ai_fingerprint.get("framework"):
+                    ai_fingerprint["framework"] = framework
+
+            # Promote identified AI product into stack summary / app identity.
+            if framework and known_ai_ui:
+                stack["app_identity_name"] = stack.get("app_identity_name") or framework
+                if "Unknown" in (stack.get("stack_summary") or "") or not stack.get("stack_summary"):
+                    stack["stack_summary"] = framework
+                hints = stack.get("unverified_hints") or []
+                stack["unverified_hints"] = [
+                    h for h in hints if str(h).lower() != framework.lower()
+                ]
+                techs = stack.get("technologies") or []
+                if framework not in techs and not any(
+                    isinstance(t, dict) and t.get("name") == framework for t in techs
+                ):
+                    stack.setdefault("technologies", []).insert(0, framework)
 
             if is_ai_powered:
                 if verbose:
-                    print(f"  AI-powered app detected [{confidence} confidence]")
+                    print(f"  AI-powered app detected [{confidence} confidence"
+                          + (f", framework={framework}" if framework else "")
+                          + "]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
+                    print(f"     Auth-gated : {len(auth_paths)} path(s)")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
                 if verbose:
                     print("  Querying AVID database for AI vulnerabilities...")
                 ml_stack = (
                     ai_fingerprint.get("ml_libraries", []) +
+                    ([framework] if framework else []) +
                     [ep.split("/")[-1] for ep in ai_fingerprint.get("ml_endpoints", [])[:3]]
                 )
                 avid_results = await self.avid_lookup.lookup(
@@ -368,7 +415,7 @@ class WebScannerAgent:
                     print(f"   Strategic recommendations: {s} ATLAS-based\n")
             else:
                 if verbose:
-                    if raw_is_ai and not has_concrete:
+                    if raw_is_ai and not has_concrete and not known_ai_ui:
                         print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
                     else:
                         print(f"  No AI/ML components detected — AI-specific tests skipped\n")
