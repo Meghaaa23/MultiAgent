@@ -60,6 +60,13 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
     "page_title_ai":             8,
     "dom_assistant_role":        3,
     "html_ai_form":              3,
+
+    # Chatbot UI channel (Playwright / static HTML) — ordinal tiers.
+    "behavior_chatbot_ui_confirmed": 22,
+    "chatbot_ui_live_surface":       14,
+    "chatbot_ui_structural":          6,
+    "chatbot_ui_hint":                2,
+    "chatbot_ui_third_party":         1,
 }
 
 # Generic title cues only — never product/application brand names.
@@ -120,6 +127,8 @@ LIVE_SURFACE_EVIDENCE_KEYS = {
     "error_missing_model",
     "sse_streaming_header",
     "ai_response_header",
+    "behavior_chatbot_ui_confirmed",
+    "chatbot_ui_live_surface",
 }
 
 _INFERENCE_PATH_RE = re.compile(
@@ -407,6 +416,7 @@ class FingerprintReport:
 
     evidence_items:   List[EvidenceItem] = field(default_factory=list)
     atlas_techniques: List[str]          = field(default_factory=list)
+    chat_components:  List[Dict]         = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         return {
@@ -444,7 +454,7 @@ class FingerprintReport:
             "api_schema":          {"tools": [], "openapi": self.openapi_schema},
             "app_description":     "",
             "response_headers":    {},
-            "chat_components":     [],
+            "chat_components":     self.chat_components,
             "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
@@ -483,6 +493,17 @@ class FingerprintReport:
                 print(f"    [{ep.risk.upper():8s}] {ep.endpoint_type:12s} {ep.path}{auth_tag}")
         if self.auth_required_paths:
             print(f"  Auth-gated       : {len(self.auth_required_paths)} endpoint(s) (not tested)")
+        if self.chat_components:
+            print(f"  Chat UI          : {len(self.chat_components)} widget(s)")
+            for w in self.chat_components[:5]:
+                if not isinstance(w, dict):
+                    continue
+                print(
+                    f"    - tier={w.get('tier') or '?'} "
+                    f"scope={w.get('ownership') or w.get('scope') or '?'} "
+                    f"provider={w.get('provider') or '-'} "
+                    f"via={w.get('source') or '?'}"
+                )
         if self.deployment_signals:
             print(f"  Deployment       : {self.deployment_signals}")
         print(f"\n  Evidence (top 8):")
@@ -649,11 +670,52 @@ class AIFingerprintAgent:
         if len(weak_405) >= 3 and not has_strong_live:
             all_evidence = [ev for ev in all_evidence if ev.key != "ml_endpoint_405"]
 
+        # Static HTML chatbot widget discovery (Playwright enrich is optional
+        # in the scan harness / dev_ai_scan). Passive hints alone do not flip
+        # is_ai — only live_surface / behavioral chatbot tiers do.
+        chat_components: List[Dict] = []
+        try:
+            from .chatbot_ui_probe import (
+                detect_chatbot_from_html,
+                evidence_key_for_tier,
+                ui_warrants_vuln,
+                widgets_to_chat_components,
+            )
+        except ImportError:
+            try:
+                from multiagent.agents.ai_agents.chatbot_ui_probe import (
+                    detect_chatbot_from_html,
+                    evidence_key_for_tier,
+                    ui_warrants_vuln,
+                    widgets_to_chat_components,
+                )
+            except ImportError:
+                detect_chatbot_from_html = None  # type: ignore
+                ui_warrants_vuln = None  # type: ignore
+
+        if detect_chatbot_from_html is not None:
+            try:
+                widgets = detect_chatbot_from_html(page_html or "", base)
+                chat_components = widgets_to_chat_components(widgets)
+                for w in widgets:
+                    key = evidence_key_for_tier(
+                        getattr(w, "tier", "") or "passive_hint",
+                        getattr(w, "scope", "") or "",
+                    )
+                    all_evidence.append(EvidenceItem.make(
+                        key,
+                        getattr(w, "detail", None)
+                        or f"Chatbot UI surface ({key})",
+                        "chatbot_ui",
+                    ))
+            except Exception as exc:
+                logger.debug("chatbot HTML detect failed: %s", exc)
+                chat_components = []
+
         total_score = sum(ev.weight for ev in all_evidence)
         confidence  = score_to_confidence(total_score)
 
-        # Product-agnostic gate: only live behavioural / API surface counts.
-        # Brand strings, titles, and JS SDK hints never flip is_ai alone.
+        # Product-agnostic gate: only live behavioural / API / chatbot surface.
         evidence_keys = {ev.key for ev in all_evidence}
         live_from_keys = bool(evidence_keys & LIVE_SURFACE_EVIDENCE_KEYS)
         live_from_ml = any(
@@ -663,7 +725,10 @@ class AIFingerprintAgent:
             _is_inference_path(urllib.parse.urlparse(a.endpoint).path)
             for a in auth_signals
         )
-        is_ai = live_from_keys or live_from_ml or live_from_auth
+        live_from_chat_ui = bool(
+            ui_warrants_vuln and ui_warrants_vuln(chat_components)
+        )
+        is_ai = live_from_keys or live_from_ml or live_from_auth or live_from_chat_ui
 
         atlas: List[str] = []
         for ep in ml_endpoints:
@@ -728,6 +793,7 @@ class AIFingerprintAgent:
             deployment_signals    = deployment,
             evidence_items        = all_evidence,
             atlas_techniques      = atlas,
+            chat_components       = chat_components,
         )
 
     def _analyse_html(

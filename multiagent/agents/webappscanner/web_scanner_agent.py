@@ -19,6 +19,10 @@ from ..ai_agents.ai_fingerprint            import AIFingerprintAgent
 from ..ai_agents.avid_lookup_agent         import AVIDLookupAgent
 from ..ai_agents.ai_vulnerability_test     import AIVulnerabilityTester
 from ..ai_agents.Ai_Infra_agent            import AIInfraAgent
+from ..ai_agents.chatbot_ui_probe          import (
+    enrich_fingerprint_with_chatbot_ui,
+    ui_warrants_vuln,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -331,25 +335,44 @@ class WebScannerAgent:
                 verbose              = verbose,
             )
 
+            # Playwright/static chatbot UI channel (vendor widgets = detect-only).
+            try:
+                ai_fingerprint = await enrich_fingerprint_with_chatbot_ui(
+                    ai_fingerprint,
+                    target_url,
+                    html=html or "",
+                    verbose=verbose,
+                    allow_submit=True,
+                )
+            except Exception as ui_exc:
+                logger.debug("chatbot UI enrich skipped: %s", ui_exc)
+
             raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
             confidence   = ai_fingerprint.get("confidence", "low")
             auth_paths   = ai_fingerprint.get("auth_required_paths") or []
+            chat_comps   = ai_fingerprint.get("chat_components") or []
+            has_ui       = ui_warrants_vuln(chat_comps)
             has_concrete = bool(
                 ai_fingerprint.get("ml_endpoints")
                 or ai_fingerprint.get("ai_headers")
                 or auth_paths
+                or has_ui
             )
             # Trust fingerprint live-surface gate; require concrete surface or
             # high confidence so passive title/SDK hints alone never escalate.
-            is_ai_powered = bool(raw_is_ai) and (
-                confidence in ("high", "medium", "very_high") or has_concrete
-            )
+            # Injectable chatbot UI alone is enough to open AI escalation.
+            is_ai_powered = (
+                bool(raw_is_ai) and (
+                    confidence in ("high", "medium", "very_high") or has_concrete
+                )
+            ) or has_ui
 
             if is_ai_powered:
                 if verbose:
                     print(f"  AI-powered app detected [{confidence} confidence]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     Auth-gated : {len(auth_paths)} path(s)")
+                    print(f"     Chat UI    : {len(chat_comps)} widget(s)")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
                 if verbose:

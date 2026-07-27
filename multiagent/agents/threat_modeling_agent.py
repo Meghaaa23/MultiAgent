@@ -645,8 +645,23 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
         lines.append(f"Detected ML Libraries: {libs}")
         lines.append("")
 
-    if ai_fp.get("chat_components"):
-        lines.append("LLM Chat UI Components Detected: Yes")
+    chat_comps = ai_fp.get("chat_components") or []
+    if chat_comps:
+        lines.append(f"LLM Chat UI Components Detected: Yes ({len(chat_comps)})")
+        for w in chat_comps[:5]:
+            if not isinstance(w, dict):
+                continue
+            tier = w.get("tier") or "?"
+            scope = w.get("ownership") or w.get("scope") or "?"
+            provider = w.get("provider") or "-"
+            policy = w.get("injection_policy") or "-"
+            via = w.get("source") or "?"
+            detail = (w.get("detail") or "")[:80]
+            lines.append(
+                f"- tier=`{tier}` ownership=`{scope}` policy=`{policy}` "
+                f"provider=`{provider}` via=`{via}`"
+                + (f" — {detail}" if detail else "")
+            )
         lines.append("")
 
     if ai_fp.get("model_upload_endpoints"):
