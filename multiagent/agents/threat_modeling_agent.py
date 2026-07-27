@@ -647,6 +647,10 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
 
     chat_comps = ai_fp.get("chat_components") or []
     if chat_comps:
+        try:
+            from .ai_agents.chatbot_ui_probe import format_policy_display
+        except ImportError:
+            format_policy_display = None  # type: ignore
         lines.append(f"LLM Chat UI Components Detected: Yes ({len(chat_comps)})")
         for w in chat_comps[:5]:
             if not isinstance(w, dict):
@@ -654,7 +658,14 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
             tier = w.get("tier") or "?"
             scope = w.get("ownership") or w.get("scope") or "?"
             provider = w.get("provider") or "-"
-            policy = w.get("injection_policy") or "-"
+            if format_policy_display:
+                policy = format_policy_display(
+                    w.get("injection_policy") or "",
+                    side_effect_blocked=bool(w.get("side_effect_blocked")),
+                    side_effect_reason=str(w.get("side_effect_reason") or ""),
+                )
+            else:
+                policy = w.get("injection_policy") or "-"
             via = w.get("source") or "?"
             detail = (w.get("detail") or "")[:80]
             lines.append(
