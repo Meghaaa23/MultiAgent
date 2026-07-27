@@ -16,7 +16,18 @@ from urllib.parse import urlparse, urljoin, urlsplit, urlunparse
 logger = logging.getLogger(__name__)
 
 
-# Strong SPA shell signals — same idea as vulnerability_tester sensitive-path gate.
+# Paths that must not be dismissed as SPA catch-alls (API / schema surfaces).
+_API_SURFACE_PATH_MARKERS = (
+    "/graphql", "/api/", "/swagger", "/openapi", "/rest/",
+    "/v1/", "/v2/", "/v3/", "/.well-known/",
+)
+
+
+def _is_api_surface_path(path_or_url: str) -> bool:
+    low = (path_or_url or "").lower()
+    return any(m in low for m in _API_SURFACE_PATH_MARKERS) or low.rstrip("/").endswith(
+        ("/graphql", "/api", "/swagger", "/openapi", "/rest")
+    )
 _SPA_STRONG_SIGNALS = (
     "<app-root", "ng-version", "router-outlet",
     "React.createElement", "__NEXT_DATA__", "__vue_app__",
@@ -387,9 +398,13 @@ class EndpointDiscoveryAgent:
                 except Exception:
                     pass
 
-            # Soft-404 / SPA catch-all: HTML shell matching calibrated lengths
+            # Soft-404 / SPA catch-all: HTML shell matching calibrated lengths.
+            # Never demote API/GraphQL/swagger surfaces — GET may return an HTML
+            # playground/shell that looks like the SPA but is still a real route.
+            path_hint = ep.get("url") or ""
             if (
                 self._soft_mode
+                and not _is_api_surface_path(path_hint)
                 and "text/html" in (ep.get("content_type") or "").lower()
                 and looks_like_spa_shell(body)
             ):
@@ -772,17 +787,18 @@ class EndpointDiscoveryAgent:
 
                 # SPA catch-all filter: admin/dashboard/manage HTML shells that
                 # match soft-404 baselines are not real admin surfaces.
+                # Never apply this to API/GraphQL/swagger paths.
                 adminish = any(kw in path_lower for kw in (
                     "admin", "dashboard", "manage", "console", "panel",
                 ))
-                if adminish and self._soft_mode:
+                if adminish and self._soft_mode and not _is_api_surface_path(path):
                     body = await self._fetch_text(url) or ""
                     if looks_like_spa_shell(body) and (
                         self._body_matches_soft404(len(body))
                         or not has_strong_admin_content(body)
                     ):
                         logger.debug(
-                            "probe: drop %s — SPA/soft-404 catch-all", url
+                            "probe: exclude %s — SPA/soft-404 catch-all", url
                         )
                         return {
                             "url": url, "method": "GET", "source": "probe",
@@ -791,8 +807,23 @@ class EndpointDiscoveryAgent:
                             "spa_catch_all": True, "params": [],
                             "content_type": content_type,
                             "note": "spa-catch-all",
+                            "excluded": True,
+                            "exclude_reason": "SPA catch-all — not a real admin endpoint",
                             "verification": "SPA catch-all — not a real admin endpoint",
                         }
+
+                # GraphQL / API HTML responses stay interesting even if soft-404
+                # lengths match (playground / schema UIs share the SPA shell).
+                if _is_api_surface_path(path) and status == 200:
+                    return {
+                        "url": url, "method": "GET", "source": "probe",
+                        "status": status, "final_url": final_url or url,
+                        "interesting": True, "auth_required": auth_required,
+                        "params": [], "content_type": content_type,
+                        "is_sensitive": is_sensitive,
+                        "api_surface": True,
+                        "verification": "API/GraphQL surface kept despite SPA soft-404 mode",
+                    }
 
             return {
                 "url":          url,

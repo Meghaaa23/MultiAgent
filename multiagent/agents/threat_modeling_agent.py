@@ -262,10 +262,26 @@ def _build_section_2(stack, endpoints, cves):
                     lines.append(f"- {val}")
                     added = True
             if not added:
-                lines.append(
-                    "Unknown — target is behind a CDN/WAF that strips "
-                    "identifying headers. See Section 3 for detected headers."
-                )
+                host = ""
+                try:
+                    from urllib.parse import urlparse
+                    # endpoints list may carry the scan host via first URL
+                    for ep in (endpoints or []):
+                        if ep.get("url"):
+                            host = (urlparse(ep["url"]).hostname or "").lower()
+                            break
+                except Exception:
+                    host = ""
+                if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost"):
+                    lines.append(
+                        "Unknown — no strong stack fingerprint from HTTP evidence "
+                        "(local target; not attributed to CDN/WAF)."
+                    )
+                else:
+                    lines.append(
+                        "Unknown — target is behind a CDN/WAF that strips "
+                        "identifying headers. See Section 3 for detected headers."
+                    )
 
     if cves:
         orphaned = [
@@ -293,6 +309,11 @@ def _build_section_2(stack, endpoints, cves):
         e for e in (endpoints or [])
         if e.get("interesting") and not e.get("spa_catch_all")
         and e.get("note") != "spa-catch-all"
+        and not e.get("excluded")
+    ]
+    excluded = [
+        e for e in (endpoints or [])
+        if e.get("spa_catch_all") or e.get("excluded") or e.get("note") == "spa-catch-all"
     ]
     if interesting:
         functional, admin, discovery = [], [], []
@@ -321,7 +342,22 @@ def _build_section_2(stack, endpoints, cves):
     else:
         lines.append("None discovered.")
 
-
+    if excluded:
+        lines.append("\n Excluded endpoints (not attack surface)")
+        lines.append(
+            "These paths returned HTTP 200 but matched SPA/soft-404 catch-all "
+            "baselines (same shell as unknown routes) — suppressed for reproducibility."
+        )
+        for ep in excluded[:15]:
+            reason = (
+                ep.get("exclude_reason")
+                or ep.get("verification")
+                or "SPA/soft-404 catch-all"
+            )
+            lines.append(
+                f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
+                f"{ep.get('url','')} — excluded: {reason}"
+            )
 
     return "\n".join(lines)
 
