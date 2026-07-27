@@ -700,15 +700,21 @@ def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
     return "".join(lines)
 
 
+_MONGO_UNSET = object()
+
+
 class ThreatModelingAgent:
 
-    def __init__(self, mongodb_client=None, openai_client=None,
+    def __init__(self, mongodb_client=_MONGO_UNSET, openai_client=None,
                  vectorstore=None, web_search_function=None):
-        self.mongo_client = mongodb_client or pymongo.MongoClient(
-            os.getenv("MONGODB_URI"),
-            tls=True,
-            tlsAllowInvalidCertificates=True
-        )
+        # Prefer injected client from main.py (including explicit None = offline).
+        # Only auto-create from env when the arg is omitted entirely.
+        if mongodb_client is _MONGO_UNSET:
+            from .mongo_support import create_mongo_client
+            self.mongo_client = create_mongo_client()
+        else:
+            self.mongo_client = mongodb_client
+
         if openai_client:
             self.openai_client = openai_client
             self.llm_model     = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
@@ -720,19 +726,44 @@ class ThreatModelingAgent:
             self.llm_model = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
 
         self.web_search       = web_search_function
-        self.kb_vector_search = VectorSearch(
-            mongodb_client=self.mongo_client,
-            collection_name="security_knowledge_base",
-        )
         self.user_vectorstore = vectorstore
-        self.db               = self.mongo_client["multiagentllm"]
-        self.rag_collection   = self.db["RAG"]
-        self.web_scanner      = WebScannerAgent(
+        # Scan pipeline does not need Atlas vector/RAG. Keep the code paths;
+        # set SCAN_ENABLE_VECTOR_KB=true to re-enable KB enrichment during scans.
+        self.scan_enable_vector_kb = os.getenv(
+            "SCAN_ENABLE_VECTOR_KB", "false"
+        ).strip().lower() in ("1", "true", "yes")
+        # Lazy VectorSearch — do not load SentenceTransformer at scan startup.
+        self._kb_vector_search = None
+        if self.mongo_client is not None:
+            self.db             = self.mongo_client["multiagentllm"]
+            self.rag_collection = self.db["RAG"]
+        else:
+            self.db             = None
+            self.rag_collection = None
+            print("⚠ ThreatModelingAgent: MongoDB offline — KB enrichment disabled")
+
+        self.web_scanner = WebScannerAgent(
             openai_client=self.openai_client,
             llm_model=self.llm_model,
         )
 
         print("✓ ThreatModelingAgent initialized")
+        if not self.scan_enable_vector_kb:
+            print("  Scan pipeline: vector/RAG KB disabled (SCAN_ENABLE_VECTOR_KB=false)")
+
+    @property
+    def kb_vector_search(self):
+        """Lazy VectorSearch so scan startup does not load embedding models."""
+        if self._kb_vector_search is None:
+            try:
+                self._kb_vector_search = VectorSearch(
+                    mongodb_client=self.mongo_client,
+                    collection_name="security_knowledge_base",
+                )
+            except Exception as e:
+                logger.warning("VectorSearch init failed — using disabled stub: %s", e)
+                self._kb_vector_search = VectorSearch(mongodb_client=None)
+        return self._kb_vector_search
 
     def _generate_cache_key(self, query: str, include_scan: bool = False) -> str:
         base = query.lower().strip()
@@ -832,12 +863,19 @@ Answer:"""
         if verbose:
             print("PHASE 1: KNOWLEDGE GATHERING")
 
+        # Web/AI scan: skip Atlas vector/RAG (not required). Non-scan RAG routes
+        # still use vector search via research_sub_questions_hybrid defaults.
+        use_vector_kb = (not enable_web_scan) or self.scan_enable_vector_kb
+        if enable_web_scan and not use_vector_kb and verbose:
+            print("  Vector/RAG KB skipped for scan pipeline")
+
         decomposition = await self.decompose_query(user_query)
         known_vulns   = await self.search_known_vulnerabilities_web(
-            user_query, target_url, verbose=verbose
+            user_query, target_url, verbose=verbose, use_vector_kb=use_vector_kb,
         )
         research      = await self.research_sub_questions_hybrid(
-            decomposition, filenames=filenames, verbose=verbose
+            decomposition, filenames=filenames, verbose=verbose,
+            use_vector_kb=use_vector_kb,
         )
 
         scan_results = None
@@ -901,10 +939,15 @@ Answer:"""
 
     async def search_known_vulnerabilities_web(self, query: str,
                                                target_url: Optional[str] = None,
-                                               verbose: bool = False) -> List[Dict]:
+                                               verbose: bool = False,
+                                               use_vector_kb: bool = True) -> List[Dict]:
         known_vulns = []
         if not self.web_search:
-            return await self.search_known_vulnerabilities_kb(query, target_url, verbose)
+            if use_vector_kb:
+                return await self.search_known_vulnerabilities_kb(
+                    query, target_url, verbose, use_vector_kb=True,
+                )
+            return []
 
         search_queries = []
         if target_url:
@@ -948,13 +991,23 @@ Answer:"""
                 if verbose:
                     print(f"    Search failed: {e}")
 
-        kb_results = await self.search_known_vulnerabilities_kb(query, target_url, verbose=False)
-        known_vulns.extend(kb_results)
+        if use_vector_kb:
+            kb_results = await self.search_known_vulnerabilities_kb(
+                query, target_url, verbose=False, use_vector_kb=True,
+            )
+            known_vulns.extend(kb_results)
+        elif verbose:
+            print("  Skipping KB vector search (disabled for this run)")
         return known_vulns
 
     async def search_known_vulnerabilities_kb(self, query: str,
                                               target_url: Optional[str] = None,
-                                              verbose: bool = False) -> List[Dict]:
+                                              verbose: bool = False,
+                                              use_vector_kb: bool = True) -> List[Dict]:
+        # Retained for non-scan RAG / optional scan enrichment.
+        if not use_vector_kb:
+            return []
+
         known_vulns    = []
         search_queries = []
         if target_url:
@@ -1019,13 +1072,31 @@ Answer:"""
 
     async def research_sub_questions_hybrid(self, decomposition: Dict,
                                             filenames: List[str] = None,
-                                            verbose: bool = False) -> Dict:
+                                            verbose: bool = False,
+                                            use_vector_kb: bool = True) -> Dict:
         research_results = {"task_1": [], "task_2": []}
 
         def normalize_sq(sq):
             if isinstance(sq, dict): return sq
             if isinstance(sq, str):  return {"question": sq, "preferred_source": None}
             return {"question": str(sq), "preferred_source": None}
+
+        if not use_vector_kb:
+            if verbose:
+                print("  Vector/RAG research skipped (use_vector_kb=false)")
+            for task_key, task_label in [
+                ("task_1_system_understanding", "task_1"),
+                ("task_2_security_analysis",    "task_2"),
+            ]:
+                for sq_raw in decomposition.get(task_key, []):
+                    sq = normalize_sq(sq_raw)
+                    research_results[task_label].append({
+                        "question":         sq.get("question", ""),
+                        "preferred_source": sq.get("preferred_source"),
+                        "kb_findings":      [],
+                        "user_findings":    [],
+                    })
+            return research_results
 
         for task_key, task_label in [
             ("task_1_system_understanding", "task_1"),
@@ -1068,7 +1139,7 @@ Answer:"""
 
     async def _search_user_docs(self, query: str, filenames: List[str] = None,
                                 top_k: int = 2) -> List[Dict]:
-        if not self.user_vectorstore:
+        if not self.user_vectorstore or self.rag_collection is None:
             return []
         try:
             mongo_filter = {"filename": {"$in": filenames}} if filenames else {}

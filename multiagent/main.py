@@ -16,7 +16,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from pymongo import MongoClient
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_core.documents import Document
@@ -32,7 +31,6 @@ from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermi
 from autogen_agentchat.messages import TextMessage, UserMessage
 from autogen_core.models import CreateResult, RequestUsage
 from autogen_agentchat.base import Response, TaskResult
-import certifi
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,39 +136,50 @@ app.add_middleware(
 # MONGODB & VECTOR STORE
 # ============================================================================
 
-mongodb_uri = os.getenv("MONGODB_ATLAS_URI")
+from agents.mongo_support import create_mongo_client, ping_mongo, sanitize_retrieval_error
+
+mongodb_uri = os.getenv("MONGODB_ATLAS_URI") or os.getenv("MONGODB_URI")
 if not mongodb_uri:
-    raise ValueError("MONGODB_ATLAS_URI environment variable is required")
-
-try:
-    logger.info("Connecting to MongoDB Atlas...")
-    mongo_client = MongoClient(
-        mongodb_uri,
-        tls=True,
-        tlsAllowInvalidCertificates=True,
-        tlsCAFile=certifi.where(),
+    logger.warning(
+        "MONGODB_ATLAS_URI not set — RAG/KB disabled; web+AI scan still available"
     )
-    logger.info("✓ MongoDB client initialized")
-except Exception as e:
-    logger.warning(f"MongoDB initialization warning: {e}")
     mongo_client = None
-
-if mongo_client:
-    try:
-        collection  = mongo_client["multiagentllm"]["RAG"]
-        vectorstore = MongoDBAtlasVectorSearch(
-            collection=collection,
-            embedding=SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"),
-            index_name="vector_index",
-            text_key="page_content",
-        )
-        logger.info("✓ Vector store initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize vectorstore: {e}")
-        vectorstore = None
-else:
-    logger.error("MongoDB not available")
     vectorstore = None
+else:
+    logger.info("Connecting to MongoDB Atlas (fail-fast TLS)...")
+    mongo_client = create_mongo_client(mongodb_uri)
+    mongo_ok, mongo_detail = ping_mongo(mongo_client)
+    if mongo_ok:
+        logger.info("✓ MongoDB Atlas ping OK")
+    else:
+        logger.warning(
+            "✗ MongoDB Atlas unreachable — RAG/KB disabled; web+AI scan still runs. Detail: %s",
+            mongo_detail[:300],
+        )
+        # Keep client=None so callers skip KB instead of waiting on dead TLS repeatedly.
+        try:
+            if mongo_client is not None:
+                mongo_client.close()
+        except Exception:
+            pass
+        mongo_client = None
+
+    if mongo_client:
+        try:
+            collection  = mongo_client["multiagentllm"]["RAG"]
+            vectorstore = MongoDBAtlasVectorSearch(
+                collection=collection,
+                embedding=SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"),
+                index_name="vector_index",
+                text_key="page_content",
+            )
+            logger.info("✓ Vector store initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize vectorstore: {e}")
+            vectorstore = None
+    else:
+        logger.error("MongoDB not available — continuing without knowledge base")
+        vectorstore = None
 
 # ============================================================================
 # AGENT IMPORTS & INITIALIZATION
@@ -217,17 +226,23 @@ async def web_search_wrapper(query: str) -> List[Dict]:
 # THREAT MODELING AGENT
 # ============================================================================
 
+threat_modeling_init_error = None
 try:
     active_client, _ = get_active_client()
     threat_modeling_agent = ThreatModelingAgent(
-        mongodb_client=mongo_client,
+        mongodb_client=mongo_client,  # may be None when Atlas offline — agent still starts
         openai_client=active_client,
         vectorstore=vectorstore,
         web_search_function=web_search_wrapper,
     )
     logger.info("✓ Threat Modeling Agent initialized")
 except Exception as e:
-    logger.warning(f"Threat Modeling Agent init failed: {e}")
+    threat_modeling_init_error = f"{type(e).__name__}: {e}"
+    logger.warning(
+        "Threat Modeling Agent init failed: %s\n%s",
+        e,
+        traceback.format_exc(),
+    )
     threat_modeling_agent = None
 
 logger.info("✓ All agents initialized")
@@ -450,22 +465,27 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    try:
-        mongo_client.admin.command('ping')
-        mongo_status = "connected"
-    except Exception as e:
-        mongo_status = f"error: {str(e)}"
+    ok, detail = ping_mongo(mongo_client)
+    mongo_status = "connected" if ok else f"error: {detail[:240]}"
 
     return {
-        "status":          "healthy",
+        "status":          "healthy" if ok else "degraded",
         "mongodb":         mongo_status,
         "vectorstore":     "initialized" if vectorstore else "unavailable",
         "agents":          "ready",
         "autogen":         "enabled",
         "threat_modeling": "available" if threat_modeling_agent else "not initialized",
+        "threat_modeling_init_error": threat_modeling_init_error,
         "web_scanning":    "enabled",
-        "ai_backdoor":     "enabled",   # ← new
-        "avid_lookup":     "enabled",   # ← new
+        "kb_required_for_scan": False,
+        "scan_vector_kb": (
+            "enabled" if (
+                threat_modeling_agent
+                and getattr(threat_modeling_agent, "scan_enable_vector_kb", False)
+            ) else "disabled"
+        ),
+        "ai_backdoor":     "enabled",
+        "avid_lookup":     "enabled",
         "active_sessions": len(session_teams),
     }
 
@@ -475,8 +495,16 @@ async def health_check():
 
 @app.get("/documents")
 async def list_all_documents():
+    """List RAG documents. Never 500 on Atlas TLS outages — UI expects 200."""
+    if mongo_client is None:
+        return {
+            "total_documents": 0,
+            "documents": [],
+            "mongodb": "offline",
+            "error": "MongoDB offline — document list unavailable",
+        }
     try:
-        col      = mongo_client["multiagentllm"]["RAG"]
+        col = mongo_client["multiagentllm"]["RAG"]
         pipeline = [
             {"$group": {"_id": "$filename", "count": {"$sum": 1},
                         "first_upload": {"$min": "$_id"}}},
@@ -486,9 +514,15 @@ async def list_all_documents():
             {"filename": d["_id"], "chunk_count": d["count"]}
             for d in col.aggregate(pipeline) if d["_id"]
         ]
-        return {"total_documents": len(documents), "documents": documents}
+        return {"total_documents": len(documents), "documents": documents, "mongodb": "connected"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("GET /documents failed (Mongo unreachable): %s", str(e)[:240])
+        return {
+            "total_documents": 0,
+            "documents": [],
+            "mongodb": "error",
+            "error": sanitize_retrieval_error(e),
+        }
 
 # ============================================================================
 # FILE UPLOAD
@@ -728,16 +762,22 @@ async def query_with_full_autogen(request: Request):
         elif session_documents.get(session_id):
             search_filenames = session_documents[session_id]
 
-        # Retrieve context from KB
+        # Retrieve context from KB (optional — scan path does not depend on this)
         try:
-            db_answer         = await answer_question_from_db(
-                question=question, filenames=search_filenames
-            )
-            retrieved_context = str(db_answer)
-            logger.info(f"Retrieved {len(retrieved_context)} chars from KB")
+            if not vectorstore and not mongo_client:
+                retrieved_context = (
+                    "Knowledge base unavailable (MongoDB Atlas offline). "
+                    "Answer from general security knowledge; cite that KB was skipped."
+                )
+            else:
+                db_answer         = await answer_question_from_db(
+                    question=question, filenames=search_filenames
+                )
+                retrieved_context = str(db_answer)
+                logger.info(f"Retrieved {len(retrieved_context)} chars from KB")
         except Exception as e:
             logger.error(f"Retrieval error: {e}")
-            retrieved_context = f"Error retrieving context: {str(e)}"
+            retrieved_context = sanitize_retrieval_error(e)
 
         # AutoGen conversation
         try:
@@ -819,7 +859,10 @@ async def query_stream(request: StreamQueryRequest):
             await asyncio.sleep(0)
 
             if not threat_modeling_agent:
-                yield _format_sse("error", {"message": "Agent not initialized"})
+                detail = threat_modeling_init_error or "unknown init failure — check server logs"
+                yield _format_sse("error", {
+                    "message": f"Agent not initialized: {detail}",
+                })
                 return
 
             is_security = threat_modeling_agent.is_security_query(question)
@@ -848,12 +891,18 @@ async def query_stream(request: StreamQueryRequest):
                     search_filenames = session_documents[session_id]
 
                 try:
-                    db_answer = await answer_question_from_db(
-                        question=question, filenames=search_filenames
-                    )
-                    retrieved_context = str(db_answer)
+                    if not vectorstore and not mongo_client:
+                        retrieved_context = (
+                            "Knowledge base unavailable (MongoDB Atlas offline). "
+                            "Answer from general security knowledge; cite that KB was skipped."
+                        )
+                    else:
+                        db_answer = await answer_question_from_db(
+                            question=question, filenames=search_filenames
+                        )
+                        retrieved_context = str(db_answer)
                 except Exception as e:
-                    retrieved_context = f"Error: {str(e)}"
+                    retrieved_context = sanitize_retrieval_error(e)
 
                 yield _format_sse("progress", {
                     "phase": "knowledge_gathering", "step": 2, "total_steps": 4,
@@ -916,19 +965,26 @@ async def query_stream(request: StreamQueryRequest):
             )
 
             target_url   = threat_modeling_agent._extract_url_from_query(question)
+            # Scan path: skip Atlas vector/RAG (code retained; re-enable via SCAN_ENABLE_VECTOR_KB).
+            use_vector_kb = (
+                (not is_web_scan)
+                or getattr(threat_modeling_agent, "scan_enable_vector_kb", False)
+            )
             known_vulns  = await threat_modeling_agent.search_known_vulnerabilities_web(
-                question, target_url, verbose=True
+                question, target_url, verbose=True, use_vector_kb=use_vector_kb,
             )
 
             yield _format_sse("progress", {
                 "phase": "knowledge_gathering", "step": 2, "total_steps": 6,
-                "message": f"{sub_q_count} sub-questions · {len(known_vulns)} CVE references",
+                "message": f"{sub_q_count} sub-questions · {len(known_vulns)} CVE references"
+                           + ("" if use_vector_kb else " · KB vector skipped"),
                 "percent": 35,
             })
             await asyncio.sleep(0)
 
             research = await threat_modeling_agent.research_sub_questions_hybrid(
-                decomposition, filenames=filenames, verbose=True
+                decomposition, filenames=filenames, verbose=True,
+                use_vector_kb=use_vector_kb,
             )
 
             yield _format_sse("progress", {
@@ -1059,7 +1115,8 @@ async def scan_web_application(request: Request):
         if not target_url:
             raise HTTPException(status_code=400, detail="Missing target_url")
         if not threat_modeling_agent:
-            raise HTTPException(status_code=503, detail="Scanner not available")
+            detail = threat_modeling_init_error or "unknown init failure — check server logs"
+            raise HTTPException(status_code=503, detail=f"Scanner not available: {detail}")
 
         logger.info(f"SCAN: {target_url}")
 
@@ -1110,7 +1167,8 @@ async def threat_modeling_query(request: Request):
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
         if not threat_modeling_agent:
-            raise HTTPException(status_code=503, detail="Agent not available")
+            detail = threat_modeling_init_error or "unknown init failure — check server logs"
+            raise HTTPException(status_code=503, detail=f"Agent not available: {detail}")
 
         if not threat_modeling_agent.is_security_query(question):
             return JSONResponse({

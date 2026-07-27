@@ -156,7 +156,11 @@ class WebScannerAgent:
 
         self.ai_fingerprinter = AIFingerprintAgent(timeout=8)
         self.avid_lookup      = AVIDLookupAgent(timeout=15)
-        self.ai_vuln_tester   = AIVulnerabilityTester(timeout=10, openai_client=self.openai_client)
+        self.ai_vuln_tester   = AIVulnerabilityTester(
+            timeout=10,
+            llm_model=self.llm_model,
+            openai_client=self.openai_client,
+        )
         self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client, llm_model=self.llm_model)
 
         print(" WebScannerAgent initialized ")
