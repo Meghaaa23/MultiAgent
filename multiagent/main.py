@@ -140,42 +140,46 @@ from agents.mongo_support import create_mongo_client, ping_mongo, sanitize_retri
 
 mongodb_uri = os.getenv("MONGODB_ATLAS_URI") or os.getenv("MONGODB_URI")
 if not mongodb_uri:
-    raise ValueError("MONGODB_ATLAS_URI environment variable is required")
-
-logger.info("Connecting to MongoDB Atlas (fail-fast TLS)...")
-mongo_client = create_mongo_client(mongodb_uri)
-mongo_ok, mongo_detail = ping_mongo(mongo_client)
-if mongo_ok:
-    logger.info("✓ MongoDB Atlas ping OK")
-else:
     logger.warning(
-        "✗ MongoDB Atlas unreachable — RAG/KB disabled; web+AI scan still runs. Detail: %s",
-        mongo_detail[:300],
+        "MONGODB_ATLAS_URI not set — RAG/KB disabled; web+AI scan still available"
     )
-    # Keep client=None so callers skip KB instead of waiting on dead TLS repeatedly.
-    try:
-        if mongo_client is not None:
-            mongo_client.close()
-    except Exception:
-        pass
     mongo_client = None
-
-if mongo_client:
-    try:
-        collection  = mongo_client["multiagentllm"]["RAG"]
-        vectorstore = MongoDBAtlasVectorSearch(
-            collection=collection,
-            embedding=SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"),
-            index_name="vector_index",
-            text_key="page_content",
-        )
-        logger.info("✓ Vector store initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize vectorstore: {e}")
-        vectorstore = None
-else:
-    logger.error("MongoDB not available — continuing without knowledge base")
     vectorstore = None
+else:
+    logger.info("Connecting to MongoDB Atlas (fail-fast TLS)...")
+    mongo_client = create_mongo_client(mongodb_uri)
+    mongo_ok, mongo_detail = ping_mongo(mongo_client)
+    if mongo_ok:
+        logger.info("✓ MongoDB Atlas ping OK")
+    else:
+        logger.warning(
+            "✗ MongoDB Atlas unreachable — RAG/KB disabled; web+AI scan still runs. Detail: %s",
+            mongo_detail[:300],
+        )
+        # Keep client=None so callers skip KB instead of waiting on dead TLS repeatedly.
+        try:
+            if mongo_client is not None:
+                mongo_client.close()
+        except Exception:
+            pass
+        mongo_client = None
+
+    if mongo_client:
+        try:
+            collection  = mongo_client["multiagentllm"]["RAG"]
+            vectorstore = MongoDBAtlasVectorSearch(
+                collection=collection,
+                embedding=SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"),
+                index_name="vector_index",
+                text_key="page_content",
+            )
+            logger.info("✓ Vector store initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize vectorstore: {e}")
+            vectorstore = None
+    else:
+        logger.error("MongoDB not available — continuing without knowledge base")
+        vectorstore = None
 
 # ============================================================================
 # AGENT IMPORTS & INITIALIZATION
@@ -478,10 +482,16 @@ async def health_check():
 
 @app.get("/documents")
 async def list_all_documents():
+    """List RAG documents. Never 500 on Atlas TLS outages — UI expects 200."""
+    if mongo_client is None:
+        return {
+            "total_documents": 0,
+            "documents": [],
+            "mongodb": "offline",
+            "error": "MongoDB offline — document list unavailable",
+        }
     try:
-        if mongo_client is None:
-            return {"total_documents": 0, "documents": [], "error": "MongoDB offline"}
-        col      = mongo_client["multiagentllm"]["RAG"]
+        col = mongo_client["multiagentllm"]["RAG"]
         pipeline = [
             {"$group": {"_id": "$filename", "count": {"$sum": 1},
                         "first_upload": {"$min": "$_id"}}},
@@ -491,9 +501,15 @@ async def list_all_documents():
             {"filename": d["_id"], "chunk_count": d["count"]}
             for d in col.aggregate(pipeline) if d["_id"]
         ]
-        return {"total_documents": len(documents), "documents": documents}
+        return {"total_documents": len(documents), "documents": documents, "mongodb": "connected"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("GET /documents failed (Mongo unreachable): %s", str(e)[:240])
+        return {
+            "total_documents": 0,
+            "documents": [],
+            "mongodb": "error",
+            "error": sanitize_retrieval_error(e),
+        }
 
 # ============================================================================
 # FILE UPLOAD
