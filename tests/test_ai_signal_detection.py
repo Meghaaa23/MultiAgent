@@ -184,15 +184,23 @@ def test_inference_path_helper():
     assert _is_inference_path("/api/chat")
     assert _is_inference_path("/v1/chat/completions")
     assert _is_inference_path("/api/ask")
+    assert _is_inference_path("/api/messages")
     assert not _is_inference_path("/api/models")
     assert not _is_inference_path("/health")
+    assert not _is_inference_path("/messages")          # Slack robots trap
+    assert not _is_inference_path("/v2")                # monday.com GraphQL root
+    assert not _is_inference_path("/v2/get_schema")
 
 
 def test_live_surface_keys_exclude_passive_brand():
     assert "page_title_ai" not in LIVE_SURFACE_EVIDENCE_KEYS
     assert "js_ai_sdk" not in LIVE_SURFACE_EVIDENCE_KEYS
+    assert "openapi_schema" not in LIVE_SURFACE_EVIDENCE_KEYS
+    assert "graphql_schema" not in LIVE_SURFACE_EVIDENCE_KEYS
+    assert "robots_ai_path" not in LIVE_SURFACE_EVIDENCE_KEYS
     assert "behavior_llm_response" in LIVE_SURFACE_EVIDENCE_KEYS
     assert "ml_endpoint_401_403" in LIVE_SURFACE_EVIDENCE_KEYS
+    assert "openapi_ai_endpoint" in LIVE_SURFACE_EVIDENCE_KEYS
 
 
 def test_title_alone_does_not_identify_framework():
@@ -407,6 +415,91 @@ def test_generated_sitemap_not_ai_path():
     assert AIFingerprintAgent._is_ai_api_path("/generated_sitemap_part1.xml") is False
     assert AIFingerprintAgent._is_ai_api_path("/v1/chat/completions") is True
     assert AIFingerprintAgent._is_ai_api_path("/api/messages") is True
+    assert AIFingerprintAgent._is_ai_api_path("/messages") is False
+    assert AIFingerprintAgent._is_ai_api_path("/v2") is False
+    assert AIFingerprintAgent._is_ai_api_path("/v2/get_schema") is False
+
+
+class MarketingAiTitleWithGenericOpenAPI(BaseHTTPRequestHandler):
+    """monday.com-style FP: AI marketing copy + OpenAPI for a non-AI product API."""
+
+    SHELL = (
+        "<!DOCTYPE html><html><head>"
+        "<title>The AI Work Platform for People &amp; Agents | Example</title>"
+        "<meta name='description' content='Get more work done with AI agents'>"
+        "</head><body><h1>Welcome</h1></body></html>"
+    )
+    SPEC = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/v2": {"post": {"summary": "GraphQL"}},
+            "/v2/get_schema": {"get": {"summary": "schema"}},
+        },
+    }
+
+    def _html(self):
+        data = self.SHELL.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, obj: dict):
+        data = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/openapi.json":
+            self._json(self.SPEC)
+            return
+        if path == "/robots.txt":
+            body = b"User-agent: *\nDisallow: /messages\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._html()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_generic_openapi_plus_ai_marketing_not_ai():
+    """Any OpenAPI + 'AI' in the title must not escalate without AI-shaped paths."""
+    port = _free_port()
+    srv = _run_server(MarketingAiTitleWithGenericOpenAPI, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["is_ai_powered"] is False
+        assert result["ml_endpoints"] == []
+        assert result.get("capabilities") in ([], None) or len(result.get("capabilities") or []) == 0
+        assert not any(
+            e.get("key") == "openapi_ai_endpoint"
+            for e in result.get("evidence_items") or []
+        )
+        # Bare /messages in robots.txt must not become robots_ai_path.
+        assert not any(
+            e.get("key") == "robots_ai_path"
+            for e in result.get("evidence_items") or []
+        )
+    finally:
+        srv.shutdown()
 
 
 def test_vuln_tester_no_generic_spray_without_endpoints():

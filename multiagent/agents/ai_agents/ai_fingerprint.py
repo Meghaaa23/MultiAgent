@@ -44,7 +44,7 @@ class ProbeCanary:
 
 
 EVIDENCE_WEIGHTS: Dict[str, int] = {
-    "openapi_schema":           18,
+    "openapi_schema":            4,   # passive inventory — not live surface
     "openapi_ai_endpoint":      14,
     "graphql_schema":           14,
     "graphql_ai_field":         12,
@@ -72,7 +72,8 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
     "error_generic_validation":  4,
 
     "sse_streaming_header":     10,
-    "sse_chunked_transfer":      8,
+    # Chunked transfer is ubiquitous HTTP — not an AI signal (do not score).
+    "sse_chunked_transfer":      0,
     "sse_in_js":                 6,
     "websocket_ai_path":         6,
 
@@ -147,9 +148,9 @@ LIVE_SURFACE_EVIDENCE_KEYS = {
     "ml_endpoint_200",
     "ml_endpoint_401_403",
     # Bare HTTP 405 is NOT live surface — CDNs often 405 every unknown POST.
-    "openapi_schema",
+    # Bare openapi_schema / graphql_schema is NOT live surface — most SaaS
+    # products publish OpenAPI for CRM/ops APIs (monday.com /v2, etc.).
     "openapi_ai_endpoint",
-    "graphql_schema",
     "graphql_ai_field",
     "error_openai_format",
     "error_missing_messages",
@@ -160,9 +161,13 @@ LIVE_SURFACE_EVIDENCE_KEYS = {
     "chatbot_ui_live_surface",
 }
 
+# Inference-shaped paths only. Avoid SaaS messaging traps (/messages) and
+# version roots (/v2) that are ordinary product APIs, not LLM gateways.
 _INFERENCE_PATH_RE = re.compile(
-    r"/(?:chat|completions?|generate|messages|ask|predict(?:ion)?|"
-    r"embeddings?|inference|invoke|run|agents?|convos?|conversations?)\b",
+    r"/(?:(?:api|v\d+|openai)/)?(?:chat(?:/completions?)?|completions?|"
+    r"embeddings?|generate|ask|predict(?:ion)?|inference|infer|invoke|"
+    r"agents?|assistants?|llm)\b"
+    r"|/(?:api|v\d+|chat|openai)/messages?\b",
     re.I,
 )
 
@@ -697,7 +702,7 @@ class AIFingerprintAgent:
             or any(ev.key in {
                 "behavior_llm_response", "behavior_model_reported",
                 "behavior_streaming", "chat_endpoint_200", "ml_endpoint_200",
-                "ml_endpoint_401_403", "openapi_schema", "openapi_ai_endpoint",
+                "ml_endpoint_401_403", "openapi_ai_endpoint",
                 "error_openai_format", "error_missing_messages", "error_missing_model",
             } for ev in all_evidence)
         )
@@ -767,15 +772,15 @@ class AIFingerprintAgent:
         atlas: List[str] = []
         for ep in ml_endpoints:
             path = urllib.parse.urlparse(ep).path.lower()
-            if any(x in path for x in ["/chat", "/completions", "/generate", "/messages"]):
+            if any(x in path for x in ["/chat", "/completions", "/generate"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["chat"])
             elif any(x in path for x in ["/embed", "/embedding"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["embedding"])
-            else:
+            elif _is_inference_path(path):
                 atlas.append(ATLAS_TECHNIQUE_MAP["ml"])
-        if openapi_schema:
+        if any(ev.key == "openapi_ai_endpoint" for ev in all_evidence):
             atlas.append(ATLAS_TECHNIQUE_MAP["schema"])
-        if graphql_types:
+        if any(ev.key == "graphql_ai_field" for ev in all_evidence):
             atlas.append(ATLAS_TECHNIQUE_MAP["graphql"])
         atlas = list(dict.fromkeys(atlas))
 
@@ -1006,24 +1011,38 @@ class AIFingerprintAgent:
 
     @staticmethod
     def _is_ai_api_path(path: str) -> bool:
-        """True for inference-ish path segments — not substring traps like /generated_."""
-        parts = [p for p in (path or "").lower().split("/") if p]
+        """True for inference-ish paths — not SaaS messaging or version roots.
+
+        Product-agnostic: match protocol/shape (chat completions, embeddings,
+        /api/messages), never brand names. Reject bare ``/messages`` (Slack)
+        and ``/v2`` (monday.com GraphQL) which are ordinary product APIs.
+        """
+        raw = (path or "").strip()
+        if not raw:
+            return False
+        parts = [p for p in raw.lower().split("/") if p]
         if not parts:
             return False
-        # Exact segment hits (avoid /generated_sitemap matching /generate).
-        ai_segments = {
+        # Exact strong segments (avoid /generated_sitemap matching generate).
+        strong = {
             "chat", "completions", "completion", "generate", "predict",
             "prediction", "embeddings", "embedding", "inference", "infer",
-            "messages", "message", "ask", "runs", "threads", "assistants",
-            "agents", "agent", "convos", "conversations", "llm",
+            "ask", "assistants", "assistant", "agents", "agent", "llm",
+            "invoke",
         }
-        if any(
-            seg in ai_segments or seg.split(".")[0] in ai_segments
-            for seg in parts
-        ):
-            return True
-        joined = "/" + "/".join(parts)
-        return bool(_INFERENCE_PATH_RE.search(joined))
+        for seg in parts:
+            base = seg.split(".")[0]
+            if base in strong:
+                return True
+        # messages only under API/version/chat prefix — not bare /messages.
+        if any(seg.split(".")[0] in {"messages", "message"} for seg in parts):
+            if len(parts) >= 2 and any(
+                seg in {"api", "chat", "openai", "llm"}
+                or re.fullmatch(r"v\d+", seg)
+                for seg in parts
+            ):
+                return True
+        return bool(_INFERENCE_PATH_RE.search("/" + "/".join(parts)))
 
     @staticmethod
     def _is_meaningful_405(headers_low: Dict, body: str) -> bool:
@@ -1133,21 +1152,28 @@ class AIFingerprintAgent:
                 if not (spec.get("openapi") or spec.get("swagger") or spec.get("paths")):
                     continue
                 schema = spec
-                spec_paths = spec.get("paths", {})
-                evidence.append(EvidenceItem.make(
-                    "openapi_schema",
-                    f"OpenAPI spec at {path} ({len(spec_paths)} paths)",
-                    "openapi", endpoint=url))
+                spec_paths = spec.get("paths", {}) or {}
+                ai_paths_found = []
                 for ep_path, methods in spec_paths.items():
+                    is_ai_path = self._is_ai_api_path(ep_path) or any(
+                        x in (ep_path or "").lower() for x in (
+                            "/chat", "/completions", "/generate", "/embed",
+                            "/predict", "/inference", "/assistants",
+                        )
+                    )
+                    # "/model" alone is too broad (model cars, data models).
+                    if not is_ai_path and re.search(
+                        r"/models?(?:/|$)|/embeddings?", (ep_path or "").lower()
+                    ):
+                        is_ai_path = True
+                    if not is_ai_path:
+                        continue
+                    ai_paths_found.append(ep_path)
                     endpoints.append(base + ep_path)
-                    if any(x in ep_path.lower() for x in [
-                        "/chat", "/completions", "/generate", "/embed",
-                        "/predict", "/inference", "/model", "/messages",
-                    ]):
-                        evidence.append(EvidenceItem.make(
-                            "openapi_ai_endpoint",
-                            f"AI path in spec: {ep_path}",
-                            "openapi", endpoint=base + ep_path))
+                    evidence.append(EvidenceItem.make(
+                        "openapi_ai_endpoint",
+                        f"AI path in spec: {ep_path}",
+                        "openapi", endpoint=base + ep_path))
                     if isinstance(methods, dict):
                         for method_def in methods.values():
                             if not isinstance(method_def, dict):
@@ -1159,12 +1185,23 @@ class AIFingerprintAgent:
                                      .get("properties", {}))
                             if "tools" in props or "functions" in props:
                                 capabilities.append("tool_calling")
-                            if "messages" in props:
+                            if "messages" in props and (
+                                "model" in props or "chat" in (ep_path or "").lower()
+                            ):
                                 capabilities.append("chat")
                             if "input" in props and "model" in props:
                                 capabilities.append("embedding")
+                # Record the spec as passive inventory; AI paths alone escalate.
+                evidence.append(EvidenceItem.make(
+                    "openapi_schema",
+                    f"OpenAPI spec at {path} ({len(spec_paths)} paths"
+                    f", {len(ai_paths_found)} AI-shaped)",
+                    "openapi", endpoint=url))
                 if verbose:
-                    print(f"    [openapi] {path}: {len(spec_paths)} paths")
+                    print(
+                        f"    [openapi] {path}: {len(spec_paths)} paths "
+                        f"({len(ai_paths_found)} AI-shaped)"
+                    )
                 break
             except Exception as exc:
                 logger.debug(f"[OpenAPI] {url}: {exc}")
@@ -1444,9 +1481,8 @@ class AIFingerprintAgent:
                 endpoints.append(url)
 
             if "chunked" in headers_low.get("transfer-encoding", ""):
-                evidence.append(EvidenceItem.make(
-                    "sse_chunked_transfer",
-                    f"Chunked transfer at {path}", "probe", endpoint=url))
+                # Ubiquitous on CDNs — do not emit as AI evidence.
+                pass
 
         if status in (401, 403):
             if not self._is_meaningful_auth(status, headers_low, body or "", canary):
@@ -1783,10 +1819,13 @@ class AIFingerprintAgent:
                 caps.update(FRAMEWORK_SIGNATURES[fw].get("capabilities", []))
 
         if openapi_schema:
-            caps.add("chat")
-            spec_paths = openapi_schema.get("paths", {})
+            spec_paths = openapi_schema.get("paths", {}) or {}
             for path in spec_paths:
                 path_l = path.lower()
+                if not self._is_ai_api_path(path):
+                    continue
+                if "chat" in path_l or "completion" in path_l or "generate" in path_l:
+                    caps.add("chat")
                 if "embed" in path_l:
                     caps.add("embedding")
                 if "image" in path_l or "vision" in path_l:
