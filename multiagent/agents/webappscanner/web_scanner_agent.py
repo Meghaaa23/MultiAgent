@@ -19,6 +19,10 @@ from ..ai_agents.ai_fingerprint            import AIFingerprintAgent
 from ..ai_agents.avid_lookup_agent         import AVIDLookupAgent
 from ..ai_agents.ai_vulnerability_test     import AIVulnerabilityTester
 from ..ai_agents.Ai_Infra_agent            import AIInfraAgent
+from ..ai_agents.chatbot_ui_probe          import (
+    enrich_fingerprint_with_chatbot_ui,
+    ui_warrants_vuln,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +69,14 @@ def _validate_stack(stack, response_headers, body):
 def _build_evidence_gated_stride(target_url, response_headers,
                                   discovered_params, discovered_forms,
                                   cors_misconfigured, stack,
-                                  headers_capture_failed: bool = False) -> List[Dict]:
+                                  headers_capture_failed: bool = False,
+                                  cors_finding: Optional[Dict] = None) -> List[Dict]:
+    """Build STRIDE rows from scanner evidence.
+
+    cors_finding: final merged CORS finding (Confirmed or Potential). When
+    provided, STRIDE status/likelihood/impact follow that finding — never
+    claim Evidence-confirmed while Section 4 lists the same issue as Potential.
+    """
     threats = []
     hdrs    = {k.lower(): v for k, v in response_headers.items()}
     xfo     = hdrs.get("x-frame-options", "")
@@ -95,15 +106,29 @@ def _build_evidence_gated_stride(target_url, response_headers,
             "confirmed":  False,
         })
 
-    if cors_misconfigured:
+    # Prefer the merged CORS finding so STRIDE cannot disagree with §4.
+    if cors_finding or cors_misconfigured:
+        cf = cors_finding or {}
+        status = str(cf.get("status") or ("Confirmed" if cors_misconfigured else "Potential"))
+        details = str(cf.get("details") or "")
+        confirmed = status == "Confirmed"
+        if confirmed:
+            evidence = details or "ACAO reflects attacker-controlled origin (confirmed)"
+            likelihood, impact = "High", "High"
+        else:
+            evidence = (
+                details
+                or "ACAO wildcard or weak CORS signal — unconfirmed / manual verification required"
+            )
+            likelihood, impact = "Low", "Low"
         threats.append({
             "category":   "Information Disclosure",
             "threat":     "CORS Misconfiguration",
-            "evidence":   "ACAO reflects attacker-controlled origin (confirmed)",
-            "likelihood": "High",
-            "impact":     "High",
+            "evidence":   evidence,
+            "likelihood": likelihood,
+            "impact":     impact,
             "mitigation": "Restrict ACAO to trusted origins; remove wildcard",
-            "confirmed":  True,
+            "confirmed":  confirmed,
         })
 
     def _inputs(form):
@@ -156,7 +181,11 @@ class WebScannerAgent:
 
         self.ai_fingerprinter = AIFingerprintAgent(timeout=8)
         self.avid_lookup      = AVIDLookupAgent(timeout=15)
-        self.ai_vuln_tester   = AIVulnerabilityTester(timeout=10, openai_client=self.openai_client)
+        self.ai_vuln_tester   = AIVulnerabilityTester(
+            timeout=10,
+            llm_model=self.llm_model,
+            openai_client=self.openai_client,
+        )
         self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client, llm_model=self.llm_model)
 
         print(" WebScannerAgent initialized ")
@@ -306,15 +335,44 @@ class WebScannerAgent:
                 verbose              = verbose,
             )
 
+            # Playwright/static chatbot UI channel (vendor widgets = detect-only).
+            try:
+                ai_fingerprint = await enrich_fingerprint_with_chatbot_ui(
+                    ai_fingerprint,
+                    target_url,
+                    html=html or "",
+                    verbose=verbose,
+                    allow_submit=True,
+                )
+            except Exception as ui_exc:
+                logger.debug("chatbot UI enrich skipped: %s", ui_exc)
+
             raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
             confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers"))
-            is_ai_powered = raw_is_ai and (confidence == "high" or has_concrete)
+            auth_paths   = ai_fingerprint.get("auth_required_paths") or []
+            chat_comps   = ai_fingerprint.get("chat_components") or []
+            has_ui       = ui_warrants_vuln(chat_comps)
+            has_concrete = bool(
+                ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("ai_headers")
+                or auth_paths
+                or has_ui
+            )
+            # Trust fingerprint live-surface gate; require concrete surface or
+            # high confidence so passive title/SDK hints alone never escalate.
+            # Injectable chatbot UI alone is enough to open AI escalation.
+            is_ai_powered = (
+                bool(raw_is_ai) and (
+                    confidence in ("high", "medium", "very_high") or has_concrete
+                )
+            ) or has_ui
 
             if is_ai_powered:
                 if verbose:
                     print(f"  AI-powered app detected [{confidence} confidence]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
+                    print(f"     Auth-gated : {len(auth_paths)} path(s)")
+                    print(f"     Chat UI    : {len(chat_comps)} widget(s)")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
                 if verbose:
@@ -502,7 +560,6 @@ class WebScannerAgent:
         if verbose:
             print(" Attack Verification...")
         verified_findings: List[Dict] = []
-        cors_misconfigured = False
         try:
             av_findings = await self.verifier.verify_all(
                 target_url=target_url, candidate_urls=all_urls,
@@ -523,19 +580,9 @@ class WebScannerAgent:
                         d["category"] = "security_header"
                         if d.get("severity") in ("Critical", "High"):
                             d["severity"] = "Medium"
-                    if "CORS" in d.get("type", "") and d.get("status") == "Confirmed":
-                        cors_misconfigured = True
                     verified_findings.append(d)
         except Exception as e:
             logger.error(f"Attack verification failed: {e}")
-
-        stride_threats = []
-        if all_forms or all_params or cors_misconfigured or initial_headers:
-            stride_threats = _build_evidence_gated_stride(
-                target_url, initial_headers, all_params,
-                all_forms, cors_misconfigured, stack,
-                headers_capture_failed=headers_capture_failed,
-            )
 
         seen:         set        = set()
         all_findings: List[Dict] = []
@@ -554,6 +601,23 @@ class WebScannerAgent:
             if key not in seen:
                 seen.add(key)
                 all_findings.append(f)
+
+        # STRIDE after merge so CORS/clickjacking status matches §3/§4 findings.
+        cors_finding = next(
+            (f for f in all_findings if "CORS" in f.get("type", "")),
+            None,
+        )
+        cors_misconfigured = bool(
+            cors_finding and cors_finding.get("status") == "Confirmed"
+        )
+        stride_threats = []
+        if all_forms or all_params or cors_finding or initial_headers:
+            stride_threats = _build_evidence_gated_stride(
+                target_url, initial_headers, all_params,
+                all_forms, cors_misconfigured, stack,
+                headers_capture_failed=headers_capture_failed,
+                cors_finding=cors_finding,
+            )
 
         if ai_vuln_results:
             for f in ai_vuln_results.get("confirmed_ai_vulns", []):
@@ -601,7 +665,6 @@ class WebScannerAgent:
         report_endpoints = []
         for ep in discovered_endpoints:
             if ep.get("access_controlled"):
-          
                 report_ep = dict(ep)
                 report_ep["category"]   = "discovered_protected"
                 report_ep["note"]       = (
@@ -609,8 +672,25 @@ class WebScannerAgent:
                     "Recon only, not an exposure."
                 )
                 report_endpoints.append(report_ep)
+            elif ep.get("spa_catch_all") or ep.get("note") == "spa-catch-all":
+                report_ep = dict(ep)
+                report_ep["interesting"] = False
+                report_ep["excluded"] = True
+                report_ep["exclude_reason"] = (
+                    ep.get("verification")
+                    or "SPA/soft-404 catch-all — not a distinct endpoint"
+                )
+                report_ep["category"] = "excluded_spa_catchall"
+                report_endpoints.append(report_ep)
             elif ep.get("interesting"):
                 report_endpoints.append(ep)
+
+        # Merge AI-fingerprint surfaces into the attack-surface list so §2
+        # matches §8 (fingerprinter probes paths discovery may not list).
+        if ai_fingerprint:
+            report_endpoints = self._merge_ai_surfaces_into_endpoints(
+                report_endpoints, ai_fingerprint, target_url,
+            )
 
         return {
             "target_url":             target_url,
@@ -643,6 +723,97 @@ class WebScannerAgent:
             "action_results": action_results,
             "headers_capture_failed": headers_capture_failed,
         }
+
+    @staticmethod
+    def _merge_ai_surfaces_into_endpoints(
+        endpoints: List[Dict],
+        ai_fingerprint: Dict,
+        target_url: str,
+    ) -> List[Dict]:
+        """Ensure AI-discovered inference/auth paths appear in attack surface."""
+        existing = {
+            (e.get("url") or "").rstrip("/")
+            for e in endpoints
+            if e.get("url")
+        }
+        merged = list(endpoints)
+
+        auth_by_url: Dict[str, Dict] = {}
+        for sig in ai_fingerprint.get("auth_required_paths") or []:
+            if isinstance(sig, dict):
+                url = (sig.get("endpoint") or sig.get("url") or "").rstrip("/")
+                if url:
+                    auth_by_url[url] = sig
+
+        def _normalize(ep: str) -> str:
+            if isinstance(ep, str) and ep.startswith("http"):
+                return ep
+            base = target_url.rstrip("/")
+            path = ep if str(ep).startswith("/") else f"/{ep}"
+            return base + path
+
+        def _upsert(url: str, status, auth_required: bool, source: str):
+            key = (url or "").rstrip("/")
+            if not key:
+                return
+            for e in merged:
+                if (e.get("url") or "").rstrip("/") == key:
+                    if auth_required:
+                        e["auth_required"] = True
+                        e["access_controlled"] = True
+                    if status not in (None, "?", ""):
+                        e["status"] = status
+                    e.setdefault("source", source)
+                    e["interesting"] = True
+                    return
+            if key in existing:
+                return
+            existing.add(key)
+            merged.append({
+                "url": url,
+                "method": "GET",
+                "source": source,
+                "status": status if status not in (None, "") else "?",
+                "interesting": True,
+                "auth_required": bool(auth_required),
+                "access_controlled": bool(auth_required),
+                "category": "ai_surface",
+                "params": [],
+            })
+
+        for ep in ai_fingerprint.get("ml_endpoints") or []:
+            url = _normalize(ep)
+            key = url.rstrip("/")
+            sig = auth_by_url.get(key)
+            _upsert(
+                url,
+                (sig or {}).get("status_code", "?"),
+                bool(sig) or key in auth_by_url,
+                "ai_fingerprint",
+            )
+
+        for key, sig in auth_by_url.items():
+            _upsert(
+                key,
+                sig.get("status_code", 401),
+                True,
+                "ai_fingerprint",
+            )
+
+        for rec in ai_fingerprint.get("classified_endpoints") or []:
+            if not isinstance(rec, dict):
+                continue
+            url = rec.get("url") or ""
+            if not url:
+                continue
+            _upsert(
+                url,
+                rec.get("status_code", "?"),
+                bool(rec.get("auth_required")),
+                "ai_fingerprint",
+            )
+
+        return merged
 
     async def _get_real_headers(self, url: str, verbose: bool = False) -> tuple:
         """

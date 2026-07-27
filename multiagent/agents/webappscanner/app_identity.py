@@ -11,6 +11,18 @@ logger = logging.getLogger(__name__)
 
 _APP_IDENTITY_MIN_CONFIDENCE = 88
 
+# Generic AI product cues in titles — never catalogued application brand names.
+_AI_TITLE_CUES = (
+    "chatbot", "assistant", "copilot", "llm", "gpt",
+    "ai agent", "ai chat", "ai assistant", "rag", "inference",
+)
+
+
+def _title_has_ai_cue(title_l: str) -> bool:
+    if re.search(r"(?:^|[^a-z])ai(?:[^a-z]|$)", title_l):
+        return True
+    return any(cue in title_l for cue in _AI_TITLE_CUES)
+
 
 @dataclass
 class AppIdentity:
@@ -83,14 +95,19 @@ def _from_page_title(html: str) -> Tuple[Optional[str], Optional[str], str]:
         return None, None, ""
 
     title    = m.group(1).strip()
+    title_l  = title.lower()
+
     segments = re.split(r'\s*[-|–—·•]\s*', title)
-    candidates = [segments[-1].strip(), segments[0].strip()]
+    # Prefer first segment (product name) over trailing marketing tagline.
+    candidates = [segments[0].strip(), segments[-1].strip()] if segments else []
 
     for candidate in candidates:
         candidate = re.sub(r'\s*\[.*?\]\s*$', '', candidate).strip()
         if _looks_like_app_name(candidate):
             version = _extract_version_from_string(candidate)
             name    = re.sub(r'\s*\d[\d.]*\s*$', '', candidate).strip()
+            if _title_has_ai_cue(title_l):
+                return name, version, f"page title (AI product): {title!r}"
             return name, version, f"page title: {title!r}"
 
     return None, None, ""
@@ -199,12 +216,18 @@ async def detect_app_identity(base_url: str,
                                html: str,
                                response_headers: Dict,
                                wappalyzer_cms: Optional[str] = None,
+                               wappalyzer_technologies=None,
                                verbose: bool = False) -> AppIdentity:
     
 
     if not isinstance(response_headers, dict):
         response_headers = dict(response_headers)
     response_headers = {k.lower(): v for k, v in response_headers.items()}
+
+    # Accept either legacy cms string or technologies list from the caller.
+    if wappalyzer_technologies is None and wappalyzer_cms:
+        wappalyzer_technologies = [{"name": wappalyzer_cms, "category": "CMS"}]
+    wappalyzer_technologies = wappalyzer_technologies or []
 
     signals: List[Tuple[str, Optional[str], str, int]] = []
 
@@ -229,6 +252,11 @@ async def detect_app_identity(base_url: str,
             name, version, evidence = fn()
             if name:
                 score = confidence_scores[extractor_name]
+                # Promote titles with generic AI cues (assistant/chatbot/…), not brands.
+                if extractor_name == "page_title" and evidence.startswith(
+                    "page title (AI product):"
+                ):
+                    score = 90
                 signals.append((name, version, evidence, score))
                 if verbose:
                     print(f"      [{extractor_name}] {name!r} v{version} — {evidence}")
@@ -260,15 +288,15 @@ async def detect_app_identity(base_url: str,
         pass
 
     technologies = _extract_technologies_from_headers(response_headers)
-    if wappalyzer_technologies:
-        for tech in wappalyzer_technologies:
-            if isinstance(tech, dict):
-                name = tech.get("name")
-                version = tech.get("version")
-
-                if name:
-                    entry = f"{name}/{version}" if version else name
-                    technologies.append(entry)
+    for tech in wappalyzer_technologies:
+        if isinstance(tech, dict):
+            name = tech.get("name")
+            version = tech.get("version")
+            if name:
+                entry = f"{name}/{version}" if version else name
+                technologies.append(entry)
+        elif isinstance(tech, str) and tech.strip():
+            technologies.append(tech.strip())
 
     for sig_name, sig_version, _, _ in signals:
         if sig_name:
@@ -302,24 +330,23 @@ async def detect_app_identity(base_url: str,
         None
     )
 
+    best_name, best_version, best_evidence, best_score = None, None, "", 0
     if best:
         best_name, best_version, best_evidence, best_score = best
-        
-        preferred_app = None
+
+        # Optionally prefer a Wappalyzer CMS name when present — do NOT clear
+        # a strong title/API identity when Wappalyzer has no CMS hit.
         if wappalyzer_technologies:
             for tech in wappalyzer_technologies:
                 if not isinstance(tech, dict):
                     continue
-
                 category = tech.get("category")
-                if category == "CMS":
-                    preferred_app = tech
-                elif category == "Other" and not tech.get("version") and tech.get("name") not in (
-                    "Ubuntu", "HTTP/2", "HTTP/3", "HSTS"
-                ):
-                    preferred_app = tech
-            else:
-                best_name, best_version, best_evidence, best_score = None, None, "", 0
+                if category == "CMS" and tech.get("name"):
+                    best_name    = tech.get("name")
+                    best_version = tech.get("version")
+                    best_evidence = f"wappalyzer CMS: {best_name}"
+                    best_score   = max(best_score, 92)
+                    break
 
     version_api_signal = next(
         (s for s in signals if "API" in s[2] and s[1]),

@@ -101,6 +101,25 @@ MED_IMPACT_CAPS  = {"memory", "multi_agent", "web_search", "browser", "retrieval
 _SEV_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 SKIP_STATUS = {404, 405, 501, 502, 503, 0}
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+@dataclass
+class _InfraCanary:
+    get_status: int = 0
+    post_status: int = 0
+
+    @property
+    def redirect_catch_all(self) -> bool:
+        return self.get_status in _REDIRECT_STATUSES
+
+    @property
+    def spa_catch_all(self) -> bool:
+        return self.get_status == 200
+
+    @property
+    def post_waf_catch_all(self) -> bool:
+        return self.post_status in (401, 403)
 
 
 def _normalize_caps(capabilities) -> set:
@@ -262,19 +281,45 @@ class AIInfraAgent:
             result.error = str(e)
         return result
 
-    async def _detect_catch_all(self, base_url: str) -> bool:
+    async def _detect_catch_all(self, base_url: str) -> _InfraCanary:
+        """Negative-control GET + POST. Redirect-all and blanket POST WAF matter."""
+        canary = _InfraCanary()
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, verify=False) as http:
-                r = await http.get(f"{base_url}{CANARY_PATH}", headers={"User-Agent": "Mozilla/5.0"})
-                if r.status_code == 200:
-                    logger.warning(
-                        "[AIInfraAgent] Catch-all/SPA-fallback detected at %s "
-                        "(nonexistent path returned 200). Switching to content-based verification.",
-                        base_url)
-                    return True
+            async with httpx.AsyncClient(
+                timeout=self.timeout, verify=False, follow_redirects=False,
+            ) as http:
+                headers = {"User-Agent": "Mozilla/5.0"}
+                r = await http.get(f"{base_url}{CANARY_PATH}", headers=headers)
+                canary.get_status = r.status_code
+                try:
+                    pr = await http.post(
+                        f"{base_url}{CANARY_PATH}", json={}, headers=headers,
+                    )
+                    canary.post_status = pr.status_code
+                except Exception:
+                    canary.post_status = 0
         except Exception:
-            pass
-        return False
+            return canary
+
+        if canary.spa_catch_all:
+            logger.warning(
+                "[AIInfraAgent] Catch-all/SPA-fallback detected at %s "
+                "(nonexistent path returned 200). Switching to content-based verification.",
+                base_url,
+            )
+        elif canary.redirect_catch_all:
+            logger.warning(
+                "[AIInfraAgent] Redirect-all detected at %s "
+                "(canary GET HTTP %s). Ignoring matching redirects as exposure.",
+                base_url, canary.get_status,
+            )
+        if canary.post_waf_catch_all:
+            logger.warning(
+                "[AIInfraAgent] POST WAF catch-all at %s "
+                "(canary POST HTTP %s). Ignoring matching 401/403 as auth.",
+                base_url, canary.post_status,
+            )
+        return canary
 
     def _select_paths(self, confirmed_paths: list) -> list:
         paths_to_probe = []
@@ -294,7 +339,8 @@ class AIInfraAgent:
         return list(dict.fromkeys(paths_to_probe))
 
     async def _probe_ai_endpoints(self, base_url: str, ai_stack: Optional[dict]) -> Tuple[dict, list, bool]:
-        is_catch_all = await self._detect_catch_all(base_url)
+        canary = await self._detect_catch_all(base_url)
+        is_catch_all = canary.spa_catch_all or canary.redirect_catch_all
 
         confirmed       = ai_stack.get("ml_endpoints", []) if ai_stack else []
         confirmed_paths = [urlparse(e).path for e in confirmed]
@@ -303,7 +349,10 @@ class AIInfraAgent:
         exposed: dict = {}
         auth_hits: list = []
 
-        async with httpx.AsyncClient(timeout=self.timeout, verify=False, follow_redirects=True) as http:
+        # Probe without following redirects so we can diff against the canary.
+        async with httpx.AsyncClient(
+            timeout=self.timeout, verify=False, follow_redirects=False,
+        ) as http:
             tasks   = [self._probe_path(http, base_url, p) for p in paths_to_probe]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -311,7 +360,9 @@ class AIInfraAgent:
             if isinstance(res, Exception):
                 continue
             status, body, ct = res
-            verdict = self._classify(status, body, ct, path, bool(confirmed_paths))
+            verdict = self._classify(
+                status, body, ct, path, bool(confirmed_paths), canary=canary,
+            )
             if verdict == "auth":
                 url = base_url + path
                 if url not in auth_hits:
@@ -326,12 +377,27 @@ class AIInfraAgent:
 
         return exposed, auth_hits, is_catch_all
 
-    def _classify(self, status: int, body: str, ct: str, path: str, have_confirmed: bool) -> str:
+    def _classify(
+        self,
+        status: int,
+        body: str,
+        ct: str,
+        path: str,
+        have_confirmed: bool,
+        canary: Optional[_InfraCanary] = None,
+    ) -> str:
         if _looks_html(ct, body):
             return "skip"
+        if canary and canary.redirect_catch_all and status == canary.get_status:
+            return "skip"
         if status in (401, 403):
+            # Blanket WAF 403/401 matching the POST canary is not auth evidence.
+            if canary and canary.post_waf_catch_all and status == canary.post_status:
+                return "skip"
             return "auth"
         if status in SKIP_STATUS:
+            return "skip"
+        if status in _REDIRECT_STATUSES:
             return "skip"
         if status == 200:
             if path in GENERIC_PATHS:

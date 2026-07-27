@@ -13,9 +13,38 @@ from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Negative-control path — must never exist on a real target.
+SCANNER_CANARY_PATH = (
+    "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
+)
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+@dataclass
+class ProbeCanary:
+    """Negative-control baseline for seed-path probes.
+
+    CDN/WAF marketing sites often return the same status for every unknown
+    path (301 catch-all) or every POST (blanket 403). Anything matching the
+    canary is noise, not an auth-gated AI surface.
+    """
+    get_status: int = 0
+    post_status: int = 0
+    get_body_prefix: str = ""
+    post_body_prefix: str = ""
+
+    @property
+    def redirect_catch_all(self) -> bool:
+        return self.get_status in _REDIRECT_STATUSES
+
+    @property
+    def post_waf_catch_all(self) -> bool:
+        return self.post_status in (401, 403)
+
 
 EVIDENCE_WEIGHTS: Dict[str, int] = {
-    "openapi_schema":           18,
+    "openapi_schema":            4,   # passive inventory — not live surface
     "openapi_ai_endpoint":      14,
     "graphql_schema":           14,
     "graphql_ai_field":         12,
@@ -43,7 +72,8 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
     "error_generic_validation":  4,
 
     "sse_streaming_header":     10,
-    "sse_chunked_transfer":      8,
+    # Chunked transfer is ubiquitous HTTP — not an AI signal (do not score).
+    "sse_chunked_transfer":      0,
     "sse_in_js":                 6,
     "websocket_ai_path":         6,
 
@@ -57,10 +87,22 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
     "csp_ai_domain":             6,
     "meta_ai_tag":               4,
     "favicon_known_framework":   5,
-
+    "page_title_ai":             8,
     "dom_assistant_role":        3,
     "html_ai_form":              3,
+
+    # Chatbot UI channel (Playwright / static HTML) — ordinal tiers.
+    "behavior_chatbot_ui_confirmed": 22,
+    "chatbot_ui_live_surface":       14,
+    "chatbot_ui_structural":          6,
+    "chatbot_ui_hint":                2,
+    "chatbot_ui_third_party":         1,
 }
+
+# Generic title cues only — never product/application brand names.
+AI_TITLE_KEYWORDS = (
+    "llm", "gpt", "chatbot", "assistant", "copilot", "rag", "inference",
+)
 
 CONFIDENCE_BANDS = [
     (100, "very_high"),
@@ -78,102 +120,61 @@ def score_to_confidence(score: int) -> str:
     return "none"
 
 
+# Protocol / response-shape signatures only — no product/application names.
+# Naming here is a protocol label (e.g. OpenAI-compatible), never an app brand.
 FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
-    "Open WebUI": {
-        "headers":     {"x-open-webui": None},
-        "paths":       ["/api/chat", "/api/models", "/api/chat/completions"],
-        "js_strings":  ["open-webui", "OpenWebUI", "webui-logo"],
-        "js_globals":  ["WEBUI_NAME", "WEBUI_URL"],
-        "cookie_names":["webui-session"],
-        "capabilities": ["chat", "rag", "tool_calling", "image_generation", "web_search"],
-    },
-    "Flowise": {
-        "paths":       ["/api/v1/prediction", "/api/v1/chatflows", "/api/v1/nodes"],
-        "js_strings":  ["flowise", "Flowise", "FlowiseAI"],
-        "js_globals":  ["FLOWISE_URL"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow"],
-    },
-    "Langflow": {
-        "paths":       ["/api/v1/flows", "/api/v1/run", "/api/v1/components"],
-        "js_strings":  ["langflow", "Langflow"],
-        "js_globals":  ["LANGFLOW_AUTO_LOGIN"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow", "multi_agent"],
-    },
-    "Dify": {
-        "paths":       ["/api/chat-messages", "/api/workflows/run", "/api/apps"],
-        "js_strings":  ["dify.ai", "Dify", "difyChatbot"],
-        "cookie_names":["dify_session"],
-        "capabilities": ["chat", "rag", "tool_calling", "workflow", "image_generation"],
-    },
-    "AnythingLLM": {
-        "paths":       ["/api/workspace", "/api/chat", "/api/system/env"],
-        "js_strings":  ["anythingllm", "AnythingLLM", "mintplex"],
-        "capabilities": ["chat", "rag", "memory"],
-    },
-    "LibreChat": {
-        "paths":       ["/api/messages", "/api/ask", "/api/convos"],
-        "js_strings":  ["librechat", "LibreChat"],
-        "cookie_names":["refreshToken"],
-        "capabilities": ["chat", "tool_calling", "image_generation", "web_search"],
-    },
-    "LobeChat": {
-        "paths":       ["/api/chat", "/api/openai"],
-        "js_strings":  ["lobe-chat", "LobeChat", "@lobehub"],
-        "capabilities": ["chat", "tool_calling", "image_generation"],
-    },
-    "OpenHands": {
-        "paths":       ["/api/conversations", "/api/submit-feedback", "/api/options/config"],
-        "js_strings":  ["OpenHands", "opendevin", "openhands"],
-        "capabilities": ["code_execution", "shell", "filesystem", "browser", "multi_agent"],
-    },
-    "CrewAI": {
-        "paths":       ["/api/crews", "/api/kickoff", "/api/agents"],
-        "js_strings":  ["crewai", "CrewAI"],
-        "capabilities": ["multi_agent", "tool_calling", "workflow"],
-    },
-    "AutoGen": {
-        "paths":       ["/api/messages", "/api/agents", "/api/run"],
-        "js_strings":  ["autogen", "AutoGen", "pyautogen"],
-        "capabilities": ["multi_agent", "code_execution", "tool_calling"],
-    },
-    "LangGraph": {
-        "paths":       ["/runs", "/threads", "/assistants", "/store"],
-        "js_strings":  ["langgraph", "LangGraph", "@langchain/langgraph"],
-        "capabilities": ["multi_agent", "memory", "workflow", "tool_calling"],
-    },
-    "Haystack": {
-        "paths":       ["/query", "/pipeline", "/document-store"],
-        "js_strings":  ["haystack", "deepset"],
-        "capabilities": ["rag", "chat", "tool_calling"],
-    },
-    "Ollama": {
-        "paths":       ["/api/chat", "/api/generate", "/api/tags", "/api/version",
-                        "/api/show", "/api/pull", "/api/delete", "/api/copy"],
-        "headers":     {"x-ollama-version": None},
-        "js_strings":  ["ollama", "Ollama"],
-        "body_patterns": [r'"done_reason"', r'"total_duration"', r'"eval_count"'],
-        "capabilities": ["chat", "embedding"],
-    },
-    "vLLM": {
-        "paths":       ["/v1/chat/completions", "/v1/completions", "/v1/models"],
-        "headers":     {"server": "vllm"},
-        "body_patterns": [r'"object"\s*:\s*"chat\.completion"'],
-        "capabilities": ["chat", "embedding"],
-    },
-    "TGI (HuggingFace)": {
-        "paths":       ["/generate", "/generate_stream", "/v1/chat/completions"],
-        "headers":     {"server": "text-generation-inference"},
-        "body_patterns": [r'"generated_text"', r'"details".*"finish_reason"'],
-        "capabilities": ["chat", "embedding"],
-    },
     "OpenAI-compatible": {
-        "paths":       ["/v1/chat/completions", "/v1/completions", "/v1/models",
-                        "/v1/embeddings"],
-        "body_patterns": [r'"choices"\s*:\s*\[', r'"object"\s*:\s*"chat\.completion"',
-                          r'"finish_reason"'],
+        "paths": [
+            "/v1/chat/completions", "/v1/completions", "/v1/models",
+            "/v1/embeddings", "/api/chat/completions",
+        ],
+        "body_patterns": [
+            r'"choices"\s*:\s*\[',
+            r'"object"\s*:\s*"chat\.completion"',
+            r'"finish_reason"',
+        ],
         "capabilities": ["chat", "embedding", "image_generation"],
     },
 }
+
+
+LIVE_SURFACE_EVIDENCE_KEYS = {
+    "behavior_llm_response",
+    "behavior_model_reported",
+    "behavior_streaming",
+    "chat_endpoint_200",
+    "embedding_endpoint_200",
+    "tool_endpoint_200",
+    "ml_endpoint_200",
+    "ml_endpoint_401_403",
+    # Bare HTTP 405 is NOT live surface — CDNs often 405 every unknown POST.
+    # Bare openapi_schema / graphql_schema is NOT live surface — most SaaS
+    # products publish OpenAPI for CRM/ops APIs (monday.com /v2, etc.).
+    "openapi_ai_endpoint",
+    "graphql_ai_field",
+    "error_openai_format",
+    "error_missing_messages",
+    "error_missing_model",
+    "sse_streaming_header",
+    "ai_response_header",
+    "behavior_chatbot_ui_confirmed",
+    "chatbot_ui_live_surface",
+}
+
+# Inference-shaped paths only. Avoid SaaS messaging traps (/messages) and
+# version roots (/v2) that are ordinary product APIs, not LLM gateways.
+_INFERENCE_PATH_RE = re.compile(
+    r"/(?:(?:api|v\d+|openai)/)?(?:chat(?:/completions?)?|completions?|"
+    r"embeddings?|generate|ask|predict(?:ion)?|inference|infer|invoke|"
+    r"agents?|assistants?|llm)\b"
+    r"|/(?:api|v\d+|chat|openai)/messages?\b",
+    re.I,
+)
+
+
+def _is_inference_path(path: str) -> bool:
+    return bool(_INFERENCE_PATH_RE.search(path or ""))
+
 
 MODEL_NAME_PATTERNS = [
     r'\b(gpt-?4|gpt-?3\.5|gpt-?4o)\b',
@@ -302,6 +303,14 @@ SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
     ("/predictions",          "ml"),
     ("/runs",                 "chat"),
     ("/threads",              "chat"),
+    # Common chat/agent path shapes (product-agnostic)
+    ("/api/ask",              "chat"),
+    ("/api/messages",         "chat"),
+    ("/api/convos",           "schema"),
+    ("/api/endpoints",        "schema"),
+    ("/api/agents",           "chat"),
+    ("/api/workspace",        "schema"),
+    ("/api/chat-messages",    "chat"),
 ]
 
 OPENAPI_SPEC_PATHS = [
@@ -441,15 +450,18 @@ class FingerprintReport:
 
     evidence_items:   List[EvidenceItem] = field(default_factory=list)
     atlas_techniques: List[str]          = field(default_factory=list)
+    chat_components:  List[Dict]         = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         return {
             "is_ai_powered":          self.is_ai_powered,
             "confidence":             self.confidence,
             "evidence_score":         self.evidence_score,
-            "framework":              self.framework,
+            "framework":              self.framework if self.framework_confidence > 0 else "",
             "framework_confidence":   round(self.framework_confidence * 100, 1),
-            "framework_signals":      self.framework_signals,
+            "framework_signals":      (
+                self.framework_signals if self.framework_confidence > 0 else []
+            ),
             "protocol":               self.protocol,
             "inference_server":       self.inference_server,
             "infra_layer":            self.infra_layer,
@@ -478,7 +490,7 @@ class FingerprintReport:
             "api_schema":          {"tools": [], "openapi": self.openapi_schema},
             "app_description":     "",
             "response_headers":    {},
-            "chat_components":     [],
+            "chat_components":     self.chat_components,
             "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
@@ -493,11 +505,14 @@ class FingerprintReport:
         print(f"  AI Fingerprint Report")
         print(f"{'='*w}")
         print(f"  Confidence       : {self.confidence.upper()} (score={self.evidence_score})")
-        if self.framework:
+        if self.framework and self.framework_confidence > 0:
             pct = f"{self.framework_confidence*100:.0f}%"
             print(f"  Framework        : {self.framework}  (confidence {pct})")
             if self.framework_signals:
                 print(f"  Matched signals  : {', '.join(self.framework_signals)}")
+        elif self.framework and self.framework_confidence <= 0:
+            # Path-only / unconfirmed protocol labels must not look authoritative.
+            pass
         if self.protocol:
             print(f"  Protocol         : {self.protocol}")
         if self.infra_layer and self.infra_layer != self.framework:
@@ -517,6 +532,17 @@ class FingerprintReport:
                 print(f"    [{ep.risk.upper():8s}] {ep.endpoint_type:12s} {ep.path}{auth_tag}")
         if self.auth_required_paths:
             print(f"  Auth-gated       : {len(self.auth_required_paths)} endpoint(s) (not tested)")
+        if self.chat_components:
+            print(f"  Chat UI          : {len(self.chat_components)} widget(s)")
+            for w in self.chat_components[:5]:
+                if not isinstance(w, dict):
+                    continue
+                print(
+                    f"    - tier={w.get('tier') or '?'} "
+                    f"scope={w.get('ownership') or w.get('scope') or '?'} "
+                    f"provider={w.get('provider') or '-'} "
+                    f"via={w.get('source') or '?'}"
+                )
         if self.deployment_signals:
             print(f"  Deployment       : {self.deployment_signals}")
         print(f"\n  Evidence (top 8):")
@@ -655,22 +681,106 @@ class AIFingerprintAgent:
             detected_framework, all_frameworks, openapi_schema,
             ml_endpoints, graphql_types)
 
+        # Deduplicate identical evidence rows (brand + framework probes overlap).
+        seen_ev: Set[Tuple[str, str]] = set()
+        deduped: List[EvidenceItem] = []
+        for ev in all_evidence:
+            k = (ev.key, ev.detail)
+            if k in seen_ev:
+                continue
+            seen_ev.add(k)
+            deduped.append(ev)
+        all_evidence = deduped
+
+        # Drop weak 405 spray if nothing else confirms a live AI surface.
+        # Marketing CDNs often 405 every seeded inference path.
+        weak_405 = [ev for ev in all_evidence if ev.key == "ml_endpoint_405"]
+        has_strong_live = bool(
+            ml_endpoints
+            or any(_is_inference_path(urllib.parse.urlparse(a.endpoint).path)
+                   for a in auth_signals)
+            or any(ev.key in {
+                "behavior_llm_response", "behavior_model_reported",
+                "behavior_streaming", "chat_endpoint_200", "ml_endpoint_200",
+                "ml_endpoint_401_403", "openapi_ai_endpoint",
+                "error_openai_format", "error_missing_messages", "error_missing_model",
+            } for ev in all_evidence)
+        )
+        if len(weak_405) >= 3 and not has_strong_live:
+            all_evidence = [ev for ev in all_evidence if ev.key != "ml_endpoint_405"]
+
+        # Static HTML chatbot widget discovery (Playwright enrich is optional
+        # in the scan harness / dev_ai_scan). Passive hints alone do not flip
+        # is_ai — only live_surface / behavioral chatbot tiers do.
+        chat_components: List[Dict] = []
+        try:
+            from .chatbot_ui_probe import (
+                detect_chatbot_from_html,
+                evidence_key_for_tier,
+                ui_warrants_vuln,
+                widgets_to_chat_components,
+            )
+        except ImportError:
+            try:
+                from multiagent.agents.ai_agents.chatbot_ui_probe import (
+                    detect_chatbot_from_html,
+                    evidence_key_for_tier,
+                    ui_warrants_vuln,
+                    widgets_to_chat_components,
+                )
+            except ImportError:
+                detect_chatbot_from_html = None  # type: ignore
+                ui_warrants_vuln = None  # type: ignore
+
+        if detect_chatbot_from_html is not None:
+            try:
+                widgets = detect_chatbot_from_html(page_html or "", base)
+                chat_components = widgets_to_chat_components(widgets)
+                for w in widgets:
+                    key = evidence_key_for_tier(
+                        getattr(w, "tier", "") or "passive_hint",
+                        getattr(w, "scope", "") or "",
+                    )
+                    all_evidence.append(EvidenceItem.make(
+                        key,
+                        getattr(w, "detail", None)
+                        or f"Chatbot UI surface ({key})",
+                        "chatbot_ui",
+                    ))
+            except Exception as exc:
+                logger.debug("chatbot HTML detect failed: %s", exc)
+                chat_components = []
+
         total_score = sum(ev.weight for ev in all_evidence)
         confidence  = score_to_confidence(total_score)
-        is_ai       = total_score >= 26
+
+        # Product-agnostic gate: only live behavioural / API / chatbot surface.
+        evidence_keys = {ev.key for ev in all_evidence}
+        live_from_keys = bool(evidence_keys & LIVE_SURFACE_EVIDENCE_KEYS)
+        live_from_ml = any(
+            _is_inference_path(urllib.parse.urlparse(ep).path) for ep in ml_endpoints
+        )
+        live_from_auth = any(
+            _is_inference_path(urllib.parse.urlparse(a.endpoint).path)
+            for a in auth_signals
+        )
+        live_from_chat_ui = bool(
+            ui_warrants_vuln and ui_warrants_vuln(chat_components)
+        )
+        is_ai = live_from_keys or live_from_ml or live_from_auth or live_from_chat_ui
 
         atlas: List[str] = []
         for ep in ml_endpoints:
             path = urllib.parse.urlparse(ep).path.lower()
-            if any(x in path for x in ["/chat", "/completions", "/generate", "/messages"]):
+            if any(x in path for x in ["/chat", "/completions", "/generate"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["chat"])
             elif any(x in path for x in ["/embed", "/embedding"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["embedding"])
-            else:
+            elif _is_inference_path(path):
                 atlas.append(ATLAS_TECHNIQUE_MAP["ml"])
-        if openapi_schema:
+        if any(ev.key == "openapi_ai_endpoint" for ev in all_evidence):
             atlas.append(ATLAS_TECHNIQUE_MAP["schema"])
-        if graphql_types:
+        if any(ev.key == "graphql_ai_field" for ev in all_evidence):
             atlas.append(ATLAS_TECHNIQUE_MAP["graphql"])
         atlas = list(dict.fromkeys(atlas))
 
@@ -694,10 +804,9 @@ class AIFingerprintAgent:
         else:
             deployment["authentication"] = ["none"]
 
-        INFRA_FRAMEWORKS = {"Ollama", "vLLM", "TGI (HuggingFace)", "OpenAI-compatible",
-                            "Triton", "TorchServe", "SageMaker"}
-        infra_layer = detected_framework if detected_framework in INFRA_FRAMEWORKS else detected_infra
-        app_layer   = detected_framework if detected_framework not in INFRA_FRAMEWORKS else ""
+        PROTOCOL_LABELS = {"OpenAI-compatible"}
+        infra_layer = detected_framework if detected_framework in PROTOCOL_LABELS else detected_infra
+        app_layer   = ""
 
         return FingerprintReport(
             is_ai_powered         = is_ai,
@@ -723,6 +832,7 @@ class AIFingerprintAgent:
             deployment_signals    = deployment,
             evidence_items        = all_evidence,
             atlas_techniques      = atlas,
+            chat_components       = chat_components,
         )
 
     def _analyse_html(
@@ -735,6 +845,17 @@ class AIFingerprintAgent:
         if not html:
             return js_urls, evidence, links
 
+        m_title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        page_title = re.sub(r"\s+", " ", m_title.group(1)).strip() if m_title else ""
+        title_low = page_title.lower()
+        # Passive cue only — never sufficient alone for is_ai.
+        if page_title and (
+            re.search(r"(?:^|[^a-z])ai(?:[^a-z]|$)", title_low)
+            or any(kw in title_low for kw in AI_TITLE_KEYWORDS)
+        ):
+            evidence.append(EvidenceItem.make(
+                "page_title_ai", f"AI page title: {page_title[:80]}", "html"))
+
         for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.I):
             src = m.group(1)
             if not src.startswith("http"):
@@ -745,8 +866,11 @@ class AIFingerprintAgent:
             ]):
                 js_urls.append(src)
 
-        for m in re.finditer(r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant)[^"\']*)["\']',
-                             html, re.I):
+        for m in re.finditer(
+            r'<meta[^>]+content=["\']([^"\']*(?:ai|llm|gpt|chatbot|assistant|'
+            r'copilot|rag|inference)[^"\']*)["\']',
+            html, re.I,
+        ):
             evidence.append(EvidenceItem.make(
                 "meta_ai_tag", f"AI meta tag: {m.group(1)[:60]}", "html"))
 
@@ -887,12 +1011,121 @@ class AIFingerprintAgent:
 
     @staticmethod
     def _is_ai_api_path(path: str) -> bool:
-        return any(pat in path.lower() for pat in [
-            "/chat", "/completions", "/generate", "/predict",
-            "/embed", "/inference", "/infer", "/model",
-            "/v1/", "/api/", "/llm", "/ai/", "/messages",
-            "/runs", "/threads", "/assistants",
-        ])
+        """True for inference-ish paths — not SaaS messaging or version roots.
+
+        Product-agnostic: match protocol/shape (chat completions, embeddings,
+        /api/messages), never brand names. Reject bare ``/messages`` (Slack)
+        and ``/v2`` (monday.com GraphQL) which are ordinary product APIs.
+        """
+        raw = (path or "").strip()
+        if not raw:
+            return False
+        parts = [p for p in raw.lower().split("/") if p]
+        if not parts:
+            return False
+        # Exact strong segments (avoid /generated_sitemap matching generate).
+        strong = {
+            "chat", "completions", "completion", "generate", "predict",
+            "prediction", "embeddings", "embedding", "inference", "infer",
+            "ask", "assistants", "assistant", "agents", "agent", "llm",
+            "invoke",
+        }
+        for seg in parts:
+            base = seg.split(".")[0]
+            if base in strong:
+                return True
+        # messages only under API/version/chat prefix — not bare /messages.
+        if any(seg.split(".")[0] in {"messages", "message"} for seg in parts):
+            if len(parts) >= 2 and any(
+                seg in {"api", "chat", "openai", "llm"}
+                or re.fullmatch(r"v\d+", seg)
+                for seg in parts
+            ):
+                return True
+        return bool(_INFERENCE_PATH_RE.search("/" + "/".join(parts)))
+
+    @staticmethod
+    def _is_meaningful_405(headers_low: Dict, body: str) -> bool:
+        """CDN/marketing sites often return 405 for every unknown POST — ignore those."""
+        allow = (headers_low.get("allow") or "").upper()
+        if any(m in allow for m in ("POST", "PUT", "PATCH")):
+            return True
+        body = body or ""
+        ct = (headers_low.get("content-type") or "").lower()
+        if "json" in ct and body.strip()[:1] in ("{", "["):
+            if any(re.search(p, body, re.I) for p in AI_RESPONSE_BODY_PATTERNS):
+                return True
+            for pattern, _, _ in ERROR_FINGERPRINTS:
+                if pattern.search(body):
+                    return True
+        return False
+
+    @staticmethod
+    def _is_meaningful_auth(
+        status: int,
+        headers_low: Dict,
+        body: str,
+        canary: Optional[ProbeCanary] = None,
+    ) -> bool:
+        """401/403 counts as auth-gated AI only when it differs from WAF noise.
+
+        Blanket CDN/WAF 403 on every POST (Freshworks-style) must not escalate.
+        """
+        if status not in (401, 403):
+            return False
+        # Negative control: same status as canary POST ⇒ WAF/bot wall, not an API.
+        if canary and canary.post_status and status == canary.post_status:
+            # Still allow through if the body/headers look like a real API auth challenge.
+            www = (headers_low.get("www-authenticate") or "").strip()
+            body = body or ""
+            ct = (headers_low.get("content-type") or "").lower()
+            if www:
+                return True
+            if "json" in ct and body.strip()[:1] in ("{", "["):
+                for pattern, _, _ in ERROR_FINGERPRINTS:
+                    if pattern.search(body):
+                        return True
+                if any(re.search(p, body, re.I) for p in AI_RESPONSE_BODY_PATTERNS):
+                    return True
+                # Generic {"message":"Unauthorized"} with JSON is weak but OK when
+                # canary body is not JSON (differential content).
+                canary_prefix = (canary.post_body_prefix or "").lstrip()
+                if canary_prefix[:1] not in ("{", "["):
+                    return True
+            return False
+        return True
+
+    async def _calibrate_probe_canary(self, base: str) -> ProbeCanary:
+        """GET + POST negative controls before trusting seed-path statuses."""
+        loop = asyncio.get_event_loop()
+        url = base.rstrip("/") + SCANNER_CANARY_PATH
+        try:
+            get_status, _, get_body = await loop.run_in_executor(
+                None, lambda: self._fetch(url, method="GET", allow_redirects=False))
+        except Exception:
+            get_status, get_body = 0, ""
+        try:
+            post_status, _, post_body = await loop.run_in_executor(
+                None,
+                lambda: self._fetch(
+                    url, method="POST", data=b"{}", allow_redirects=False,
+                ),
+            )
+        except Exception:
+            post_status, post_body = 0, ""
+        canary = ProbeCanary(
+            get_status=get_status or 0,
+            post_status=post_status or 0,
+            get_body_prefix=(get_body or "")[:120],
+            post_body_prefix=(post_body or "")[:120],
+        )
+        if canary.redirect_catch_all or canary.post_waf_catch_all:
+            logger.info(
+                "[fingerprint] canary baseline get=%s post=%s redirect_all=%s post_waf=%s",
+                canary.get_status, canary.post_status,
+                canary.redirect_catch_all, canary.post_waf_catch_all,
+            )
+        return canary
 
     async def _probe_openapi(self, base: str, verbose: bool) -> Dict:
         evidence:     List[EvidenceItem] = []
@@ -919,21 +1152,28 @@ class AIFingerprintAgent:
                 if not (spec.get("openapi") or spec.get("swagger") or spec.get("paths")):
                     continue
                 schema = spec
-                spec_paths = spec.get("paths", {})
-                evidence.append(EvidenceItem.make(
-                    "openapi_schema",
-                    f"OpenAPI spec at {path} ({len(spec_paths)} paths)",
-                    "openapi", endpoint=url))
+                spec_paths = spec.get("paths", {}) or {}
+                ai_paths_found = []
                 for ep_path, methods in spec_paths.items():
+                    is_ai_path = self._is_ai_api_path(ep_path) or any(
+                        x in (ep_path or "").lower() for x in (
+                            "/chat", "/completions", "/generate", "/embed",
+                            "/predict", "/inference", "/assistants",
+                        )
+                    )
+                    # "/model" alone is too broad (model cars, data models).
+                    if not is_ai_path and re.search(
+                        r"/models?(?:/|$)|/embeddings?", (ep_path or "").lower()
+                    ):
+                        is_ai_path = True
+                    if not is_ai_path:
+                        continue
+                    ai_paths_found.append(ep_path)
                     endpoints.append(base + ep_path)
-                    if any(x in ep_path.lower() for x in [
-                        "/chat", "/completions", "/generate", "/embed",
-                        "/predict", "/inference", "/model", "/messages",
-                    ]):
-                        evidence.append(EvidenceItem.make(
-                            "openapi_ai_endpoint",
-                            f"AI path in spec: {ep_path}",
-                            "openapi", endpoint=base + ep_path))
+                    evidence.append(EvidenceItem.make(
+                        "openapi_ai_endpoint",
+                        f"AI path in spec: {ep_path}",
+                        "openapi", endpoint=base + ep_path))
                     if isinstance(methods, dict):
                         for method_def in methods.values():
                             if not isinstance(method_def, dict):
@@ -945,12 +1185,23 @@ class AIFingerprintAgent:
                                      .get("properties", {}))
                             if "tools" in props or "functions" in props:
                                 capabilities.append("tool_calling")
-                            if "messages" in props:
+                            if "messages" in props and (
+                                "model" in props or "chat" in (ep_path or "").lower()
+                            ):
                                 capabilities.append("chat")
                             if "input" in props and "model" in props:
                                 capabilities.append("embedding")
+                # Record the spec as passive inventory; AI paths alone escalate.
+                evidence.append(EvidenceItem.make(
+                    "openapi_schema",
+                    f"OpenAPI spec at {path} ({len(spec_paths)} paths"
+                    f", {len(ai_paths_found)} AI-shaped)",
+                    "openapi", endpoint=url))
                 if verbose:
-                    print(f"    [openapi] {path}: {len(spec_paths)} paths")
+                    print(
+                        f"    [openapi] {path}: {len(spec_paths)} paths "
+                        f"({len(ai_paths_found)} AI-shaped)"
+                    )
                 break
             except Exception as exc:
                 logger.debug(f"[OpenAPI] {url}: {exc}")
@@ -1099,6 +1350,14 @@ class AIFingerprintAgent:
         loop = asyncio.get_event_loop()
         confirmed = 0
 
+        canary = await self._calibrate_probe_canary(base)
+        if verbose and (canary.redirect_catch_all or canary.post_waf_catch_all):
+            print(
+                f"    [canary] GET={canary.get_status} POST={canary.post_status} "
+                f"(redirect_all={canary.redirect_catch_all}, "
+                f"post_waf={canary.post_waf_catch_all})"
+            )
+
         ordered = (
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "schema"] +
             [(p, c) for p, c in SEED_ENDPOINT_RANKING if c == "chat"] +
@@ -1109,13 +1368,35 @@ class AIFingerprintAgent:
             url = base + path
             try:
                 status, resp_headers, body = await loop.run_in_executor(
-                    None, lambda: self._fetch(url))
+                    None, lambda: self._fetch(url, allow_redirects=False))
+                # Redirect-all CDNs: same 3xx as canary is not an endpoint hit.
+                if (
+                    canary.redirect_catch_all
+                    and status in _REDIRECT_STATUSES
+                    and status == canary.get_status
+                ):
+                    return {}
                 if status in (404, 405) and category in ("chat", "embedding", "ml", "graphql"):
                     status, resp_headers, body = await loop.run_in_executor(
-                        None, lambda: self._fetch(url, data=b"{}", method="POST"))
+                        None,
+                        lambda: self._fetch(
+                            url, data=b"{}", method="POST", allow_redirects=False,
+                        ),
+                    )
+                # Also try POST when GET is a catch-all redirect (no resource).
+                elif (
+                    status in _REDIRECT_STATUSES
+                    and category in ("chat", "embedding", "ml", "graphql")
+                ):
+                    status, resp_headers, body = await loop.run_in_executor(
+                        None,
+                        lambda: self._fetch(
+                            url, data=b"{}", method="POST", allow_redirects=False,
+                        ),
+                    )
                 return self._evaluate_probe_response(
                     url, path, category, status, resp_headers, body,
-                    auth_signals)
+                    auth_signals, canary=canary)
             except Exception:
                 return None
 
@@ -1148,6 +1429,7 @@ class AIFingerprintAgent:
             "endpoints":   list(dict.fromkeys(endpoints)),
             "frameworks":  list(dict.fromkeys(frameworks)),
             "auth_signals": auth_signals,
+            "canary": canary,
         }
 
     def _evaluate_probe_response(
@@ -1159,12 +1441,22 @@ class AIFingerprintAgent:
         headers: Dict,
         body: str,
         auth_signals: List[AuthSignal],
+        canary: Optional[ProbeCanary] = None,
     ) -> Dict:
         evidence:  List[EvidenceItem] = []
         endpoints: List[str]          = []
         frameworks: List[str]         = []
 
         if status == 0:
+            return {}
+
+        # Same redirect as canary GET ⇒ catch-all, not a real path.
+        if (
+            canary
+            and canary.redirect_catch_all
+            and status in _REDIRECT_STATUSES
+            and status == canary.get_status
+        ):
             return {}
 
         headers_low = {k.lower(): v for k, v in headers.items()}
@@ -1189,11 +1481,16 @@ class AIFingerprintAgent:
                 endpoints.append(url)
 
             if "chunked" in headers_low.get("transfer-encoding", ""):
-                evidence.append(EvidenceItem.make(
-                    "sse_chunked_transfer",
-                    f"Chunked transfer at {path}", "probe", endpoint=url))
+                # Ubiquitous on CDNs — do not emit as AI evidence.
+                pass
 
         if status in (401, 403):
+            if not self._is_meaningful_auth(status, headers_low, body or "", canary):
+                return {
+                    "evidence": evidence,
+                    "endpoints": endpoints,
+                    "frameworks": frameworks,
+                }
             auth_type = self._detect_auth_type(headers_low, body_l)
             auth_signals.append(AuthSignal(
                 endpoint=url, auth_type=auth_type,
@@ -1204,12 +1501,17 @@ class AIFingerprintAgent:
                     "ml_endpoint_401_403",
                     f"Auth-gated {path} (HTTP {status}, {auth_type})",
                     "probe", endpoint=url))
+                # Auth-gated inference paths are live surface even without a body.
+                endpoints.append(url)
 
         if status == 405 and category in ("chat", "embedding", "ml"):
-            evidence.append(EvidenceItem.make(
-                "ml_endpoint_405",
-                f"Endpoint exists {path} (HTTP 405)",
-                "probe", endpoint=url))
+            # Ignore CDN/marketing catch-all 405s (Zendesk-style FP).
+            if self._is_meaningful_405(headers_low, body):
+                evidence.append(EvidenceItem.make(
+                    "ml_endpoint_405",
+                    f"Endpoint exists {path} (HTTP 405, Allow/API body confirmed)",
+                    "probe", endpoint=url))
+                endpoints.append(url)
 
         if status in (400, 422) and body:
             fw = self._fingerprint_error_body(body, url, evidence)
@@ -1400,11 +1702,7 @@ class AIFingerprintAgent:
                     score += 3
                     signals.append(f"path:{p}")
 
-            for s in sig.get("js_strings", []):
-                if s.lower() in combined_text:
-                    score += 2
-                    signals.append(f"js:{s}")
-
+            # No title_hints / product js_strings — protocol paths/headers/body only.
             for k, v in (sig.get("headers") or {}).items():
                 if k in headers_low:
                     if v is None or v.lower() in headers_low[k].lower():
@@ -1446,12 +1744,24 @@ class AIFingerprintAgent:
 
         if not best_fw and best_protocol:
             best_fw = best_protocol
+            best_score = scores.get(best_protocol, 0)
             best_protocol = ""
 
-        fw_confidence = min(best_score / MAX_POSSIBLE_SCORE, 1.0) if best_fw else 0.0
-        fw_signals    = matched_signals.get(best_fw, [])
+        # Protocol path-membership alone (no body/header) is not enough to
+        # claim a framework — those paths often came from WAF noise.
+        if best_fw in PROTOCOL_ONLY_LABELS:
+            fw_signals_tmp = matched_signals.get(best_fw, [])
+            non_path = [s for s in fw_signals_tmp if not s.startswith("path:")]
+            if not non_path and best_score > 0:
+                # Keep as weak protocol hint only when score is path-only.
+                best_protocol = best_fw
+                best_fw = ""
+                best_score = 0
 
-        if best_fw and best_score >= 3:
+        fw_confidence = min(best_score / MAX_POSSIBLE_SCORE, 1.0) if best_fw else 0.0
+        fw_signals    = matched_signals.get(best_fw, []) if best_fw else []
+
+        if best_fw and best_score >= 3 and fw_confidence > 0:
             pct = f"{fw_confidence*100:.0f}%"
             evidence.append(EvidenceItem.make(
                 "framework_identified",
@@ -1460,23 +1770,32 @@ class AIFingerprintAgent:
 
         INFERENCE_SERVER_NAMES = set(FRAMEWORK_SIGNATURES.keys()) - PROTOCOL_ONLY_LABELS
         infra = ""
-        for fw_name in [best_fw] + sorted(scores.keys(), key=lambda x: scores.get(x,0), reverse=True):
+        for fw_name in ([best_fw] if best_fw else []) + sorted(
+            scores.keys(), key=lambda x: scores.get(x, 0), reverse=True
+        ):
+            if not fw_name:
+                continue
             sig = FRAMEWORK_SIGNATURES.get(fw_name, {})
             if sig.get("paths") and any(
                 any(p in kp for kp in known_paths)
                 for p in sig.get("paths", [])
                 if any(x in p for x in ["/api/", "/v1/", "/v2/"])
             ):
-                infra = fw_name
-                break
+                # Only attribute infra when framework confidence is real.
+                if fw_name == best_fw and fw_confidence > 0:
+                    infra = fw_name
+                    break
+                if fw_name not in PROTOCOL_ONLY_LABELS:
+                    infra = fw_name
+                    break
 
         return {
             "evidence":            evidence,
-            "framework":           best_fw,
+            "framework":           best_fw if fw_confidence > 0 else "",
             "framework_confidence": fw_confidence,
             "framework_signals":   fw_signals,
             "protocol":            best_protocol,
-            "inference_server":    infra or best_fw,
+            "inference_server":    infra if fw_confidence > 0 else (infra if infra and infra not in PROTOCOL_ONLY_LABELS else ""),
         }
 
     def _infer_capabilities(
@@ -1500,10 +1819,13 @@ class AIFingerprintAgent:
                 caps.update(FRAMEWORK_SIGNATURES[fw].get("capabilities", []))
 
         if openapi_schema:
-            caps.add("chat")
-            spec_paths = openapi_schema.get("paths", {})
+            spec_paths = openapi_schema.get("paths", {}) or {}
             for path in spec_paths:
                 path_l = path.lower()
+                if not self._is_ai_api_path(path):
+                    continue
+                if "chat" in path_l or "completion" in path_l or "generate" in path_l:
+                    caps.add("chat")
                 if "embed" in path_l:
                     caps.add("embedding")
                 if "image" in path_l or "vision" in path_l:
@@ -1611,6 +1933,7 @@ class AIFingerprintAgent:
         max_bytes: int = 8192,
         method: str = "GET",
         data: Optional[bytes] = None,
+        allow_redirects: bool = True,
     ) -> Tuple[int, Dict, str]:
         try:
             req = urllib.request.Request(
@@ -1622,7 +1945,15 @@ class AIFingerprintAgent:
                 },
                 method=method,
             )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            if allow_redirects:
+                opener = urllib.request.build_opener()
+            else:
+                class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+                        return None
+
+                opener = urllib.request.build_opener(_NoRedirect)
+            with opener.open(req, timeout=self.timeout) as resp:
                 body = resp.read(max_bytes).decode("utf-8", errors="replace")
                 return resp.status, dict(resp.headers), body
         except urllib.error.HTTPError as exc:
