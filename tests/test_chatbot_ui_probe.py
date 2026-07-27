@@ -7,6 +7,7 @@ from multiagent.agents.ai_agents.chatbot_ui_probe import (
     classify_injection_severity,
     detect_chatbot_from_html,
     evidence_key_for_tier,
+    format_policy_display,
     ui_result_to_findings,
     ui_warrants_vuln,
     widgets_to_chat_components,
@@ -31,6 +32,22 @@ def test_bare_hubspot_brand_is_not_a_widget_marker():
     """www.hubspot.com HTML contains 'hubspot' everywhere — must not FP."""
     html = "<html><title>HubSpot | Software & Tools</title><p>HubSpot CRM</p></html>"
     assert detect_chatbot_from_html(html, "https://www.hubspot.com/") == []
+
+
+def test_bare_zendesk_marketing_site_is_not_a_widget_marker():
+    """www.zendesk.com HTML contains 'zendesk.com' everywhere — must not FP."""
+    html = (
+        "<html><title>AI-Powered Service Platform | Zendesk</title>"
+        "<meta content='Move beyond deflection with AI agents'>"
+        "<a href='https://www.zendesk.com/pricing/'>Pricing</a></html>"
+    )
+    assert detect_chatbot_from_html(html, "https://www.zendesk.com/") == []
+
+
+def test_zendesk_widget_cdn_is_third_party_on_customer_site():
+    html = '<script src="https://static.zdassets.com/ekr/snippet.js"></script>'
+    widgets = detect_chatbot_from_html(html, "https://acme.example/")
+    assert any(w.provider == "Zendesk" and w.scope == "third_party" for w in widgets)
 
 
 def test_hubspot_conversations_script_is_third_party():

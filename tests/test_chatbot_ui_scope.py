@@ -166,6 +166,16 @@ def test_feedback_iframe_not_chat_and_not_injectable():
     assert classify_surface_kind(
         "https://app.hubspot.com/conversations-visitor/53/threads/utk/abc",
     ) == "support_queue"
+    # Bare vendor marketing host must NOT be support_queue.
+    assert classify_surface_kind("https://www.zendesk.com/") == "unknown"
+    assert classify_surface_kind("https://www.zendesk.com/pricing/") == "unknown"
+    # Real Zendesk widget CDN / embed paths still are.
+    assert classify_surface_kind(
+        "https://static.zdassets.com/web_widget/latest.js",
+    ) == "support_queue"
+    assert classify_surface_kind(
+        "https://www.zendesk.com/embeddable_framework",
+    ) == "support_queue"
 
     feedback = ChatWidget(
         tier="passive_hint",
@@ -180,6 +190,16 @@ def test_feedback_iframe_not_chat_and_not_injectable():
         url="https://www.hubspot.com/",
     ).to_dict()
     assert component_is_injectable(feedback) is False
+
+
+def test_format_policy_display_shows_side_effect_block():
+    from multiagent.agents.ai_agents.chatbot_ui_probe import format_policy_display
+    assert format_policy_display("inject") == "inject"
+    assert format_policy_display(
+        "inject",
+        side_effect_blocked=True,
+        side_effect_reason="support_queue_side_effect",
+    ) == "inject (blocked: support_queue_side_effect)"
 
 
 def test_support_queue_blocked_until_authorized():

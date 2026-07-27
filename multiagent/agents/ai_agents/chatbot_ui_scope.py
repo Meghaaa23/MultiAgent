@@ -108,9 +108,13 @@ _FEEDBACK_URL_RE = re.compile(
     re.I,
 )
 # Live support / conversations products — ownership ≠ side-effect-free submit.
+# Prefer widget/CDN path hosts — never bare vendor marketing domains
+# (e.g. zendesk.com alone FPs when scanning www.zendesk.com).
 _SUPPORT_QUEUE_URL_RE = re.compile(
     r"conversations-visitor|/threads/utk|"
-    r"widget\.intercom|js\.driftt\.com|zendesk\.com|zopim|"
+    r"widget\.intercom|js\.driftt\.com|"
+    r"static\.zdassets|ekr\.zdassets|zopim\.com|"
+    r"zendesk\.com/(?:embed|embeddable)|web[_-]?widget|"
     r"cdn\.livechatinc|tawk\.to|tidio\.co|static\.olark|"
     r"wchat\.freshchat|usemessages\.com",
     re.I,

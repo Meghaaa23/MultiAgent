@@ -108,10 +108,12 @@ _WIDGET_PROVIDER_MARKERS: Tuple[Tuple[str, str], ...] = (
     ("intercom.io", "Intercom"),
     ("widget.intercom", "Intercom"),
     ("js.driftt.com", "Drift"),
-    ("drift.com", "Drift"),
-    ("zendesk.com", "Zendesk"),
+    # Not bare drift.com — marketing pages would self-match.
     ("zopim.com", "Zendesk"),
     ("static.zdassets.com", "Zendesk"),
+    ("ekr.zdassets.com", "Zendesk"),
+    ("zendesk.com/embed", "Zendesk"),
+    # Not bare zendesk.com — www.zendesk.com HTML contains it everywhere.
     ("crisp.chat", "Crisp"),
     ("tawk.to", "Tawk"),
     ("tidio.co", "Tidio"),
@@ -404,6 +406,29 @@ def evidence_key_for_tier(tier: str, scope: str = "") -> str:
     return "chatbot_ui_hint"
 
 
+def format_policy_display(
+    injection_policy: str = "",
+    *,
+    side_effect_blocked: bool = False,
+    side_effect_reason: str = "",
+) -> str:
+    """Human-readable policy that does not hide the side-effect gate.
+
+    Ownership may authorize inject while support-queue / feedback side
+    effects still block submit — show both so operators are not confused.
+    """
+    policy = (injection_policy or "").strip() or "-"
+    if side_effect_blocked:
+        reason = (side_effect_reason or "").strip() or "side_effect"
+        return f"{policy} (blocked: {reason})"
+    return policy
+
+
+def _same_page_url(a: str, b: str) -> bool:
+    """True when two URLs are the same document ignoring trailing slash."""
+    return (a or "").rstrip("/") == (b or "").rstrip("/")
+
+
 _INJECTABLE_TIERS = frozenset({
     EvidenceClass.BEHAVIORAL.value,
     EvidenceClass.LIVE_SURFACE.value,
@@ -684,9 +709,14 @@ class ChatbotUIProbe:
         result.evidence_keys = self._evidence_keys(result.widgets)
         if verbose and result.widgets:
             for w in result.widgets[:5]:
+                policy = format_policy_display(
+                    w.injection_policy or "",
+                    side_effect_blocked=bool(w.side_effect_blocked),
+                    side_effect_reason=w.side_effect_reason or "",
+                )
                 print(
                     f"    [chatbot-ui] tier={w.tier} ownership={w.ownership or w.scope} "
-                    f"policy={w.injection_policy or '-'} reach={w.reachability or '-'} "
+                    f"policy={policy} reach={w.reachability or '-'} "
                     f"submit={w.submit_allowed} provider={w.provider or '-'} "
                     f"via={w.source} — {w.detail[:70]}"
                 )
@@ -834,7 +864,7 @@ class ChatbotUIProbe:
             # Surface kind separates feedback/survey from support-queue/chat.
             for frame in page.frames:
                 src = frame.url or ""
-                if not src or src in ("about:blank", url):
+                if not src or src in ("about:blank",) or _same_page_url(src, url):
                     continue
                 low = src.lower()
                 marker, name = "", ""
@@ -861,6 +891,11 @@ class ChatbotUIProbe:
                     policy=self.scope_policy,
                 )
                 blocked, se_reason = side_effect_blocks_inject(kind, self.scope_policy)
+                policy_disp = format_policy_display(
+                    decision.injection_policy,
+                    side_effect_blocked=blocked,
+                    side_effect_reason=se_reason,
+                )
 
                 if kind == SurfaceKind.FEEDBACK.value:
                     detail = (
@@ -870,14 +905,13 @@ class ChatbotUIProbe:
                 elif kind == SurfaceKind.SUPPORT_QUEUE.value:
                     detail = (
                         f"Support-queue iframe {src[:80]} "
-                        f"(ownership={decision.ownership}, policy={decision.injection_policy}, "
-                        f"side_effect={'blocked:' + se_reason if blocked else 'authorized'})"
+                        f"(ownership={decision.ownership}, policy={policy_disp})"
                     )
                 else:
                     detail = (
                         f"Vendor/product iframe {src[:80]} "
                         f"(kind={kind}, ownership={decision.ownership}, "
-                        f"reachability={decision.reachability}, policy={decision.injection_policy})"
+                        f"reachability={decision.reachability}, policy={policy_disp})"
                     )
 
                 w = ChatWidget(
@@ -1940,11 +1974,15 @@ async def enrich_fingerprint_with_chatbot_ui(
     if verbose:
         print(f"\n  Chatbot UI widgets: {len(merged)}")
         for w in merged[:5]:
+            policy = format_policy_display(
+                w.get("injection_policy") or "",
+                side_effect_blocked=bool(w.get("side_effect_blocked")),
+                side_effect_reason=str(w.get("side_effect_reason") or ""),
+            )
             print(
                 f"    - tier={w.get('tier') or '?'} kind={w.get('surface_kind') or '-'} "
                 f"ownership={w.get('ownership') or w.get('scope') or '?'} "
-                f"policy={w.get('injection_policy') or '-'} "
-                f"side_effect={'blocked' if w.get('side_effect_blocked') else 'ok'} "
+                f"policy={policy} "
                 f"submit={w.get('submit_allowed')} provider={w.get('provider') or '-'} "
                 f"via={w.get('source')}"
             )
