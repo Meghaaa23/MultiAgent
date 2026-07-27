@@ -65,7 +65,14 @@ def _validate_stack(stack, response_headers, body):
 def _build_evidence_gated_stride(target_url, response_headers,
                                   discovered_params, discovered_forms,
                                   cors_misconfigured, stack,
-                                  headers_capture_failed: bool = False) -> List[Dict]:
+                                  headers_capture_failed: bool = False,
+                                  cors_finding: Optional[Dict] = None) -> List[Dict]:
+    """Build STRIDE rows from scanner evidence.
+
+    cors_finding: final merged CORS finding (Confirmed or Potential). When
+    provided, STRIDE status/likelihood/impact follow that finding — never
+    claim Evidence-confirmed while Section 4 lists the same issue as Potential.
+    """
     threats = []
     hdrs    = {k.lower(): v for k, v in response_headers.items()}
     xfo     = hdrs.get("x-frame-options", "")
@@ -95,15 +102,29 @@ def _build_evidence_gated_stride(target_url, response_headers,
             "confirmed":  False,
         })
 
-    if cors_misconfigured:
+    # Prefer the merged CORS finding so STRIDE cannot disagree with §4.
+    if cors_finding or cors_misconfigured:
+        cf = cors_finding or {}
+        status = str(cf.get("status") or ("Confirmed" if cors_misconfigured else "Potential"))
+        details = str(cf.get("details") or "")
+        confirmed = status == "Confirmed"
+        if confirmed:
+            evidence = details or "ACAO reflects attacker-controlled origin (confirmed)"
+            likelihood, impact = "High", "High"
+        else:
+            evidence = (
+                details
+                or "ACAO wildcard or weak CORS signal — unconfirmed / manual verification required"
+            )
+            likelihood, impact = "Low", "Low"
         threats.append({
             "category":   "Information Disclosure",
             "threat":     "CORS Misconfiguration",
-            "evidence":   "ACAO reflects attacker-controlled origin (confirmed)",
-            "likelihood": "High",
-            "impact":     "High",
+            "evidence":   evidence,
+            "likelihood": likelihood,
+            "impact":     impact,
             "mitigation": "Restrict ACAO to trusted origins; remove wildcard",
-            "confirmed":  True,
+            "confirmed":  confirmed,
         })
 
     def _inputs(form):
@@ -156,7 +177,11 @@ class WebScannerAgent:
 
         self.ai_fingerprinter = AIFingerprintAgent(timeout=8)
         self.avid_lookup      = AVIDLookupAgent(timeout=15)
-        self.ai_vuln_tester   = AIVulnerabilityTester(timeout=10, openai_client=self.openai_client)
+        self.ai_vuln_tester   = AIVulnerabilityTester(
+            timeout=10,
+            llm_model=self.llm_model,
+            openai_client=self.openai_client,
+        )
         self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client, llm_model=self.llm_model)
 
         print(" WebScannerAgent initialized ")
@@ -502,7 +527,6 @@ class WebScannerAgent:
         if verbose:
             print(" Attack Verification...")
         verified_findings: List[Dict] = []
-        cors_misconfigured = False
         try:
             av_findings = await self.verifier.verify_all(
                 target_url=target_url, candidate_urls=all_urls,
@@ -523,19 +547,9 @@ class WebScannerAgent:
                         d["category"] = "security_header"
                         if d.get("severity") in ("Critical", "High"):
                             d["severity"] = "Medium"
-                    if "CORS" in d.get("type", "") and d.get("status") == "Confirmed":
-                        cors_misconfigured = True
                     verified_findings.append(d)
         except Exception as e:
             logger.error(f"Attack verification failed: {e}")
-
-        stride_threats = []
-        if all_forms or all_params or cors_misconfigured or initial_headers:
-            stride_threats = _build_evidence_gated_stride(
-                target_url, initial_headers, all_params,
-                all_forms, cors_misconfigured, stack,
-                headers_capture_failed=headers_capture_failed,
-            )
 
         seen:         set        = set()
         all_findings: List[Dict] = []
@@ -554,6 +568,23 @@ class WebScannerAgent:
             if key not in seen:
                 seen.add(key)
                 all_findings.append(f)
+
+        # STRIDE after merge so CORS/clickjacking status matches §3/§4 findings.
+        cors_finding = next(
+            (f for f in all_findings if "CORS" in f.get("type", "")),
+            None,
+        )
+        cors_misconfigured = bool(
+            cors_finding and cors_finding.get("status") == "Confirmed"
+        )
+        stride_threats = []
+        if all_forms or all_params or cors_finding or initial_headers:
+            stride_threats = _build_evidence_gated_stride(
+                target_url, initial_headers, all_params,
+                all_forms, cors_misconfigured, stack,
+                headers_capture_failed=headers_capture_failed,
+                cors_finding=cors_finding,
+            )
 
         if ai_vuln_results:
             for f in ai_vuln_results.get("confirmed_ai_vulns", []):
@@ -601,13 +632,22 @@ class WebScannerAgent:
         report_endpoints = []
         for ep in discovered_endpoints:
             if ep.get("access_controlled"):
-          
                 report_ep = dict(ep)
                 report_ep["category"]   = "discovered_protected"
                 report_ep["note"]       = (
                     f"HTTP {ep.get('status')} — path exists but is access-controlled. "
                     "Recon only, not an exposure."
                 )
+                report_endpoints.append(report_ep)
+            elif ep.get("spa_catch_all") or ep.get("note") == "spa-catch-all":
+                report_ep = dict(ep)
+                report_ep["interesting"] = False
+                report_ep["excluded"] = True
+                report_ep["exclude_reason"] = (
+                    ep.get("verification")
+                    or "SPA/soft-404 catch-all — not a distinct endpoint"
+                )
+                report_ep["category"] = "excluded_spa_catchall"
                 report_endpoints.append(report_ep)
             elif ep.get("interesting"):
                 report_endpoints.append(ep)

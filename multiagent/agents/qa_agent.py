@@ -81,10 +81,11 @@ async def answer_question_from_db(question: str, filenames: List[str]) -> str:
     try:
         # ========== STEP 1: DIRECT MONGODB CHECK ==========
         logger.info("📊 Step 1: Checking MongoDB directly...")
-        from pymongo import MongoClient
-        
-        mongodb_uri = os.getenv("MONGODB_ATLAS_URI")
-        mongo_client = MongoClient(mongodb_uri, tls=True, tlsAllowInvalidCertificates=True)
+        from .mongo_support import create_mongo_client, sanitize_retrieval_error
+
+        mongo_client = create_mongo_client()
+        if mongo_client is None:
+            return sanitize_retrieval_error("MongoDB client not initialized")
         rag_collection = mongo_client["multiagentllm"]["RAG"]
         
         # Check total documents in RAG
@@ -291,4 +292,5 @@ async def answer_question_from_db(question: str, filenames: List[str]) -> str:
         logger.exception(f"✗ QA Agent error: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        return f"Error retrieving context: {str(e)}"
+        from .mongo_support import sanitize_retrieval_error
+        return sanitize_retrieval_error(e)

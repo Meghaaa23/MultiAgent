@@ -16,6 +16,50 @@ from urllib.parse import urlparse, urljoin, urlsplit, urlunparse
 logger = logging.getLogger(__name__)
 
 
+# Paths that must not be dismissed as SPA catch-alls (API / schema surfaces).
+_API_SURFACE_PATH_MARKERS = (
+    "/graphql", "/api/", "/swagger", "/openapi", "/rest/",
+    "/v1/", "/v2/", "/v3/", "/.well-known/",
+)
+
+
+def _is_api_surface_path(path_or_url: str) -> bool:
+    low = (path_or_url or "").lower()
+    return any(m in low for m in _API_SURFACE_PATH_MARKERS) or low.rstrip("/").endswith(
+        ("/graphql", "/api", "/swagger", "/openapi", "/rest")
+    )
+_SPA_STRONG_SIGNALS = (
+    "<app-root", "ng-version", "router-outlet",
+    "React.createElement", "__NEXT_DATA__", "__vue_app__",
+    'id="root"', 'id="app"', "data-reactroot",
+)
+_SPA_WEAK_SIGNALS = (
+    "<!DOCTYPE html>", "<script src=", "window.__",
+    "webpackJsonp", "vite/client",
+)
+
+# Bare "admin"/"dashboard" appear in most SPA shells — require stronger markers.
+_ADMIN_STRONG_MARKERS = (
+    "admin panel", "administration", "wp-admin",
+    "django administration", "control panel",
+    "management console", "admin dashboard",
+    "administrator login", "site administration",
+)
+
+
+def looks_like_spa_shell(body: str) -> bool:
+    if not body:
+        return False
+    has_strong = any(s in body for s in _SPA_STRONG_SIGNALS)
+    weak_count = sum(1 for s in _SPA_WEAK_SIGNALS if s in body)
+    return has_strong or weak_count >= 2
+
+
+def has_strong_admin_content(body: str) -> bool:
+    low = (body or "").lower()
+    return any(m in low for m in _ADMIN_STRONG_MARKERS)
+
+
 
 COMMON_PATHS = [
     # API roots
@@ -199,6 +243,17 @@ class EndpointDiscoveryAgent:
                 "(baseline body lengths: %s)", self._soft404_lengths
             )
 
+    def _body_matches_soft404(self, body_len: int, tol: float = 0.08) -> bool:
+        """True when body length is within tol of a calibrated soft-404 length."""
+        if not self._soft404_lengths or body_len <= 0:
+            return False
+        for baseline in self._soft404_lengths:
+            if baseline <= 0:
+                continue
+            if abs(body_len - baseline) <= max(50, int(baseline * tol)):
+                return True
+        return False
+
 
     async def discover(self, target_url: str,
                        page_html: str = "",
@@ -316,11 +371,15 @@ class EndpointDiscoveryAgent:
                 ep["verification"]  = "Login form detected"
                 return ep
 
-            # Admin panel
-            if any(kw in body_lower for kw in (
-                "admin", "dashboard", "control panel",
-                "management console", "administrator"
-            )):
+            # Admin panel — require strong markers; bare "admin"/"dashboard"
+            # in SPA shells are false positives on catch-all routers.
+            if has_strong_admin_content(body):
+                if looks_like_spa_shell(body) and self._soft_mode:
+                    ep["interesting"]     = False
+                    ep["spa_catch_all"]   = True
+                    ep["admin_panel"]     = False
+                    ep["verification"]    = "SPA catch-all shell — not a confirmed admin panel"
+                    return ep
                 ep["interesting"]  = True
                 ep["admin_panel"]  = True
                 ep["verification"] = "Admin panel indicators detected"
@@ -338,6 +397,22 @@ class EndpointDiscoveryAgent:
                     return ep
                 except Exception:
                     pass
+
+            # Soft-404 / SPA catch-all: HTML shell matching calibrated lengths.
+            # Never demote API/GraphQL/swagger surfaces — GET may return an HTML
+            # playground/shell that looks like the SPA but is still a real route.
+            path_hint = ep.get("url") or ""
+            if (
+                self._soft_mode
+                and not _is_api_surface_path(path_hint)
+                and "text/html" in (ep.get("content_type") or "").lower()
+                and looks_like_spa_shell(body)
+            ):
+                if self._body_matches_soft404(len(body)):
+                    ep["interesting"]   = False
+                    ep["spa_catch_all"] = True
+                    ep["verification"]  = "SPA/soft-404 catch-all (body matches baseline)"
+                    return ep
 
             # Directory listing
             if "index of /" in body_lower or "<title>directory listing" in body_lower:
@@ -709,6 +784,46 @@ class EndpointDiscoveryAgent:
                 ))
                 if not looks_like_endpoint:
                     return None
+
+                # SPA catch-all filter: admin/dashboard/manage HTML shells that
+                # match soft-404 baselines are not real admin surfaces.
+                # Never apply this to API/GraphQL/swagger paths.
+                adminish = any(kw in path_lower for kw in (
+                    "admin", "dashboard", "manage", "console", "panel",
+                ))
+                if adminish and self._soft_mode and not _is_api_surface_path(path):
+                    body = await self._fetch_text(url) or ""
+                    if looks_like_spa_shell(body) and (
+                        self._body_matches_soft404(len(body))
+                        or not has_strong_admin_content(body)
+                    ):
+                        logger.debug(
+                            "probe: exclude %s — SPA/soft-404 catch-all", url
+                        )
+                        return {
+                            "url": url, "method": "GET", "source": "probe",
+                            "status": status, "final_url": final_url or url,
+                            "interesting": False, "auth_required": False,
+                            "spa_catch_all": True, "params": [],
+                            "content_type": content_type,
+                            "note": "spa-catch-all",
+                            "excluded": True,
+                            "exclude_reason": "SPA catch-all — not a real admin endpoint",
+                            "verification": "SPA catch-all — not a real admin endpoint",
+                        }
+
+                # GraphQL / API HTML responses stay interesting even if soft-404
+                # lengths match (playground / schema UIs share the SPA shell).
+                if _is_api_surface_path(path) and status == 200:
+                    return {
+                        "url": url, "method": "GET", "source": "probe",
+                        "status": status, "final_url": final_url or url,
+                        "interesting": True, "auth_required": auth_required,
+                        "params": [], "content_type": content_type,
+                        "is_sensitive": is_sensitive,
+                        "api_surface": True,
+                        "verification": "API/GraphQL surface kept despite SPA soft-404 mode",
+                    }
 
             return {
                 "url":          url,
