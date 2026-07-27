@@ -471,6 +471,12 @@ async def health_check():
         "threat_modeling": "available" if threat_modeling_agent else "not initialized",
         "web_scanning":    "enabled",
         "kb_required_for_scan": False,
+        "scan_vector_kb": (
+            "enabled" if (
+                threat_modeling_agent
+                and getattr(threat_modeling_agent, "scan_enable_vector_kb", False)
+            ) else "disabled"
+        ),
         "ai_backdoor":     "enabled",
         "avid_lookup":     "enabled",
         "active_sessions": len(session_teams),
@@ -949,19 +955,26 @@ async def query_stream(request: StreamQueryRequest):
             )
 
             target_url   = threat_modeling_agent._extract_url_from_query(question)
+            # Scan path: skip Atlas vector/RAG (code retained; re-enable via SCAN_ENABLE_VECTOR_KB).
+            use_vector_kb = (
+                (not is_web_scan)
+                or getattr(threat_modeling_agent, "scan_enable_vector_kb", False)
+            )
             known_vulns  = await threat_modeling_agent.search_known_vulnerabilities_web(
-                question, target_url, verbose=True
+                question, target_url, verbose=True, use_vector_kb=use_vector_kb,
             )
 
             yield _format_sse("progress", {
                 "phase": "knowledge_gathering", "step": 2, "total_steps": 6,
-                "message": f"{sub_q_count} sub-questions · {len(known_vulns)} CVE references",
+                "message": f"{sub_q_count} sub-questions · {len(known_vulns)} CVE references"
+                           + ("" if use_vector_kb else " · KB vector skipped"),
                 "percent": 35,
             })
             await asyncio.sleep(0)
 
             research = await threat_modeling_agent.research_sub_questions_hybrid(
-                decomposition, filenames=filenames, verbose=True
+                decomposition, filenames=filenames, verbose=True,
+                use_vector_kb=use_vector_kb,
             )
 
             yield _format_sse("progress", {
