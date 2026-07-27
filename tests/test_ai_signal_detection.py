@@ -248,6 +248,86 @@ async def test_brand_string_alone_is_not_ai():
         srv.shutdown()
 
 
+class MarketingAiTitleWith405CatchAll(BaseHTTPRequestHandler):
+    """Zendesk-style FP: AI marketing title + CDN 405 on every inference seed."""
+
+    SHELL = (
+        "<!DOCTYPE html><html><head>"
+        "<title>AI-Powered Service Platform | Example</title>"
+        "<meta name='description' content='AI agents that resolve issues'>"
+        "</head><body><h1>Welcome</h1></body></html>"
+    )
+
+    def _html(self):
+        data = self.SHELL.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _405(self):
+        self.send_response(405)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "18")
+        self.end_headers()
+        self.wfile.write(b"Method Not Allowed")
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path in ("/", ""):
+            self._html()
+            return
+        # Catch-all 405 for seeded AI paths (no Allow: POST, no JSON body).
+        self._405()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        self._405()
+
+    def log_message(self, *args):
+        pass
+
+
+def test_bare_405_not_meaningful():
+    assert AIFingerprintAgent._is_meaningful_405(
+        {"content-type": "text/plain"}, "Method Not Allowed"
+    ) is False
+    assert AIFingerprintAgent._is_meaningful_405(
+        {"allow": "POST, OPTIONS", "content-type": "text/plain"}, ""
+    ) is True
+
+
+def test_generated_sitemap_not_ai_path():
+    assert AIFingerprintAgent._is_ai_api_path("/generated_sitemap_part1.xml") is False
+    assert AIFingerprintAgent._is_ai_api_path("/v1/chat/completions") is True
+    assert AIFingerprintAgent._is_ai_api_path("/api/messages") is True
+
+
+def test_vuln_tester_no_generic_spray_without_endpoints():
+    from multiagent.agents.ai_agents.ai_vulnerability_test import AIVulnerabilityTester
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    assert t._build_endpoint_list([], [], "https://www.zendesk.com") == []
+
+
+@pytest.mark.asyncio
+async def test_marketing_site_405_catchall_not_ai():
+    port = _free_port()
+    srv = _run_server(MarketingAiTitleWith405CatchAll, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["is_ai_powered"] is False
+        assert result["ml_endpoints"] == []
+        assert not any(
+            e.get("key") == "ml_endpoint_405"
+            for e in result.get("evidence_items") or []
+        )
+    finally:
+        srv.shutdown()
+
+
 def test_ai_surfaces_merged_into_attack_surface_list():
     """§2 attack surface must include AI-fingerprint ml/auth endpoints."""
     from multiagent.agents.webappscanner.web_scanner_agent import WebScannerAgent

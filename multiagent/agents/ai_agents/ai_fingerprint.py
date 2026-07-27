@@ -110,7 +110,7 @@ LIVE_SURFACE_EVIDENCE_KEYS = {
     "tool_endpoint_200",
     "ml_endpoint_200",
     "ml_endpoint_401_403",
-    "ml_endpoint_405",
+    # Bare HTTP 405 is NOT live surface — CDNs often 405 every unknown POST.
     "openapi_schema",
     "openapi_ai_endpoint",
     "graphql_schema",
@@ -632,6 +632,23 @@ class AIFingerprintAgent:
             deduped.append(ev)
         all_evidence = deduped
 
+        # Drop weak 405 spray if nothing else confirms a live AI surface.
+        # Marketing CDNs often 405 every seeded inference path.
+        weak_405 = [ev for ev in all_evidence if ev.key == "ml_endpoint_405"]
+        has_strong_live = bool(
+            ml_endpoints
+            or any(_is_inference_path(urllib.parse.urlparse(a.endpoint).path)
+                   for a in auth_signals)
+            or any(ev.key in {
+                "behavior_llm_response", "behavior_model_reported",
+                "behavior_streaming", "chat_endpoint_200", "ml_endpoint_200",
+                "ml_endpoint_401_403", "openapi_schema", "openapi_ai_endpoint",
+                "error_openai_format", "error_missing_messages", "error_missing_model",
+            } for ev in all_evidence)
+        )
+        if len(weak_405) >= 3 and not has_strong_live:
+            all_evidence = [ev for ev in all_evidence if ev.key != "ml_endpoint_405"]
+
         total_score = sum(ev.weight for ev in all_evidence)
         confidence  = score_to_confidence(total_score)
 
@@ -889,12 +906,40 @@ class AIFingerprintAgent:
 
     @staticmethod
     def _is_ai_api_path(path: str) -> bool:
-        return any(pat in path.lower() for pat in [
-            "/chat", "/completions", "/generate", "/predict",
-            "/embed", "/inference", "/infer", "/model",
-            "/v1/", "/api/", "/llm", "/ai/", "/messages",
-            "/runs", "/threads", "/assistants",
-        ])
+        """True for inference-ish path segments — not substring traps like /generated_."""
+        parts = [p for p in (path or "").lower().split("/") if p]
+        if not parts:
+            return False
+        # Exact segment hits (avoid /generated_sitemap matching /generate).
+        ai_segments = {
+            "chat", "completions", "completion", "generate", "predict",
+            "prediction", "embeddings", "embedding", "inference", "infer",
+            "messages", "message", "ask", "runs", "threads", "assistants",
+            "agents", "agent", "convos", "conversations", "llm",
+        }
+        if any(
+            seg in ai_segments or seg.split(".")[0] in ai_segments
+            for seg in parts
+        ):
+            return True
+        joined = "/" + "/".join(parts)
+        return bool(_INFERENCE_PATH_RE.search(joined))
+
+    @staticmethod
+    def _is_meaningful_405(headers_low: Dict, body: str) -> bool:
+        """CDN/marketing sites often return 405 for every unknown POST — ignore those."""
+        allow = (headers_low.get("allow") or "").upper()
+        if any(m in allow for m in ("POST", "PUT", "PATCH")):
+            return True
+        body = body or ""
+        ct = (headers_low.get("content-type") or "").lower()
+        if "json" in ct and body.strip()[:1] in ("{", "["):
+            if any(re.search(p, body, re.I) for p in AI_RESPONSE_BODY_PATTERNS):
+                return True
+            for pattern, _, _ in ERROR_FINGERPRINTS:
+                if pattern.search(body):
+                    return True
+        return False
 
     async def _probe_openapi(self, base: str, verbose: bool) -> Dict:
         evidence:     List[EvidenceItem] = []
@@ -1210,10 +1255,13 @@ class AIFingerprintAgent:
                 endpoints.append(url)
 
         if status == 405 and category in ("chat", "embedding", "ml"):
-            evidence.append(EvidenceItem.make(
-                "ml_endpoint_405",
-                f"Endpoint exists {path} (HTTP 405)",
-                "probe", endpoint=url))
+            # Ignore CDN/marketing catch-all 405s (Zendesk-style FP).
+            if self._is_meaningful_405(headers_low, body):
+                evidence.append(EvidenceItem.make(
+                    "ml_endpoint_405",
+                    f"Endpoint exists {path} (HTTP 405, Allow/API body confirmed)",
+                    "probe", endpoint=url))
+                endpoints.append(url)
 
         if status in (400, 422) and body:
             fw = self._fingerprint_error_body(body, url, evidence)
