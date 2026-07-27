@@ -140,26 +140,31 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
     "OpenHands": {
         "paths":       ["/api/conversations", "/api/submit-feedback", "/api/options/config"],
         "js_strings":  ["OpenHands", "opendevin", "openhands"],
+        "title_hints": ["openhands", "open hands", "opendevin"],
         "capabilities": ["code_execution", "shell", "filesystem", "browser", "multi_agent"],
     },
     "CrewAI": {
         "paths":       ["/api/crews", "/api/kickoff", "/api/agents"],
         "js_strings":  ["crewai", "CrewAI"],
+        "title_hints": ["crewai", "crew ai"],
         "capabilities": ["multi_agent", "tool_calling", "workflow"],
     },
     "AutoGen": {
         "paths":       ["/api/messages", "/api/agents", "/api/run"],
         "js_strings":  ["autogen", "AutoGen", "pyautogen"],
+        "title_hints": ["autogen", "auto gen"],
         "capabilities": ["multi_agent", "code_execution", "tool_calling"],
     },
     "LangGraph": {
         "paths":       ["/runs", "/threads", "/assistants", "/store"],
         "js_strings":  ["langgraph", "LangGraph", "@langchain/langgraph"],
+        "title_hints": ["langgraph", "lang graph"],
         "capabilities": ["multi_agent", "memory", "workflow", "tool_calling"],
     },
     "Haystack": {
         "paths":       ["/query", "/pipeline", "/document-store"],
         "js_strings":  ["haystack", "deepset"],
+        "title_hints": ["haystack", "deepset"],
         "capabilities": ["rag", "chat", "tool_calling"],
     },
     "Ollama": {
@@ -167,18 +172,21 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
                         "/api/show", "/api/pull", "/api/delete", "/api/copy"],
         "headers":     {"x-ollama-version": None},
         "js_strings":  ["ollama", "Ollama"],
+        "title_hints": ["ollama"],
         "body_patterns": [r'"done_reason"', r'"total_duration"', r'"eval_count"'],
         "capabilities": ["chat", "embedding"],
     },
     "vLLM": {
         "paths":       ["/v1/chat/completions", "/v1/completions", "/v1/models"],
         "headers":     {"server": "vllm"},
+        "title_hints": ["vllm", "v llm"],
         "body_patterns": [r'"object"\s*:\s*"chat\.completion"'],
         "capabilities": ["chat", "embedding"],
     },
     "TGI (HuggingFace)": {
         "paths":       ["/generate", "/generate_stream", "/v1/chat/completions"],
         "headers":     {"server": "text-generation-inference"},
+        "title_hints": ["text generation inference", "huggingface tgi"],
         "body_patterns": [r'"generated_text"', r'"details".*"finish_reason"'],
         "capabilities": ["chat", "embedding"],
     },
@@ -190,6 +198,26 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
         "capabilities": ["chat", "embedding", "image_generation"],
     },
 }
+
+
+def framework_title_brands() -> Dict[str, str]:
+    """Map title hints -> canonical framework name (any catalogued AI app)."""
+    out: Dict[str, str] = {}
+    for name, sig in FRAMEWORK_SIGNATURES.items():
+        out[name.lower()] = name
+        for hint in sig.get("title_hints") or []:
+            if hint:
+                out[str(hint).lower()] = name
+    return out
+
+
+def is_known_ai_framework(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    return name in FRAMEWORK_SIGNATURES or name.lower() in {
+        k.lower() for k in FRAMEWORK_SIGNATURES
+    }
+
 
 MODEL_NAME_PATTERNS = [
     r'\b(gpt-?4|gpt-?3\.5|gpt-?4o)\b',

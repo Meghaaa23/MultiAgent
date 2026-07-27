@@ -333,39 +333,36 @@ class WebScannerAgent:
 
             raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
             confidence   = ai_fingerprint.get("confidence", "low")
-            _KNOWN_AI_UI = {
-                "LibreChat", "Open WebUI", "LobeChat", "AnythingLLM",
-                "Dify", "Flowise", "Langflow", "Ollama",
-            }
+            evidence_score = int(ai_fingerprint.get("evidence_score") or 0)
             framework = (ai_fingerprint.get("framework") or "").strip()
             if not framework:
                 for cand in ai_fingerprint.get("frameworks_detected") or []:
                     name = cand.get("name") if isinstance(cand, dict) else cand
-                    if name in _KNOWN_AI_UI:
-                        framework = name
+                    if isinstance(name, str) and name.strip():
+                        framework = name.strip()
                         break
             auth_paths   = ai_fingerprint.get("auth_required_paths") or []
-            known_ai_ui  = framework in _KNOWN_AI_UI
+            ml_endpoints = ai_fingerprint.get("ml_endpoints") or []
             has_concrete = bool(
-                ai_fingerprint.get("ml_endpoints")
+                ml_endpoints
                 or ai_fingerprint.get("ai_headers")
                 or auth_paths
+                or ai_fingerprint.get("openapi_schema")
+                or ai_fingerprint.get("capabilities")
             )
-            # Escalate when fingerprint says AI, OR a known chat-UI brand is
-            # confirmed (LibreChat title alone should not stay an unverified hint).
-            is_ai_powered = bool(raw_is_ai) and (
-                confidence in ("high", "medium", "very_high")
-                or has_concrete
-                or known_ai_ui
+            # Signal-based escalation — do NOT require a product allowlist.
+            # Fingerprint already scores OpenAPI, probes, JS SDKs, brands, etc.
+            # Framework / concrete ML surface recovers SPA shells that score low.
+            is_ai_powered = bool(raw_is_ai) or bool(framework) or (
+                has_concrete and evidence_score >= 12
             )
-            if known_ai_ui:
-                is_ai_powered = True
+            if is_ai_powered and not raw_is_ai:
                 ai_fingerprint["is_ai_powered"] = True
-                if not ai_fingerprint.get("framework"):
-                    ai_fingerprint["framework"] = framework
+            if framework and not ai_fingerprint.get("framework"):
+                ai_fingerprint["framework"] = framework
 
-            # Promote identified AI product into stack summary / app identity.
-            if framework and known_ai_ui:
+            # Promote any identified AI framework into stack (not brand-gated).
+            if framework and is_ai_powered:
                 stack["app_identity_name"] = stack.get("app_identity_name") or framework
                 if "Unknown" in (stack.get("stack_summary") or "") or not stack.get("stack_summary"):
                     stack["stack_summary"] = framework
@@ -415,8 +412,9 @@ class WebScannerAgent:
                     print(f"   Strategic recommendations: {s} ATLAS-based\n")
             else:
                 if verbose:
-                    if raw_is_ai and not has_concrete and not known_ai_ui:
-                        print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
+                    if evidence_score > 0 and not has_concrete:
+                        print(f"  Weak AI signals (confidence: {confidence}, "
+                              f"score={evidence_score}) — skipping AI escalation\n")
                     else:
                         print(f"  No AI/ML components detected — AI-specific tests skipped\n")
 

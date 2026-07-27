@@ -11,20 +11,38 @@ logger = logging.getLogger(__name__)
 
 _APP_IDENTITY_MIN_CONFIDENCE = 88
 
-# Known AI chat UIs — title match is strong enough to promote even when
-# generator meta is absent (LibreChat, Open WebUI, etc.).
-_KNOWN_AI_APP_BRANDS = {
-    "librechat": "LibreChat",
-    "open webui": "Open WebUI",
-    "openwebui": "Open WebUI",
-    "anythingllm": "AnythingLLM",
-    "anything llm": "AnythingLLM",
-    "lobechat": "LobeChat",
-    "lobe chat": "LobeChat",
-    "dify": "Dify",
-    "flowise": "Flowise",
-    "langflow": "Langflow",
-}
+# Generic AI product cues in titles (custom apps, not just catalogued brands).
+_AI_TITLE_CUES = (
+    "chatbot", "assistant", "copilot", "llm", "gpt",
+    "ai agent", "ai chat", "ai assistant", "rag",
+    "inference", "ollama", "langgraph", "langchain",
+)
+
+
+def _title_has_ai_cue(title_l: str) -> bool:
+    if re.search(r"(?:^|[^a-z])ai(?:[^a-z]|$)", title_l):
+        return True
+    return any(cue in title_l for cue in _AI_TITLE_CUES)
+
+
+def _ai_title_brands() -> Dict[str, str]:
+    """Catalogued AI framework title hints — sourced from fingerprint signatures."""
+    try:
+        from multiagent.agents.ai_agents.ai_fingerprint import framework_title_brands
+        return framework_title_brands()
+    except Exception:
+        # Minimal fallback if fingerprint import is unavailable.
+        return {
+            "librechat": "LibreChat",
+            "open webui": "Open WebUI",
+            "openwebui": "Open WebUI",
+            "anythingllm": "AnythingLLM",
+            "lobechat": "LobeChat",
+            "dify": "Dify",
+            "flowise": "Flowise",
+            "langflow": "Langflow",
+            "ollama": "Ollama",
+        }
 
 
 @dataclass
@@ -99,10 +117,12 @@ def _from_page_title(html: str) -> Tuple[Optional[str], Optional[str], str]:
 
     title    = m.group(1).strip()
     title_l  = title.lower()
-    # Prefer known AI brands anywhere in the title (first segment usually wins).
-    for hint, brand in _KNOWN_AI_APP_BRANDS.items():
+    # Prefer catalogued AI frameworks anywhere in the title.
+    brands = _ai_title_brands()
+    # Longer hints first so "open webui" wins over "ai".
+    for hint in sorted(brands.keys(), key=len, reverse=True):
         if hint in title_l:
-            return brand, None, f"page title (AI brand): {title!r}"
+            return brands[hint], None, f"page title (AI brand): {title!r}"
 
     segments = re.split(r'\s*[-|–—·•]\s*', title)
     # Prefer first segment (product name) over trailing marketing tagline.
@@ -113,6 +133,8 @@ def _from_page_title(html: str) -> Tuple[Optional[str], Optional[str], str]:
         if _looks_like_app_name(candidate):
             version = _extract_version_from_string(candidate)
             name    = re.sub(r'\s*\d[\d.]*\s*$', '', candidate).strip()
+            if _title_has_ai_cue(title_l):
+                return name, version, f"page title (AI product): {title!r}"
             return name, version, f"page title: {title!r}"
 
     return None, None, ""
@@ -257,8 +279,10 @@ async def detect_app_identity(base_url: str,
             name, version, evidence = fn()
             if name:
                 score = confidence_scores[extractor_name]
-                # Boost known AI product titles to promotion threshold.
-                if extractor_name == "page_title" and name in _KNOWN_AI_APP_BRANDS.values():
+                # Promote AI product titles (catalogued brand or AI cue in title).
+                if extractor_name == "page_title" and evidence.startswith(
+                    ("page title (AI brand):", "page title (AI product):")
+                ):
                     score = 90
                 signals.append((name, version, evidence, score))
                 if verbose:

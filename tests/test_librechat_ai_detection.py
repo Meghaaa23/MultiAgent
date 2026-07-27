@@ -1,7 +1,8 @@
 """
-LibreChat / SPA AI detection: brand identity, auth-gated probes, escalation.
+Universal AI app detection: brand/catalog signals, generic OpenAI-compatible
+surfaces, auth-gated probes, and app-identity promotion.
+LibreChat is one regression fixture — not the only supported product.
 """
-import asyncio
 import json
 import socket
 import threading
@@ -13,6 +14,7 @@ from multiagent.agents.ai_agents.ai_fingerprint import (
     AIFingerprintAgent,
     FRAMEWORK_PROBE_PATHS,
     FRAMEWORK_SIGNATURES,
+    framework_title_brands,
 )
 from multiagent.agents.ai_agents.ai_vulnerability_test import (
     AIVulnerabilityTester,
@@ -93,6 +95,71 @@ class SpaLibreChatHandler(BaseHTTPRequestHandler):
         pass
 
 
+class GenericOpenAICompatHandler(BaseHTTPRequestHandler):
+    """Custom AI app with no known brand — only OpenAI-compatible API."""
+
+    SHELL = (
+        "<!DOCTYPE html><html><head><title>Acme Support Assistant</title>"
+        "</head><body><div id='app'>Ask our AI assistant</div></body></html>"
+    )
+
+    def _html(self):
+        data = self.SHELL.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json(self, status: int, obj: dict):
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/v1/models":
+            self._json(200, {
+                "object": "list",
+                "data": [{"id": "gpt-4o-mini", "object": "model"}],
+            })
+            return
+        if path in ("/openapi.json", "/v1/openapi.json"):
+            self._json(200, {
+                "openapi": "3.0.0",
+                "paths": {
+                    "/v1/chat/completions": {"post": {"summary": "chat"}},
+                    "/v1/models": {"get": {"summary": "models"}},
+                },
+            })
+            return
+        self._html()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        path = self.path.split("?")[0]
+        if path in ("/v1/chat/completions", "/api/chat/completions"):
+            self._json(200, {
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            })
+            return
+        self._html()
+
+    def log_message(self, *args):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_app_identity_librechat_title():
     html = "<html><head><title>LibreChat</title></head><body></body></html>"
@@ -100,6 +167,17 @@ async def test_app_identity_librechat_title():
         "http://localhost:3080", html, {}, wappalyzer_technologies=[],
     )
     assert identity.name == "LibreChat"
+    assert identity.confidence in ("high", "medium")
+
+
+@pytest.mark.asyncio
+async def test_app_identity_generic_ai_product_title():
+    html = "<html><head><title>Acme Support Assistant</title></head></html>"
+    identity = await detect_app_identity(
+        "http://x", html, {}, wappalyzer_technologies=[],
+    )
+    assert identity.name
+    assert "assistant" in identity.name.lower() or identity.name == "Acme Support Assistant"
     assert identity.confidence in ("high", "medium")
 
 
@@ -114,11 +192,13 @@ async def test_app_identity_not_cleared_without_cms():
     assert identity.name == "LibreChat"
 
 
-def test_librechat_signature_and_probe_paths():
-    assert "LibreChat" in FRAMEWORK_SIGNATURES
+def test_framework_catalog_is_broader_than_librechat():
+    brands = framework_title_brands()
+    for name in ("LibreChat", "Open WebUI", "Flowise", "Langflow", "Ollama", "Dify"):
+        assert name in FRAMEWORK_SIGNATURES
+        assert name.lower() in brands or any(v == name for v in brands.values())
     assert "LibreChat" in FRAMEWORK_PROBE_PATHS
     assert "librechat" in FRAMEWORK_INJECTION_PATHS
-    assert any(h == "librechat" for h in FRAMEWORK_SIGNATURES["LibreChat"]["title_hints"])
 
 
 def test_html_brand_librechat():
@@ -181,5 +261,22 @@ async def test_fingerprint_librechat_spa():
             for e in all_eps
             for p in ("/api/ask", "/api/messages", "/api/convos", "/api/endpoints")
         )
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_generic_openai_compatible():
+    """No catalogued brand — detection must still fire from API/OpenAPI signals."""
+    port = _free_port()
+    srv = _run_server(GenericOpenAICompatHandler, port)
+    try:
+        agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
+        result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
+        assert result["is_ai_powered"] is True
+        assert result["evidence_score"] >= 12
+        assert result["ml_endpoints"] or result.get("openapi_schema")
+        fw = result.get("framework") or ""
+        assert fw in ("", "OpenAI-compatible", "vLLM") or result["ml_endpoints"]
     finally:
         srv.shutdown()
