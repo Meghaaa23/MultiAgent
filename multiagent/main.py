@@ -493,15 +493,21 @@ async def query_with_full_autogen(request: Request):
                         "scan_performed":       result.get("web_scan_performed", False),
                         "target_url":           target_url,
                         "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
-                        "is_ai_powered":        scan_data.get("is_ai_powered", False),
-                        "ai_vulns_found":       len([
-                            f for f in scan_data.get("vulnerabilities", [])
-                            if f.get("category") == "ai_vulnerability"
-                        ]),
-                        "avid_findings":        len(scan_data.get("avid_findings", [])),
-                        "strategic_recommendations": len(
-                            scan_data.get("strategic_recommendations", [])
-                        ),
+                    "is_ai_powered":        scan_data.get("is_ai_powered", False),
+                    "ai_vulns_found":       len([
+                        f for f in scan_data.get("vulnerabilities", [])
+                        if f.get("category") == "ai_vulnerability"
+                    ]),
+                    "avid_findings":        (
+                        scan_data.get("avid_findings", 0)
+                        if isinstance(scan_data.get("avid_findings", 0), int)
+                        else len(scan_data.get("avid_findings") or [])
+                    ),
+                    "strategic_recommendations": (
+                        scan_data.get("strategic_recommendations", 0)
+                        if isinstance(scan_data.get("strategic_recommendations", 0), int)
+                        else len(scan_data.get("strategic_recommendations") or [])
+                    ),
                     })
                 except Exception as e:
                     logger.error(f"Web scan failed: {e}\n{traceback.format_exc()}")
@@ -678,7 +684,8 @@ async def query_stream(request: StreamQueryRequest):
             # Active scanning
             scan_results = None
             if is_web_scan and target_url:
-                if not threat_modeling_agent.web_scanner:
+                scanner = threat_modeling_agent.ensure_web_scanner()
+                if not scanner:
                     yield _format_sse("progress", {
                         "phase": "active_scanning", "step": 4, "total_steps": 6,
                         "message": (
@@ -697,7 +704,7 @@ async def query_stream(request: StreamQueryRequest):
                     await asyncio.sleep(0)
 
                     scan_task = asyncio.create_task(
-                        threat_modeling_agent.web_scanner.scan_application(
+                        scanner.scan_application(
                             target_url=target_url, max_time_minutes=3, verbose=True,
                             auth_cookie=auth_cookie,
                         )
