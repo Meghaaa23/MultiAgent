@@ -697,22 +697,31 @@ def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
 
 class ThreatModelingAgent:
 
-    def __init__(self, openai_client=None, web_search_function=None, **_kwargs):
+    def __init__(self, openai_client=None, web_search_function=None,
+                 llm_model: str = None, **_kwargs):
         if openai_client:
             self.openai_client = openai_client
-            self.llm_model     = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
+            self.llm_model = (
+                llm_model
+                or os.getenv("AZURE_OPENAI_DEPLOYMENT")
+                or os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
+            )
         else:
             llama_base_url     = os.getenv("LLAMA_BASE_URL", "http://localhost:8080")
             self.openai_client = openai.OpenAI(
                 base_url=f"{llama_base_url}/v1", api_key="not-needed"
             )
-            self.llm_model = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
+            self.llm_model = llm_model or os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
 
-        self.web_search  = web_search_function
-        self.web_scanner = WebScannerAgent(
-            openai_client=self.openai_client,
-            llm_model=self.llm_model,
-        )
+        self.web_search = web_search_function
+        try:
+            self.web_scanner = WebScannerAgent(
+                openai_client=self.openai_client,
+                llm_model=self.llm_model,
+            )
+        except Exception as e:
+            logger.warning(f"WebScannerAgent init failed (scans disabled): {e}")
+            self.web_scanner = None
 
         print("ThreatModelingAgent initialized")
 

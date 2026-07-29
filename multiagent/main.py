@@ -161,17 +161,18 @@ async def web_search_wrapper(query: str) -> List[Dict]:
 # ============================================================================
 
 try:
-    active_client, _ = get_active_client()
+    active_client, active_model = get_active_client()
     threat_modeling_agent = ThreatModelingAgent(
         openai_client=active_client,
         web_search_function=web_search_wrapper,
+        llm_model=active_model,
     )
-    logger.info("✓ Threat Modeling Agent initialized")
+    logger.info("Threat Modeling Agent initialized")
 except Exception as e:
-    logger.warning(f"Threat Modeling Agent init failed: {e}")
+    logger.warning(f"Threat Modeling Agent init failed: {e}", exc_info=True)
     threat_modeling_agent = None
 
-logger.info("✓ All agents initialized")
+logger.info("All agents initialized")
 
 # ============================================================================
 # AUTOGEN LLM CLIENT
