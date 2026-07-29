@@ -2,24 +2,17 @@
 
 
 import os
-import shutil
 import asyncio
 import json
-import atexit
-from pathlib import Path
 from typing import Optional, Dict, List, Any
 from enum import Enum
 from datetime import datetime
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from pymongo import MongoClient
-from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_community.embeddings import SentenceTransformerEmbeddings
-from langchain_core.documents import Document
 from agents.threat_modeling_agent import ThreatModelingAgent
 import logging
 import traceback
@@ -32,7 +25,6 @@ from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermi
 from autogen_agentchat.messages import TextMessage, UserMessage
 from autogen_core.models import CreateResult, RequestUsage
 from autogen_agentchat.base import Response, TaskResult
-import certifi
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,7 +108,7 @@ config_list = get_config_list()
 # ============================================================================
 
 app = FastAPI(
-    title="Multi-Agent RAG System with Web Scanning + AI Backdoor Detection",
+    title="Multi-Agent Threat Modeling System with Web Scanning + AI Backdoor Detection",
     description="AutoGen + Threat Modeling + Web Scanning + AI Backdoor Analysis",
     version="7.0.0",
 )
@@ -135,61 +127,12 @@ app.add_middleware(
 )
 
 # ============================================================================
-# MONGODB & VECTOR STORE
+# AGENT INITIALIZATION
 # ============================================================================
 
-mongodb_uri = os.getenv("MONGODB_ATLAS_URI")
-if not mongodb_uri:
-    raise ValueError("MONGODB_ATLAS_URI environment variable is required")
+from agents.qa_agent import set_config
 
-try:
-    logger.info("Connecting to MongoDB Atlas...")
-    mongo_client = MongoClient(
-        mongodb_uri,
-        tls=True,
-        tlsAllowInvalidCertificates=True,
-        tlsCAFile=certifi.where(),
-    )
-    logger.info("✓ MongoDB client initialized")
-except Exception as e:
-    logger.warning(f"MongoDB initialization warning: {e}")
-    mongo_client = None
-
-if mongo_client:
-    try:
-        collection  = mongo_client["multiagentllm"]["RAG"]
-        vectorstore = MongoDBAtlasVectorSearch(
-            collection=collection,
-            embedding=SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2"),
-            index_name="vector_index",
-            text_key="page_content",
-        )
-        logger.info("✓ Vector store initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize vectorstore: {e}")
-        vectorstore = None
-else:
-    logger.error("MongoDB not available")
-    vectorstore = None
-
-# ============================================================================
-# AGENT IMPORTS & INITIALIZATION
-# ============================================================================
-
-from agents.audio_agent    import transcribe_audio_locally, set_vectorstore as set_audio_vectorstore
-from agents.image_agent    import analyze_image_locally, set_image_vectorstore
-from agents.pdf_agent      import set_vectorstore as set_pdf_vectorstore, process_pdf_locally
-from agents.qa_agent       import set_vectorstore, set_config, answer_question_from_db
-from agents.data_ingestion import set_vectorstore as set_ingest_vectorstore
-from agents.url_agent      import set_url_vectorstore
-
-set_image_vectorstore(vectorstore)
-set_pdf_vectorstore(vectorstore)
-set_vectorstore(vectorstore)
-set_audio_vectorstore(vectorstore)
 set_config(config_list)
-set_ingest_vectorstore(vectorstore)
-set_url_vectorstore(vectorstore)
 
 # ============================================================================
 # WEB SEARCH
@@ -220,9 +163,7 @@ async def web_search_wrapper(query: str) -> List[Dict]:
 try:
     active_client, _ = get_active_client()
     threat_modeling_agent = ThreatModelingAgent(
-        mongodb_client=mongo_client,
         openai_client=active_client,
-        vectorstore=vectorstore,
         web_search_function=web_search_wrapper,
     )
     logger.info("✓ Threat Modeling Agent initialized")
@@ -347,20 +288,19 @@ model_client = LocalLlamaChatCompletionClient(_init_client, _init_model)
 # AUTOGEN SESSION MANAGEMENT
 # ============================================================================
 
-session_teams:     Dict[str, RoundRobinGroupChat] = {}
-session_documents: Dict[str, List[str]]           = {}
+session_teams: Dict[str, RoundRobinGroupChat] = {}
 
 
 async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
     if session_id in session_teams:
         return session_teams[session_id]
     rag_assistant = AssistantAgent(
-        name="rag_assistant",
+        name="security_assistant",
         model_client=model_client,
         system_message=(
-            "You are an intelligent RAG assistant with conversation memory. "
-            "Answer questions using retrieved documents and previous context. "
-            "Cite sources and maintain natural conversation flow."
+            "You are an intelligent cybersecurity assistant with conversation memory. "
+            "Answer questions using your knowledge and any provided context. "
+            "Cite sources when available and maintain natural conversation flow."
         ),
     )
     team = RoundRobinGroupChat(
@@ -373,7 +313,6 @@ async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
 
 def clear_session_team(session_id: str):
     session_teams.pop(session_id, None)
-    session_documents.pop(session_id, None)
 
 
 async def get_team_history(session_id: str) -> List[Dict]:
@@ -390,27 +329,9 @@ async def get_team_history(session_id: str) -> List[Dict]:
                 })
     return history
 
-# ============================================================================
+# =============================================================================
 # UTILITIES
-# ============================================================================
-
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
-
-
-def safe_file_path(filename: str) -> Path:
-    safe_name = os.path.basename(filename)
-    if not safe_name or safe_name != filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    file_path = Path("uploads") / safe_name
-    try:
-        resolved   = file_path.resolve()
-        upload_dir = Path("uploads").resolve()
-        if not str(resolved).startswith(str(upload_dir)):
-            raise HTTPException(status_code=400, detail="Invalid filename")
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    return file_path
-
+# =============================================================================
 
 def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
@@ -423,214 +344,64 @@ def _format_sse(event_type: str, data: dict) -> str:
 async def root():
     return {
         "status":  "healthy",
-        "service": "Multi-Agent RAG + Web Scanner + AI Backdoor Detection",
+        "service": "Multi-Agent Threat Modeling + Web Scanner + AI Backdoor Detection",
         "version": "7.0.0",
         "features": [
             "AutoGen orchestration",
             "Persistent conversation memory",
             "Threat Modeling (STRIDE + ATLAS)",
-            "Web Application Scanning (YuraRAG)",
+            "Web Application Scanning",
             "CVE/NVD/OSV lookup",
             "XSS/SQLi/CSRF vulnerability testing",
-            "AI Backdoor Detection (NEW)",           # ← new
-            "AVID AI vulnerability database lookup", # ← new
-            "ATLAS strategic recommendations",       # ← new
+            "AI Backdoor Detection",
+            "AVID AI vulnerability database lookup",
+            "ATLAS strategic recommendations",
         ],
         "endpoints": {
-            "/query/":          "Main endpoint (auto-routes)",
-            "/query/stream":    "SSE streaming endpoint",
-            "/scan/":           "Dedicated web scanning",
-            "/threat-modeling/":"Security analysis",
-            "/health":          "System health",
-            "/documents":       "List documents",
-            "/sessions":        "Active sessions",
+            "/query/":           "Main endpoint (auto-routes)",
+            "/query/stream":     "SSE streaming endpoint",
+            "/scan/":            "Dedicated web scanning",
+            "/threat-modeling/": "Security analysis",
+            "/health":           "System health",
+            "/sessions":         "Active sessions",
         },
     }
 
 
 @app.get("/health")
 async def health_check():
-    try:
-        mongo_client.admin.command('ping')
-        mongo_status = "connected"
-    except Exception as e:
-        mongo_status = f"error: {str(e)}"
-
     return {
         "status":          "healthy",
-        "mongodb":         mongo_status,
-        "vectorstore":     "initialized" if vectorstore else "unavailable",
         "agents":          "ready",
         "autogen":         "enabled",
         "threat_modeling": "available" if threat_modeling_agent else "not initialized",
         "web_scanning":    "enabled",
-        "ai_backdoor":     "enabled",   # ← new
-        "avid_lookup":     "enabled",   # ← new
+        "ai_backdoor":     "enabled",
+        "avid_lookup":     "enabled",
         "active_sessions": len(session_teams),
     }
 
-# ============================================================================
-# DOCUMENTS
-# ============================================================================
-
-@app.get("/documents")
-async def list_all_documents():
-    try:
-        col      = mongo_client["multiagentllm"]["RAG"]
-        pipeline = [
-            {"$group": {"_id": "$filename", "count": {"$sum": 1},
-                        "first_upload": {"$min": "$_id"}}},
-            {"$sort": {"first_upload": -1}},
-        ]
-        documents = [
-            {"filename": d["_id"], "chunk_count": d["count"]}
-            for d in col.aggregate(pipeline) if d["_id"]
-        ]
-        return {"total_documents": len(documents), "documents": documents}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# FILE UPLOAD
-# ============================================================================
-
-@app.post("/uploadfile/")
-async def upload_multiple_files(request: Request):
-    try:
-        logger.info("=" * 80)
-        logger.info("UPLOAD REQUEST")
-        logger.info("=" * 80)
-
-        form       = await request.form()
-        session_id = form.get("session_id", "default")
-        if not isinstance(session_id, str):
-            session_id = "default"
-
-        files_list = []
-        for key in form.keys():
-            values = form.getlist(key) if hasattr(form, 'getlist') else [form[key]]
-            for item in values:
-                if hasattr(item, 'filename') and item.filename:
-                    files_list.append(item)
-
-        if not files_list:
-            raise HTTPException(status_code=400, detail="No files provided")
-
-        os.makedirs("uploads", exist_ok=True)
-        uploaded, errors = [], []
-
-        for idx, file in enumerate(files_list):
-            try:
-                ext = file.filename.split('.')[-1].lower()
-                if ext not in ["pdf", "jpg", "jpeg", "png", "mp3", "wav"]:
-                    errors.append({"filename": file.filename,
-                                   "error": f"Unsupported type '.{ext}'"})
-                    continue
-
-                file_path = safe_file_path(file.filename)
-                content   = await file.read()
-
-                if len(content) > MAX_FILE_SIZE:
-                    errors.append({"filename": file.filename, "error": "File too large"})
-                    continue
-
-                with open(file_path, "wb") as buf:
-                    buf.write(content)
-
-                ingestion_status = "pending"
-                try:
-                    if ext == 'pdf':
-                        result = await process_pdf_locally(str(file_path))
-                        ingestion_status = (
-                            "ingested" if result and "Error" not in str(result)
-                            else "ingestion_error"
-                        )
-                    elif ext in ['jpg', 'jpeg', 'png']:
-                        await analyze_image_locally(str(file_path))
-                        ingestion_status = "ingested"
-                    elif ext in ['mp3', 'wav']:
-                        await transcribe_audio_locally(str(file_path))
-                        ingestion_status = "ingested"
-
-                    if ingestion_status == "ingested":
-                        session_documents.setdefault(session_id, [])
-                        if file.filename not in session_documents[session_id]:
-                            session_documents[session_id].append(file.filename)
-                except Exception as ie:
-                    ingestion_status = "ingestion_error"
-                    errors.append({"filename": file.filename,
-                                   "error": f"Ingestion failed: {str(ie)}"})
-
-                uploaded.append({
-                    "filename":         file.filename,
-                    "file_type":        ext,
-                    "size_bytes":       len(content),
-                    "ingestion_status": ingestion_status,
-                })
-
-            except Exception as e:
-                errors.append({"filename": getattr(file, 'filename', 'unknown'),
-                               "error": str(e)})
-
-        ingested_count = sum(1 for f in uploaded if f.get("ingestion_status") == "ingested")
-        response = {
-            "message":        f"Processed {len(uploaded)}/{len(files_list)} files, "
-                              f"ingested {ingested_count} into RAG",
-            "files":          uploaded,
-            "filenames":      [f["filename"] for f in uploaded],
-            "success":        len(uploaded) > 0,
-            "ingested_count": ingested_count,
-            "session_id":     session_id,
-        }
-        if errors:
-            response["errors"] = errors
-        return response
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-# ============================================================================
-# /query/ ENDPOINT  — FIXED ROUTING
-# ============================================================================
+# =============================================================================
+# /query/ ENDPOINT
+# =============================================================================
 
 @app.post("/query/")
 async def query_with_full_autogen(request: Request):
     """
-    Main query endpoint with fixed routing.
+    Main query endpoint.
 
-    ROUTING LOGIC (professor's instruction):
-      "Run traditional scanning by default; escalate to AI-specific tests
-       only upon detection."
-
-      Route A — Web scan request (URL present + scan intent)
-             → ThreatModelingAgent with enable_web_scan=True
-             → Includes AI fingerprint + AVID + AI vuln tests if ML detected
-
-      Route B — General security question (NO URL)
-             → AutoGen RAG from security_knowledge_base only
-             → NO scan, NO report template
-             → FIX: this used to incorrectly trigger the full scan report
-
-      Route C — Security question + uploaded docs
-             → AutoGen RAG (security context + documents)
-
-      Route D — General question
-             → AutoGen RAG
+    Route A — Web scan request (URL present) → ThreatModelingAgent
+    Route B — General / security question → AutoGen assistant
     """
     try:
         logger.info("=" * 80)
         logger.info("QUERY REQUEST")
         logger.info("=" * 80)
 
-        body           = await request.json()
-        question       = body.get("question")
-        filenames      = body.get("filenames", [])
-        session_id     = body.get("session_id", "default")
-        uploaded_files = body.get("uploaded_files", [])
-        use_all_docs   = body.get("use_all_docs", False)
-        auth_cookie    = body.get("auth_cookie", "")
+        body        = await request.json()
+        question    = body.get("question")
+        session_id  = body.get("session_id", "default")
+        auth_cookie = body.get("auth_cookie", "")
 
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
@@ -638,21 +409,14 @@ async def query_with_full_autogen(request: Request):
         logger.info(f"Question: {question}")
         logger.info(f"Session:  {session_id}")
 
-        # ── Classify query ────────────────────────────────────────────
         if threat_modeling_agent:
             is_security_query = threat_modeling_agent.is_security_query(question)
             is_web_scan       = threat_modeling_agent.is_web_scan_request(question)
-            has_doc_context   = (
-                bool(uploaded_files) or bool(filenames) or use_all_docs or
-                bool(session_documents.get(session_id))
-            )
 
             logger.info(
-                f"Classification: security={is_security_query} | "
-                f"web_scan={is_web_scan} | has_docs={has_doc_context}"
+                f"Classification: security={is_security_query} | web_scan={is_web_scan}"
             )
 
-            # ── ROUTE A: Web scan (URL present) ───────────────────────
             if is_web_scan:
                 logger.info("ROUTING → ThreatModelingAgent (web scan + AI detection)")
                 target_url = threat_modeling_agent._extract_url_from_query(question)
@@ -661,7 +425,6 @@ async def query_with_full_autogen(request: Request):
                     user_query=question,
                     verbose=True,
                     use_cache=False,
-                    filenames=filenames or None,
                     enable_web_scan=True,
                     target_url=target_url,
                     auth_cookie=auth_cookie,
@@ -680,7 +443,6 @@ async def query_with_full_autogen(request: Request):
                     "scan_performed":       result.get("web_scan_performed", False),
                     "target_url":           target_url,
                     "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
-                    # AI backdoor fields (populated when ML detected)
                     "is_ai_powered":        scan_data.get("is_ai_powered", False),
                     "ai_vulns_found":       len([
                         f for f in scan_data.get("vulnerabilities", [])
@@ -692,61 +454,16 @@ async def query_with_full_autogen(request: Request):
                     ),
                 })
 
-            # ── ROUTE B: General security question (NO URL) ───────────
-            # FIX: Previously this triggered the full scan report.
-            # Now correctly routes to KB-only AutoGen answer.
-            elif is_security_query and not has_doc_context:
-                logger.info(
-                    "ROUTING → AutoGen RAG (general security question — KB only, no scan)"
-                )
-                # Falls through to standard AutoGen RAG below
-                # The KB (security_knowledge_base) has NIST/ATLAS/OWASP content
-                # that was ingested via ingest_knowledge_base.py
+            if is_security_query:
+                logger.info("ROUTING → AutoGen assistant (security question, no scan)")
 
-            # ── ROUTE C: Security + docs ──────────────────────────────
-            elif is_security_query and has_doc_context:
-                logger.info("ROUTING → AutoGen RAG (security + documents)")
-                # Falls through to standard AutoGen RAG below
-
-        # ── ROUTE B / C / D: AutoGen RAG ─────────────────────────────
-        # Register uploaded files in session
-        processing_results = []
-        if uploaded_files:
-            for filename in uploaded_files:
-                session_documents.setdefault(session_id, [])
-                if filename not in session_documents[session_id]:
-                    session_documents[session_id].append(filename)
-                processing_results.append(f"✓ Using: {filename}")
-            await asyncio.sleep(0.1)
-
-        # Determine search scope
-        search_filenames = []
-        if use_all_docs:
-            logger.info("Search scope: ALL documents")
-        elif filenames:
-            search_filenames = filenames
-        elif session_documents.get(session_id):
-            search_filenames = session_documents[session_id]
-
-        # Retrieve context from KB
         try:
-            db_answer         = await answer_question_from_db(
-                question=question, filenames=search_filenames
-            )
-            retrieved_context = str(db_answer)
-            logger.info(f"Retrieved {len(retrieved_context)} chars from KB")
-        except Exception as e:
-            logger.error(f"Retrieval error: {e}")
-            retrieved_context = f"Error retrieving context: {str(e)}"
-
-        # AutoGen conversation
-        try:
-            team        = await get_or_create_team(session_id)
+            team         = await get_or_create_team(session_id)
             task_message = (
                 f"**User Question:** {question}\n\n"
-                f"**Retrieved Information:**\n{retrieved_context}\n\n"
-                f"**Instructions:** Answer using retrieved information. "
-                f"Cite sources. Be conversational."
+                f"**Instructions:** Answer clearly using your cybersecurity knowledge. "
+                f"Cite well-known standards (OWASP, NIST, CISA, MITRE) when relevant. "
+                f"Be conversational."
             )
             result       = await team.run(task=task_message)
             final_answer = ""
@@ -758,28 +475,20 @@ async def query_with_full_autogen(request: Request):
                             final_answer = content
                             break
             if not final_answer:
-                final_answer = retrieved_context
+                final_answer = "I could not generate a response. Please try again."
         except Exception as e:
             logger.error(f"AutoGen error: {e}")
-            final_answer = retrieved_context
+            final_answer = f"Error generating response: {str(e)}"
 
-        full_response = (
-            "\n".join(processing_results) + "\n\n" + final_answer
-            if processing_results else final_answer
-        )
         history = await get_team_history(session_id)
-
-        logger.info(f"QUERY COMPLETE — {len(full_response)} chars")
+        logger.info(f"QUERY COMPLETE — {len(final_answer)} chars")
 
         return JSONResponse({
-            "answer":                full_response,
+            "answer":                final_answer,
             "session_id":            session_id,
-            "route":                 "autogen_rag",
-            "query_type":            "autogen_rag",
-            "files_searched":        search_filenames or "all",
-            "files_processed":       uploaded_files,
+            "route":                 "autogen",
+            "query_type":            "autogen",
             "conversation_messages": len(history),
-            "processing_summary":    processing_results,
             "team_persistent":       True,
         })
 
@@ -789,17 +498,15 @@ async def query_with_full_autogen(request: Request):
         logger.error(f"QUERY FAILED: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # ============================================================================
 # STREAMING ENDPOINT
 # ============================================================================
 
 class StreamQueryRequest(BaseModel):
-    question:       str
-    session_id:     Optional[str]       = None
-    filenames:      Optional[List[str]] = None
-    uploaded_files: Optional[List[str]] = None
-    use_all_docs:   bool                = False
-    auth_cookie:    Optional[str]       = None
+    question:    str
+    session_id:  Optional[str] = None
+    auth_cookie: Optional[str] = None
 
 
 @app.post("/query/stream")
@@ -809,7 +516,6 @@ async def query_stream(request: StreamQueryRequest):
         try:
             question    = request.question
             session_id  = request.session_id or "default"
-            filenames   = request.filenames or []
             auth_cookie = request.auth_cookie or ""
 
             yield _format_sse("progress", {
@@ -835,36 +541,11 @@ async def query_stream(request: StreamQueryRequest):
             })
             await asyncio.sleep(0)
 
-            # ── Non-security / general question ───────────────────────
+            # ── Non-web-scan question ─────────────────────────────────
             if not is_security or (is_security and not is_web_scan):
                 yield _format_sse("progress", {
-                    "phase": "knowledge_gathering", "step": 2, "total_steps": 4,
-                    "message": "Searching knowledge base...", "percent": 25,
-                })
-                await asyncio.sleep(0)
-
-                search_filenames = filenames
-                if not filenames and session_documents.get(session_id):
-                    search_filenames = session_documents[session_id]
-
-                try:
-                    db_answer = await answer_question_from_db(
-                        question=question, filenames=search_filenames
-                    )
-                    retrieved_context = str(db_answer)
-                except Exception as e:
-                    retrieved_context = f"Error: {str(e)}"
-
-                yield _format_sse("progress", {
-                    "phase": "knowledge_gathering", "step": 2, "total_steps": 4,
-                    "message": f"Retrieved {len(retrieved_context)} chars",
-                    "percent": 50,
-                })
-                await asyncio.sleep(0)
-
-                yield _format_sse("progress", {
-                    "phase": "report_generation", "step": 3, "total_steps": 4,
-                    "message": "Running AutoGen agent...", "percent": 65,
+                    "phase": "report_generation", "step": 2, "total_steps": 3,
+                    "message": "Running AutoGen agent...", "percent": 40,
                 })
                 await asyncio.sleep(0)
 
@@ -872,8 +553,8 @@ async def query_stream(request: StreamQueryRequest):
                     team = await get_or_create_team(session_id)
                     task = (
                         f"**Question:** {question}\n\n"
-                        f"**Retrieved Info:**\n{retrieved_context}\n\n"
-                        f"Answer using retrieved info. Cite sources."
+                        f"**Instructions:** Answer clearly using your cybersecurity knowledge. "
+                        f"Cite well-known standards when relevant."
                     )
                     result       = await team.run(task=task)
                     final_answer = ""
@@ -883,22 +564,22 @@ async def query_stream(request: StreamQueryRequest):
                             if c and len(c) > 20:
                                 final_answer = c
                                 break
-                    final_answer = final_answer or retrieved_context
+                    final_answer = final_answer or "I could not generate a response. Please try again."
                 except Exception as e:
-                    final_answer = retrieved_context
+                    final_answer = f"Error generating response: {str(e)}"
 
                 yield _format_sse("progress", {
-                    "phase": "report_generation", "step": 4, "total_steps": 4,
+                    "phase": "report_generation", "step": 3, "total_steps": 3,
                     "message": "Response ready!", "percent": 100,
                 })
                 await asyncio.sleep(0)
 
                 yield _format_sse("result", {
-                    "answer":    final_answer,
-                    "query":     question,
-                    "cached":    False,
+                    "answer":     final_answer,
+                    "query":      question,
+                    "cached":     False,
                     "session_id": session_id,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp":  datetime.now().isoformat(),
                 })
                 return
 
@@ -928,7 +609,7 @@ async def query_stream(request: StreamQueryRequest):
             await asyncio.sleep(0)
 
             research = await threat_modeling_agent.research_sub_questions_hybrid(
-                decomposition, filenames=filenames, verbose=True
+                decomposition, verbose=True
             )
 
             yield _format_sse("progress", {
@@ -1171,39 +852,11 @@ async def list_active_sessions():
             "session_id":     sid,
             "total_messages": len(history),
             "total_turns":    len(history) // 2,
-            "has_documents":  sid in session_documents,
-            "documents":      session_documents.get(sid, []),
         })
     return {"total_sessions": len(sessions), "sessions": sessions}
 
 
-@app.delete("/cleanup/{filename}")
-async def cleanup_file(filename: str):
-    file_path = safe_file_path(filename)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"Not found: {filename}")
-    file_path.unlink()
-    return {"message": f"Deleted {filename}"}
 
-# ============================================================================
-# CLEANUP + STARTUP
-# ============================================================================
-
-@atexit.register
-def cleanup_uploads():
-    upload_dir = Path("uploads")
-    if not upload_dir.exists():
-        return
-    count = 0
-    for f in upload_dir.glob("*"):
-        try:
-            if f.is_file():
-                f.unlink()
-                count += 1
-        except Exception:
-            pass
-    if count:
-        logger.info(f"Cleaned up {count} uploaded files")
 
 # ============================================================================
 # MODEL SETTINGS ENDPOINT

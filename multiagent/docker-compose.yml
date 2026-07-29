@@ -1,5 +1,5 @@
 # ============================================================================
-# docker-compose.yml - Multi-Agent RAG System
+# docker-compose.yml - Multi-Agent Threat Modeling System
 # ============================================================================
 
 services:
@@ -20,9 +20,6 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-    volumes:
-      - ./knowledge_base:/app/knowledge_base
-      - ./uploads:/app/uploads
     depends_on:
       redis:
         condition: service_healthy

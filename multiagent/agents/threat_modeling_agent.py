@@ -2,7 +2,6 @@ import os
 import re
 import json
 import openai
-import pymongo
 import hashlib
 import logging
 import traceback
@@ -11,11 +10,7 @@ from datetime import datetime
 
 from .webappscanner.action_agent import ActionAgent
 from .redis_manager import cache_result, get_cached_result
-from .vector_search import VectorSearch
 from .webappscanner.web_scanner_agent import WebScannerAgent
-from langchain_community.vectorstores import MongoDBAtlasVectorSearch
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.docstore.document import Document
 
 from utils.threat_prompts import (
     QUESTION_DECOMPOSITION_PROMPT,
@@ -702,13 +697,7 @@ def _build_section_9_ai_infra(ai_infra_data: dict) -> str:
 
 class ThreatModelingAgent:
 
-    def __init__(self, mongodb_client=None, openai_client=None,
-                 vectorstore=None, web_search_function=None):
-        self.mongo_client = mongodb_client or pymongo.MongoClient(
-            os.getenv("MONGODB_URI"),
-            tls=True,
-            tlsAllowInvalidCertificates=True
-        )
+    def __init__(self, openai_client=None, web_search_function=None, **_kwargs):
         if openai_client:
             self.openai_client = openai_client
             self.llm_model     = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
@@ -719,20 +708,13 @@ class ThreatModelingAgent:
             )
             self.llm_model = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
 
-        self.web_search       = web_search_function
-        self.kb_vector_search = VectorSearch(
-            mongodb_client=self.mongo_client,
-            collection_name="security_knowledge_base",
-        )
-        self.user_vectorstore = vectorstore
-        self.db               = self.mongo_client["multiagentllm"]
-        self.rag_collection   = self.db["RAG"]
-        self.web_scanner      = WebScannerAgent(
+        self.web_search  = web_search_function
+        self.web_scanner = WebScannerAgent(
             openai_client=self.openai_client,
             llm_model=self.llm_model,
         )
 
-        print("✓ ThreatModelingAgent initialized")
+        print("ThreatModelingAgent initialized")
 
     def _generate_cache_key(self, query: str, include_scan: bool = False) -> str:
         base = query.lower().strip()
@@ -904,7 +886,7 @@ Answer:"""
                                                verbose: bool = False) -> List[Dict]:
         known_vulns = []
         if not self.web_search:
-            return await self.search_known_vulnerabilities_kb(query, target_url, verbose)
+            return []
 
         search_queries = []
         if target_url:
@@ -948,36 +930,14 @@ Answer:"""
                 if verbose:
                     print(f"    Search failed: {e}")
 
-        kb_results = await self.search_known_vulnerabilities_kb(query, target_url, verbose=False)
-        known_vulns.extend(kb_results)
         return known_vulns
 
     async def search_known_vulnerabilities_kb(self, query: str,
                                               target_url: Optional[str] = None,
                                               verbose: bool = False) -> List[Dict]:
-        known_vulns    = []
-        search_queries = []
-        if target_url:
-            from urllib.parse import urlparse
-            domain = urlparse(target_url).netloc or target_url
-            search_queries.append(f"{domain} vulnerabilities")
-        search_queries.append(f"{query} security")
+        """Knowledge-base vector search removed — use web search instead."""
+        return []
 
-        for sq in search_queries[:2]:
-            results = await self.kb_vector_search.search(
-                query=sq,
-                filters={"source": {"$in": ["CISA", "OWASP", "NIST", "MITRE_ATLAS"]}},
-                top_k=3,
-            )
-            for r in results:
-                known_vulns.append({
-                    "source":  r.get("source", "Unknown"),
-                    "title":   r.get("title", ""),
-                    "snippet": r.get("content", "")[:500],
-                    "is_cve":  False,
-                    "is_kb":   True,
-                })
-        return known_vulns
 
     async def decompose_query(self, user_query: str) -> Dict:
         prompt = QUESTION_DECOMPOSITION_PROMPT.format(query=user_query)
@@ -1020,6 +980,7 @@ Answer:"""
     async def research_sub_questions_hybrid(self, decomposition: Dict,
                                             filenames: List[str] = None,
                                             verbose: bool = False) -> Dict:
+        """Research sub-questions via web search."""
         research_results = {"task_1": [], "task_2": []}
 
         def normalize_sq(sq):
@@ -1038,64 +999,31 @@ Answer:"""
                 if verbose:
                     print(f"  {task_label}.{idx}: {question_text[:60]}...")
 
-                kb_results, user_results = [], []
-                try:
-                    sources    = [sq["preferred_source"]] if sq.get("preferred_source") else None
-                    kb_results = await self.kb_vector_search.search(
-                        query=question_text,
-                        filters={"source": {"$in": sources}} if sources else None,
-                        top_k=3,
-                    )
-                except Exception as e:
-                    logger.warning(f"KB search failed: {e}")
-
-                try:
-                    user_results = await self._search_user_docs(question_text, filenames)
-                except Exception as e:
-                    logger.warning(f"User doc search failed: {e}")
+                web_findings = []
+                if self.web_search and question_text:
+                    try:
+                        results = await self.web_search(question_text)
+                        for r in (results or [])[:3]:
+                            web_findings.append({
+                                "content": r.get("snippet", r.get("content", "")),
+                                "title":   r.get("title", ""),
+                                "source":  "Web Search",
+                                "url":     r.get("url", ""),
+                            })
+                    except Exception as e:
+                        logger.warning(f"Web research failed: {e}")
 
                 if verbose:
-                    print(f"    KB: {len(kb_results)} | User: {len(user_results)}")
+                    print(f"    Web: {len(web_findings)}")
 
                 research_results[task_label].append({
                     "question":         question_text,
                     "preferred_source": sq.get("preferred_source"),
-                    "kb_findings":      kb_results,
-                    "user_findings":    user_results,
+                    "kb_findings":      web_findings,
+                    "user_findings":    [],
                 })
 
         return research_results
-
-    async def _search_user_docs(self, query: str, filenames: List[str] = None,
-                                top_k: int = 2) -> List[Dict]:
-        if not self.user_vectorstore:
-            return []
-        try:
-            mongo_filter = {"filename": {"$in": filenames}} if filenames else {}
-            user_docs    = list(self.rag_collection.find(mongo_filter).limit(50))
-            if not user_docs:
-                return []
-            langchain_docs = [
-                Document(
-                    page_content=doc.get("text", ""),
-                    metadata={"filename": doc.get("filename", "Unknown"), "page": doc.get("page", "Unknown")},
-                )
-                for doc in user_docs
-            ]
-            results = self.user_vectorstore.similarity_search(query, k=min(top_k, len(langchain_docs)))
-            return [
-                {
-                    "content":     r.page_content,
-                    "filename":    r.metadata.get("filename", "Unknown"),
-                    "source":      "User Document",
-                    "page":        r.metadata.get("page", "Unknown"),
-                    "source_type": "user_doc",
-                }
-                for r in results
-            ]
-        except Exception as e:
-            logger.warning(f"User doc search error: {e}")
-            return []
 
     def format_research_hybrid(self, research: Dict) -> str:
         formatted = " TASK 1 - System Understanding\n\n"

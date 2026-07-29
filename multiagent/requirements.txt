@@ -22,17 +22,13 @@ langchain==0.3.27
 langchain-community==0.3.27
 langchain-core==0.3.83
 langchain-text-splitters==0.3.11
-langchain-mongodb==0.7.2
 
 
 playwright==1.40.0
 playwright-stealth==1.0.6
 
 redis==7.2.1
-sentence-transformers==5.2.3
 beautifulsoup4==4.14.3
 
-certifi
-pymongo[srv]
 requests
 ddgs
