@@ -65,7 +65,7 @@ RUN playwright install chromium && \
 COPY . .
 
 # ---- Create required directories ----
-RUN mkdir -p uploads knowledge_base /tmp/hf_cache
+RUN mkdir -p /tmp/hf_cache
 
 # ---- Health check ----
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
