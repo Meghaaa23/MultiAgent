@@ -109,34 +109,8 @@ def _build_evidence_gated_stride(target_url, response_headers,
     def _inputs(form):
         return form.get("inputs") or form.get("fields") or []
 
-    if any(
-        any(i.get("type", "").lower() == "password" for i in _inputs(f) if isinstance(i, dict))
-        for f in discovered_forms
-    ):
-        threats.append({
-            "category":   "Elevation of Privilege",
-            "threat":     "SQL Injection via Login Form",
-            "evidence":   "Login form with password field discovered — not actively tested (black-box)",
-            "likelihood": "Low",
-            "impact":     "Critical",
-            "mitigation": "Use parameterised queries; never interpolate user input into SQL statements",
-            "confirmed":  False,
-        })
-
-    if any(
-        any(i.get("type", "text").lower() in ("text", "search", "textarea", "url")
-            for i in _inputs(f) if isinstance(i, dict))
-        for f in discovered_forms
-    ):
-        threats.append({
-            "category":   "Tampering",
-            "threat":     "Cross-Site Scripting (XSS)",
-            "evidence":   "Text/textarea input field(s) discovered in crawl",
-            "likelihood": "Medium",
-            "impact":     "High",
-            "mitigation": "Apply output encoding; implement strict CSP",
-            "confirmed":  False,
-        })
+    # Speculative SQLi/XSS from field existence alone is excluded from
+    # publisher-facing STRIDE (not evidence of a vulnerability).
 
     return threats
 

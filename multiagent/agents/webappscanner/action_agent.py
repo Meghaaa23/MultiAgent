@@ -11,7 +11,6 @@ _HEADER_FIXES = {
     "nginx": {
         "X-Frame-Options":           'add_header X-Frame-Options "DENY" always;',
         "X-Content-Type-Options":    'add_header X-Content-Type-Options "nosniff" always;',
-        "X-XSS-Protection":          'add_header X-XSS-Protection "1; mode=block" always;',
         "Content-Security-Policy":   "add_header Content-Security-Policy \"default-src 'self'; script-src 'self';\" always;",
         "Strict-Transport-Security": 'add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;',
         "Referrer-Policy":           'add_header Referrer-Policy "strict-origin-when-cross-origin" always;',
@@ -20,7 +19,6 @@ _HEADER_FIXES = {
     "apache": {
         "X-Frame-Options":           'Header always set X-Frame-Options "DENY"',
         "X-Content-Type-Options":    'Header always set X-Content-Type-Options "nosniff"',
-        "X-XSS-Protection":          'Header always set X-XSS-Protection "1; mode=block"',
         "Content-Security-Policy":   "Header always set Content-Security-Policy \"default-src 'self';\"",
         "Strict-Transport-Security": 'Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"',
         "Referrer-Policy":           'Header always set Referrer-Policy "strict-origin-when-cross-origin"',
@@ -144,7 +142,6 @@ app.add_middleware(SecurityHeadersMiddleware)""",
     "generic": {
         "X-Frame-Options":           "X-Frame-Options: DENY",
         "X-Content-Type-Options":    "X-Content-Type-Options: nosniff",
-        "X-XSS-Protection":          "X-XSS-Protection: 1; mode=block",
         "Content-Security-Policy":   "Content-Security-Policy: default-src 'self';",
         "Strict-Transport-Security": "Strict-Transport-Security: max-age=31536000; includeSubDomains",
         "Referrer-Policy":           "Referrer-Policy: strict-origin-when-cross-origin",

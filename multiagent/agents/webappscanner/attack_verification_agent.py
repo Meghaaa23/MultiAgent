@@ -265,7 +265,23 @@ class AttackVerificationAgent:
             if not headers:
                 return findings
 
-            for h in [hdr for hdr in SECURITY_HEADERS if hdr not in headers]:
+            headers_lower = {k.lower(): v for k, v in headers.items()}
+            csp_value = headers_lower.get("content-security-policy", "")
+            is_https = str(url).lower().startswith("https://")
+            # Align with vulnerability_tester publisher header set
+            publishable = [
+                "X-Frame-Options",
+                "X-Content-Type-Options",
+                "Content-Security-Policy",
+                "Strict-Transport-Security",
+            ]
+            for h in publishable:
+                if h.lower() in headers_lower:
+                    continue
+                if h == "X-Frame-Options" and "frame-ancestors" in csp_value.lower():
+                    continue
+                if h == "Strict-Transport-Security" and not is_https:
+                    continue
                 findings.append(Finding(
                     vuln_type   = f"Missing Security Header: {h}",
                     severity    = "Medium" if h in (
@@ -549,45 +565,20 @@ class AttackVerificationAgent:
                     description = "POST form does not appear to include a CSRF token.",
                     impact      = "Attacker can forge requests on behalf of authenticated users.",
                     remediation = "Implement synchronizer token pattern or SameSite cookie attribute.",
-                    confidence  = Confidence.MEDIUM,
+                    confidence  = Confidence.LOW,
                     evidence    = Evidence(
                         request             = f"Analyzed form at {action}",
                         response_status     = 0,
                         verified            = False,
-                        confidence          = Confidence.MEDIUM,
+                        confidence          = Confidence.LOW,
                         confirmation_method = "code analysis"
                     ),
                     cwe   = "CWE-352",
                     owasp = "A01:2021"
                 ))
 
-            for inp in inputs:
-                inp_type = str(inp.get("type", "text")).lower() if isinstance(inp, dict) else "text"
-                inp_name = str(inp.get("name", "")) if isinstance(inp, dict) else str(inp)
-
-                if inp_type in _NON_XSS_INPUT_TYPES:
-                    continue
-
-                if inp_type in ("text", "search", "url", "textarea"):
-                    findings.append(Finding(
-                        vuln_type   = "Potential Stored/Reflected XSS (Form Input)",
-                        severity    = "High",
-                        status      = VulnStatus.POTENTIAL,
-                        location    = action,
-                        parameter   = inp_name,
-                        description = f"Unvalidated text input '{inp_name}' may be vulnerable to XSS. Manual verification required.",
-                        impact      = "XSS if input not properly sanitized server-side.",
-                        remediation = "Apply strict input validation and output encoding.",
-                        confidence  = Confidence.LOW,
-                        evidence    = Evidence(
-                            request             = f"Form field '{inp_name}' at {action}",
-                            verified            = False,
-                            confidence          = Confidence.LOW,
-                            confirmation_method = "code analysis"
-                        ),
-                        cwe   = "CWE-79",
-                        owasp = "A03:2021"
-                    ))
+            # Do not emit speculative XSS from field existence alone.
+            # Confirmed XSS must come from reflection / execution tests.
 
         return findings
 

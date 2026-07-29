@@ -102,6 +102,44 @@ def _format_confirmed_stack(stack: Dict) -> str:
     return result
 
 
+
+def _is_publishable_confirmed(v: Dict) -> bool:
+    """
+    Publisher gate: only report Confirmed findings with High confidence
+    and verified evidence. No site/app hardcoding — evidence-driven only.
+    """
+    if not isinstance(v, dict):
+        return False
+    if v.get("status") != "Confirmed":
+        return False
+    conf = str(v.get("confidence") or "").strip().lower()
+    ev = v.get("evidence") or {}
+    ev_conf = str(ev.get("confidence") or "").strip().lower()
+    if conf not in ("high",) and ev_conf not in ("high",):
+        return False
+    if ev.get("verified") is False:
+        return False
+    loc = str(v.get("location") or "")
+    details = str(v.get("details") or v.get("description") or "")
+    if "<node>" in loc.lower() or "<node>" in details.lower():
+        return False
+    if loc.strip().lower() in ("", "unknown"):
+        return False
+    return True
+
+
+def _is_manual_queue_finding(v: Dict) -> bool:
+    """Medium+ Potential findings only — Low speculation is dropped."""
+    if not isinstance(v, dict):
+        return False
+    if v.get("status") != "Potential":
+        return False
+    conf = str(
+        v.get("confidence") or (v.get("evidence") or {}).get("confidence") or ""
+    ).lower()
+    return conf in ("medium", "high")
+
+
 def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results):
     n_confirmed = len(confirmed_vulns)
     n_potential = len(set(v.get("type", "") for v in potential_vulns))
@@ -122,9 +160,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
         base   = _sev_base.get(v.get("severity", "Low"), 5)
         mult   = _method_mult.get(method, 1.0)
         exploit_score += base * mult
-    for v in potential_vulns:
-        base = _sev_base.get(v.get("severity", "Low"), 5)
-        exploit_score += base * 0.3
+    # Potential findings do not contribute to publisher risk score.
 
     risk = (
         "Critical"   if exploit_score >= 40 else
@@ -136,7 +172,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     authenticated = (scan_results or {}).get("authenticated_scan", False)
     actions = [
         v.get("remediation", "")[:200]
-        for v in (confirmed_vulns + potential_vulns)[:3]
+        for v in confirmed_vulns[:3]
         if v.get("remediation")
     ] or ["No immediate action required — continue monitoring."]
 
@@ -285,13 +321,23 @@ def _build_section_2(stack, endpoints, cves):
 
     lines.append("\n Attack Surface")
     interesting = [e for e in (endpoints or []) if e.get("interesting")]
-    if interesting:
+    verified_eps = [
+        e for e in interesting
+        if e.get("status") not in (None, "", "?")
+    ]
+    if verified_eps:
         functional, admin, discovery = [], [], []
-        for ep in interesting:
+        for ep in verified_eps:
             url_lower = ep.get("url", "").lower()
+            status = ep.get("status")
             if any(x in url_lower for x in ["sitemap", "robots.txt"]):
                 discovery.append(ep)
-            elif any(x in url_lower for x in ["admin", "dashboard", "manage", "wp-admin"]):
+            elif ep.get("admin_panel") or (
+                status in (401, 403)
+                and any(x in url_lower for x in [
+                    "admin", "dashboard", "manage", "wp-admin", "console"
+                ])
+            ):
                 admin.append(ep)
             else:
                 functional.append(ep)
@@ -310,7 +356,8 @@ def _build_section_2(stack, endpoints, cves):
                         f"{ep.get('url','')} [{ep.get('source','')}]{auth}"
                     )
     else:
-        lines.append("None discovered.")
+        lines.append("None discovered with verified HTTP responses.")
+
 
 
 
@@ -415,31 +462,32 @@ def _build_section_4(potential_vulns):
 
 
 def _build_section_5(stride_threats):
+    # Publisher STRIDE: evidence-confirmed architectural risks only.
+    threats = [
+        t for t in (stride_threats or [])
+        if isinstance(t, dict) and t.get("confirmed") is True
+    ]
     lines = [
         " 5. ARCHITECTURAL THREAT MODEL (STRIDE)",
-        " Architectural Risk — not a confirmed finding",
-        "",
+        " Evidence-confirmed architectural risks only",
     ]
-    if not stride_threats:
-        lines += [
-            "No architectural threats identified from scanner evidence.",
-            "",
-            "Note: STRIDE threats are only reported when supporting evidence",
-            "was found during active scanning.",
-        ]
+    if not threats:
+        lines.append("No evidence-confirmed STRIDE risks from active scanning.")
         return "\n".join(lines)
-    for t in stride_threats:
-        status = "Evidence-confirmed" if t.get("confirmed") else "Evidence-based (potential)"
+
+    for t in threats:
         lines += [
+            "",
             f" {t.get('category','?')}: {t.get('threat','?')}",
-            f"- Status: {status}",
-            f"- Evidence: {t.get('evidence','?')}",
+            f"- Status: Evidence-confirmed",
+            f"- Evidence: {t.get('evidence','')}",
             f"- Likelihood: {t.get('likelihood','?')}",
             f"- Impact: {t.get('impact','?')}",
-            f"- Mitigation: {t.get('mitigation','?')}",
-            "",
+            f"- Mitigation: {t.get('mitigation','')}",
         ]
     return "\n".join(lines)
+
+
 
 
 def _build_section_6(confirmed_vulns, potential_vulns):
@@ -459,17 +507,7 @@ def _build_section_6(confirmed_vulns, potential_vulns):
             f"  Fix: {v.get('remediation','')[:120]}"
         )
 
-    for v in potential_vulns:
-        key = (v.get("type", ""), v.get("location", ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        sev = v.get("severity", "Low")
-        groups.get(sev, groups["Low"]).append(
-            f"- {v.get('type','?')} (Potential — manual verification needed)\n"
-            f"  Location: {v.get('location','?')}\n"
-            f"  Note: {v.get('details','')[:120]}"
-        )
+    # Potential findings excluded from publisher remediation roadmap.
 
     lines       = [" 6. PRIORITISED REMEDIATION ROADMAP", " Grouped by Severity"]
     any_finding = False
@@ -848,14 +886,15 @@ Answer:"""
 
         scan_results = None
         if enable_web_scan and target_url:
-            if not self.web_scanner:
+            scanner = self.ensure_web_scanner()
+            if not scanner:
                 raise RuntimeError(
                     "Web scanner is not initialized. Check backend startup logs "
                     "for WebScannerAgent errors (often missing Playwright browsers)."
                 )
             if verbose:
                 print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
-            scan_results = await self.web_scanner.scan_application(
+            scan_results = await scanner.scan_application(
                 target_url=target_url, max_time_minutes=3, verbose=verbose,
                 auth_cookie=auth_cookie,
             )
@@ -1216,9 +1255,9 @@ Answer:"""
                 if key in seen:
                     continue
                 seen.add(key)
-                if v.get("status") == "Confirmed":
+                if _is_publishable_confirmed(v):
                     confirmed_vulns.append(v)
-                elif v.get("status") == "Potential":
+                elif _is_manual_queue_finding(v):
                     potential_vulns.append(v)
 
             seen_types: set = set()
