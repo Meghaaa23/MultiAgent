@@ -574,8 +574,11 @@ export class AppComponent {
         fallbackErr?.error?.detail ||
         fallbackErr?.message ||
         'Backend unreachable. Ensure FastAPI is running on port 8000.';
-      this.uploadError.set(errorMessage);
-      this.appendMessage({ sender: 'agent', text: `Error: ${errorMessage}` });
+      const detail = typeof errorMessage === 'string'
+        ? errorMessage
+        : JSON.stringify(errorMessage);
+      this.uploadError.set(detail);
+      this.appendMessage({ sender: 'agent', text: `Error: ${detail}` });
       this.scrollToBottom();
     }
   }

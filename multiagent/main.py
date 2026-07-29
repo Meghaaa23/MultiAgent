@@ -289,6 +289,45 @@ model_client = LocalLlamaChatCompletionClient(_init_client, _init_model)
 # ============================================================================
 
 session_teams: Dict[str, RoundRobinGroupChat] = {}
+session_histories: Dict[str, List[Dict[str, str]]] = {}
+
+SYSTEM_PROMPT = (
+    "You are an intelligent cybersecurity assistant. "
+    "Answer clearly using cybersecurity knowledge. "
+    "Cite well-known standards (OWASP, NIST, CISA, MITRE) when relevant. "
+    "Be conversational and practical."
+)
+
+
+async def answer_with_llm(question: str, session_id: str) -> str:
+    """Direct LLM answer with simple session memory (no AutoGen dependency)."""
+    client, model_name = get_active_client()
+    history = session_histories.setdefault(session_id, [])
+
+    messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history[-12:])  # keep recent turns
+    messages.append({"role": "user", "content": question})
+
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        None,
+        lambda: client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_tokens=2048,
+            temperature=0.3,
+        ),
+    )
+    answer = ""
+    if response and response.choices:
+        answer = (response.choices[0].message.content or "").strip()
+    if not answer:
+        answer = "I could not generate a response. Please try again."
+
+    history.append({"role": "user", "content": question})
+    history.append({"role": "assistant", "content": answer})
+    session_histories[session_id] = history[-20:]
+    return answer
 
 
 async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
@@ -297,11 +336,7 @@ async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
     rag_assistant = AssistantAgent(
         name="security_assistant",
         model_client=model_client,
-        system_message=(
-            "You are an intelligent cybersecurity assistant with conversation memory. "
-            "Answer questions using your knowledge and any provided context. "
-            "Cite sources when available and maintain natural conversation flow."
-        ),
+        system_message=SYSTEM_PROMPT,
     )
     team = RoundRobinGroupChat(
         participants=[rag_assistant],
@@ -313,9 +348,12 @@ async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
 
 def clear_session_team(session_id: str):
     session_teams.pop(session_id, None)
+    session_histories.pop(session_id, None)
 
 
 async def get_team_history(session_id: str) -> List[Dict]:
+    if session_id in session_histories:
+        return list(session_histories[session_id])
     if session_id not in session_teams:
         return []
     team    = session_teams[session_id]
@@ -391,7 +429,7 @@ async def query_with_full_autogen(request: Request):
     Main query endpoint.
 
     Route A — Web scan request (URL present) → ThreatModelingAgent
-    Route B — General / security question → AutoGen assistant
+    Route B — General / security question → direct LLM answer
     """
     try:
         logger.info("=" * 80)
@@ -409,9 +447,17 @@ async def query_with_full_autogen(request: Request):
         logger.info(f"Question: {question}")
         logger.info(f"Session:  {session_id}")
 
+        is_security_query = False
+        is_web_scan = False
+
         if threat_modeling_agent:
-            is_security_query = threat_modeling_agent.is_security_query(question)
-            is_web_scan       = threat_modeling_agent.is_web_scan_request(question)
+            try:
+                is_security_query = threat_modeling_agent.is_security_query(question)
+                is_web_scan = threat_modeling_agent.is_web_scan_request(question)
+            except Exception as e:
+                logger.warning(f"Classification failed, using keyword fallback: {e}")
+                is_security_query = threat_modeling_agent._keyword_fallback(question)
+                is_web_scan = threat_modeling_agent.is_web_scan_request(question)
 
             logger.info(
                 f"Classification: security={is_security_query} | web_scan={is_web_scan}"
@@ -419,66 +465,85 @@ async def query_with_full_autogen(request: Request):
 
             if is_web_scan:
                 logger.info("ROUTING → ThreatModelingAgent (web scan + AI detection)")
-                target_url = threat_modeling_agent._extract_url_from_query(question)
+                try:
+                    target_url = threat_modeling_agent._extract_url_from_query(question)
+                    result = await threat_modeling_agent.analyze(
+                        user_query=question,
+                        verbose=True,
+                        use_cache=False,
+                        enable_web_scan=True,
+                        target_url=target_url,
+                        auth_cookie=auth_cookie,
+                    )
+                    scan_data = (
+                        result.get("reasoning_chain", {}).get("scan_results") or {}
+                    )
+                    return JSONResponse({
+                        "answer":               result.get("report", "Scan completed."),
+                        "report_sections":      result.get("report_sections", []),
+                        "route":                "threat_modeling_with_scan",
+                        "session_id":           session_id,
+                        "cached":               False,
+                        "reasoning_chain":      result.get("reasoning_chain"),
+                        "scan_performed":       result.get("web_scan_performed", False),
+                        "target_url":           target_url,
+                        "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
+                        "is_ai_powered":        scan_data.get("is_ai_powered", False),
+                        "ai_vulns_found":       len([
+                            f for f in scan_data.get("vulnerabilities", [])
+                            if f.get("category") == "ai_vulnerability"
+                        ]),
+                        "avid_findings":        len(scan_data.get("avid_findings", [])),
+                        "strategic_recommendations": len(
+                            scan_data.get("strategic_recommendations", [])
+                        ),
+                    })
+                except Exception as e:
+                    logger.error(f"Web scan failed: {e}\n{traceback.format_exc()}")
+                    return JSONResponse({
+                        "answer": (
+                            f"Web scan failed: {e}\n\n"
+                            "Falling back to a general security answer.\n\n"
+                            + await answer_with_llm(question, session_id)
+                        ),
+                        "session_id": session_id,
+                        "route": "scan_error_fallback",
+                        "error": str(e),
+                    }, status_code=200)
 
-                result = await threat_modeling_agent.analyze(
-                    user_query=question,
-                    verbose=True,
-                    use_cache=False,
-                    enable_web_scan=True,
-                    target_url=target_url,
-                    auth_cookie=auth_cookie,
-                )
-
-                scan_data = (
-                    result.get("reasoning_chain", {}).get("scan_results") or {}
-                )
-                return JSONResponse({
-                    "answer":               result["report"],
-                    "report_sections":      result.get("report_sections", []),
-                    "route":                "threat_modeling_with_scan",
-                    "session_id":           session_id,
-                    "cached":               False,
-                    "reasoning_chain":      result.get("reasoning_chain"),
-                    "scan_performed":       result.get("web_scan_performed", False),
-                    "target_url":           target_url,
-                    "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
-                    "is_ai_powered":        scan_data.get("is_ai_powered", False),
-                    "ai_vulns_found":       len([
-                        f for f in scan_data.get("vulnerabilities", [])
-                        if f.get("category") == "ai_vulnerability"
-                    ]),
-                    "avid_findings":        len(scan_data.get("avid_findings", [])),
-                    "strategic_recommendations": len(
-                        scan_data.get("strategic_recommendations", [])
-                    ),
-                })
-
-            if is_security_query:
-                logger.info("ROUTING → AutoGen assistant (security question, no scan)")
-
+        # General / security Q&A via direct LLM (more reliable than AutoGen alone)
         try:
-            team         = await get_or_create_team(session_id)
-            task_message = (
-                f"**User Question:** {question}\n\n"
-                f"**Instructions:** Answer clearly using your cybersecurity knowledge. "
-                f"Cite well-known standards (OWASP, NIST, CISA, MITRE) when relevant. "
-                f"Be conversational."
-            )
-            result       = await team.run(task=task_message)
-            final_answer = ""
-            if result.messages:
-                for msg in reversed(result.messages):
-                    if hasattr(msg, 'content') and msg.content:
-                        content = str(msg.content).strip()
-                        if content and len(content) > 20:
-                            final_answer = content
-                            break
-            if not final_answer:
-                final_answer = "I could not generate a response. Please try again."
+            final_answer = await answer_with_llm(question, session_id)
         except Exception as e:
-            logger.error(f"AutoGen error: {e}")
-            final_answer = f"Error generating response: {str(e)}"
+            logger.error(f"LLM answer failed: {e}\n{traceback.format_exc()}")
+            # Last resort: try AutoGen team
+            try:
+                team = await get_or_create_team(session_id)
+                result = await team.run(
+                    task=(
+                        f"**User Question:** {question}\n\n"
+                        f"**Instructions:** Answer clearly using cybersecurity knowledge."
+                    )
+                )
+                final_answer = ""
+                if result and result.messages:
+                    for msg in reversed(result.messages):
+                        if hasattr(msg, 'content') and msg.content:
+                            content = str(msg.content).strip()
+                            if content and len(content) > 20:
+                                final_answer = content
+                                break
+                if not final_answer:
+                    final_answer = f"Error generating response: {e}"
+            except Exception as e2:
+                logger.error(f"AutoGen fallback failed: {e2}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"LLM call failed: {e}. AutoGen fallback failed: {e2}. "
+                        "Check AZURE_OPENAI_* or local llama.cpp settings."
+                    ),
+                )
 
         history = await get_team_history(session_id)
         logger.info(f"QUERY COMPLETE — {len(final_answer)} chars")
@@ -486,8 +551,8 @@ async def query_with_full_autogen(request: Request):
         return JSONResponse({
             "answer":                final_answer,
             "session_id":            session_id,
-            "route":                 "autogen",
-            "query_type":            "autogen",
+            "route":                 "llm",
+            "query_type":            "llm",
             "conversation_messages": len(history),
             "team_persistent":       True,
         })
@@ -545,27 +610,14 @@ async def query_stream(request: StreamQueryRequest):
             if not is_security or (is_security and not is_web_scan):
                 yield _format_sse("progress", {
                     "phase": "report_generation", "step": 2, "total_steps": 3,
-                    "message": "Running AutoGen agent...", "percent": 40,
+                    "message": "Generating answer...", "percent": 40,
                 })
                 await asyncio.sleep(0)
 
                 try:
-                    team = await get_or_create_team(session_id)
-                    task = (
-                        f"**Question:** {question}\n\n"
-                        f"**Instructions:** Answer clearly using your cybersecurity knowledge. "
-                        f"Cite well-known standards when relevant."
-                    )
-                    result       = await team.run(task=task)
-                    final_answer = ""
-                    for msg in reversed(result.messages):
-                        if hasattr(msg, 'content') and msg.content:
-                            c = str(msg.content).strip()
-                            if c and len(c) > 20:
-                                final_answer = c
-                                break
-                    final_answer = final_answer or "I could not generate a response. Please try again."
+                    final_answer = await answer_with_llm(question, session_id)
                 except Exception as e:
+                    logger.error(f"Stream LLM error: {e}")
                     final_answer = f"Error generating response: {str(e)}"
 
                 yield _format_sse("progress", {
