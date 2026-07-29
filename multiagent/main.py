@@ -409,12 +409,16 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    scanner_ok = bool(
+        threat_modeling_agent and getattr(threat_modeling_agent, "web_scanner", None)
+    )
     return {
         "status":          "healthy",
         "agents":          "ready",
         "autogen":         "enabled",
         "threat_modeling": "available" if threat_modeling_agent else "not initialized",
-        "web_scanning":    "enabled",
+        "web_scanner":     "available" if scanner_ok else "not initialized",
+        "web_scanning":    "enabled" if scanner_ok else "unavailable",
         "ai_backdoor":     "enabled",
         "avid_lookup":     "enabled",
         "active_sessions": len(session_teams),
@@ -674,55 +678,66 @@ async def query_stream(request: StreamQueryRequest):
             # Active scanning
             scan_results = None
             if is_web_scan and target_url:
-                yield _format_sse("progress", {
-                    "phase": "active_scanning", "step": 4, "total_steps": 6,
-                    "message": f"Scanning {target_url} · detecting AI components...",
-                    "percent": 48,
-                })
-                await asyncio.sleep(0)
-
-                scan_task = asyncio.create_task(
-                    threat_modeling_agent.web_scanner.scan_application(
-                        target_url=target_url, max_time_minutes=3, verbose=True,
-                        auth_cookie=auth_cookie,
-                    )
-                )
-
-                heartbeats = [
-                    "Fingerprinting tech stack...",
-                    "Detecting AI/ML components...",        
-                    "Querying AVID database...",            
-                    "Testing ML endpoints...",              
-                    "Testing XSS / SQLi...",
-                    "Verifying findings...",
-                ]
-                hb_idx, base_pct = 0, 50
-                while not scan_task.done():
-                    await asyncio.sleep(5)
-                    if scan_task.done():
-                        break
+                if not threat_modeling_agent.web_scanner:
                     yield _format_sse("progress", {
                         "phase": "active_scanning", "step": 4, "total_steps": 6,
-                        "message": heartbeats[hb_idx % len(heartbeats)],
-                        "percent": min(63, base_pct + 2),
+                        "message": (
+                            "Active scanner unavailable — generating report from "
+                            "web research only. Check backend logs / Playwright install."
+                        ),
+                        "percent": 60,
                     })
-                    hb_idx   += 1
-                    base_pct  = min(63, base_pct + 2)
+                    await asyncio.sleep(0)
+                else:
+                    yield _format_sse("progress", {
+                        "phase": "active_scanning", "step": 4, "total_steps": 6,
+                        "message": f"Scanning {target_url} · detecting AI components...",
+                        "percent": 48,
+                    })
                     await asyncio.sleep(0)
 
-                scan_results = await scan_task
-                vuln_count   = len(scan_results.get('vulnerabilities', []))
-                ai_powered   = scan_results.get("is_ai_powered", False)
+                    scan_task = asyncio.create_task(
+                        threat_modeling_agent.web_scanner.scan_application(
+                            target_url=target_url, max_time_minutes=3, verbose=True,
+                            auth_cookie=auth_cookie,
+                        )
+                    )
 
-                yield _format_sse("progress", {
-                    "phase": "active_scanning", "step": 4, "total_steps": 6,
-                    "message": (
-                        f"Scan complete · {vuln_count} vulns · "
-                        + ("⚠ AI components detected" if ai_powered else "no AI detected")
-                    ),
-                    "percent": 65,
-                })
-                await asyncio.sleep(0)
+                    heartbeats = [
+                        "Fingerprinting tech stack...",
+                        "Detecting AI/ML components...",
+                        "Querying AVID database...",
+                        "Testing ML endpoints...",
+                        "Testing XSS / SQLi...",
+                        "Verifying findings...",
+                    ]
+                    hb_idx, base_pct = 0, 50
+                    while not scan_task.done():
+                        await asyncio.sleep(5)
+                        if scan_task.done():
+                            break
+                        yield _format_sse("progress", {
+                            "phase": "active_scanning", "step": 4, "total_steps": 6,
+                            "message": heartbeats[hb_idx % len(heartbeats)],
+                            "percent": min(63, base_pct + 2),
+                        })
+                        hb_idx   += 1
+                        base_pct  = min(63, base_pct + 2)
+                        await asyncio.sleep(0)
+
+                    scan_results = await scan_task
+                    vuln_count   = len(scan_results.get('vulnerabilities', []))
+                    ai_powered   = scan_results.get("is_ai_powered", False)
+
+                    yield _format_sse("progress", {
+                        "phase": "active_scanning", "step": 4, "total_steps": 6,
+                        "message": (
+                            f"Scan complete · {vuln_count} vulns · "
+                            + ("AI components detected" if ai_powered else "no AI detected")
+                        ),
+                        "percent": 65,
+                    })
+                    await asyncio.sleep(0)
 
             # Report generation
             formatted_research = threat_modeling_agent.format_research_hybrid(research)

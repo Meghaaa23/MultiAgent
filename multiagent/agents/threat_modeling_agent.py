@@ -725,6 +725,21 @@ class ThreatModelingAgent:
 
         print("ThreatModelingAgent initialized")
 
+    def ensure_web_scanner(self):
+        """Create WebScannerAgent on demand if startup init failed."""
+        if self.web_scanner is not None:
+            return self.web_scanner
+        try:
+            self.web_scanner = WebScannerAgent(
+                openai_client=self.openai_client,
+                llm_model=self.llm_model,
+            )
+            logger.info("WebScannerAgent recovered on demand")
+        except Exception as e:
+            logger.error(f"WebScannerAgent still unavailable: {e}", exc_info=True)
+            self.web_scanner = None
+        return self.web_scanner
+
     def _generate_cache_key(self, query: str, include_scan: bool = False) -> str:
         base = query.lower().strip()
         if include_scan:
@@ -833,6 +848,11 @@ Answer:"""
 
         scan_results = None
         if enable_web_scan and target_url:
+            if not self.web_scanner:
+                raise RuntimeError(
+                    "Web scanner is not initialized. Check backend startup logs "
+                    "for WebScannerAgent errors (often missing Playwright browsers)."
+                )
             if verbose:
                 print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
             scan_results = await self.web_scanner.scan_application(
