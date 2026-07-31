@@ -201,23 +201,9 @@ def _server_is_leaky(value: str) -> bool:
     return True
 
 
-_STACK_TOKEN_ALIASES = {
-    "node.js": "express",
-    "nodejs": "express",
-    "svelte": "sveltekit",
-    "httpd": "apache",
-    "apache http server": "apache",
-    "apache2": "apache",
-    "microsoft-iis": "iis",
-}
-
-# Tokens matched as whole words inside Wappalyzer / fingerprint display names
-# (e.g. "Apache HTTP Server 2.4.58" → apache).
-_STACK_MATCH_TOKENS = (
-    "sveltekit", "next.js", "express", "django", "fastapi",
-    "flask", "nginx", "apache", "iis", "tomcat", "caddy",
-    "lighttpd", "wordpress", "laravel", "rails", "spring",
-)
+def _tokenize_discovered_label(label: str) -> List[str]:
+    """Split a fingerprinted / header label into lowercase tokens."""
+    return re.findall(r"[a-z0-9][a-z0-9.+_-]*", (label or "").lower())
 
 
 class ActionAgent:
@@ -242,8 +228,11 @@ class ActionAgent:
             f for f in findings
             if str(getattr(f.get("status"), "value", f.get("status", ""))).lower() == "confirmed"
         ]
-        stack_keywords = self._infer_stack_keywords(stack)
-        hdrs           = {k.lower(): v for k, v in (response_headers or {}).items()}
+        hdrs = {k.lower(): v for k, v in (response_headers or {}).items()}
+        # Fingerprint may also have captured headers — merge without overwriting
+        for k, v in (stack.get("headers") or {}).items():
+            hdrs.setdefault(str(k).lower(), v)
+        stack_keywords = self._infer_stack_keywords(stack, response_headers=hdrs)
 
         if verbose:
             print(f"   Stack keywords: {stack_keywords}")
@@ -264,44 +253,76 @@ class ActionAgent:
 
         return actions
 
-    def _infer_stack_keywords(self, stack: Dict) -> List[str]:
+    def _discovered_stack_labels(
+        self,
+        stack: Dict,
+        response_headers: Optional[Dict] = None,
+    ) -> List[str]:
         """
-        Derive short stack tokens (apache, nginx, express, …) from fingerprint
-        output. Technologies are often dicts like
-        {"name": "Apache HTTP Server", "version": "2.4.58"} — matching must
-        not require an exact list membership of the bare token "apache".
+        Collect labels the scanner already discovered (fingerprint tech names,
+        Server header, stack fields). No product allowlist — discovery is upstream.
         """
-        raw_parts: List[str] = []
-        techs = stack.get("technologies", []) or []
-        for t in techs:
-            if isinstance(t, str):
-                raw_parts.append(t)
+        labels: List[str] = []
+        for t in (stack.get("technologies") or []):
+            if isinstance(t, str) and t.strip():
+                labels.append(t.strip())
             elif isinstance(t, dict):
                 name = (t.get("name") or "").strip()
                 ver  = (t.get("version") or "").strip()
-                raw_parts.append(f"{name} {ver}".strip() if ver else name)
+                if name:
+                    labels.append(f"{name} {ver}".strip() if ver else name)
 
         for field in ("server", "language", "framework", "cms", "cdn", "stack_summary"):
             val = stack.get(field)
             if isinstance(val, str) and val.strip():
-                raw_parts.append(val)
+                labels.append(val.strip())
+
+        for source in (response_headers, stack.get("headers")):
+            if not isinstance(source, dict):
+                continue
+            for key, val in source.items():
+                if str(key).lower() in ("server", "x-powered-by") and str(val or "").strip():
+                    labels.append(str(val).strip())
+
+        return labels
+
+    def _infer_stack_keywords(
+        self,
+        stack: Dict,
+        response_headers: Optional[Dict] = None,
+    ) -> List[str]:
+        """
+        Map discovered labels onto remediation template keys.
+
+        Discovery comes from the fingerprinter / live Server header. The only
+        closed set used here is `_HEADER_FIXES` — which templates we can emit —
+        not a hardcoded product catalog.
+        """
+        labels = self._discovered_stack_labels(stack, response_headers)
+        fix_families = [k for k in _HEADER_FIXES.keys() if k != "generic"]
 
         keywords: List[str] = []
-        for raw in raw_parts:
-            text = raw.lower().strip()
+        for label in labels:
+            text = label.lower().strip()
             if not text:
                 continue
-            # Bare label before version slash: "nginx/1.18.0" → nginx
-            first = text.split("/")[0].strip()
-            if first:
-                keywords.append(_STACK_TOKEN_ALIASES.get(first, first))
-            # Known product tokens inside longer display names
-            for token in _STACK_MATCH_TOKENS:
-                if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text):
-                    keywords.append(token)
+            tokens = _tokenize_discovered_label(text)
+            keywords.extend(tokens)
 
-        normalized = [_STACK_TOKEN_ALIASES.get(kw, kw) for kw in keywords]
-        return list(dict.fromkeys(normalized))
+            # "nginx/1.18.0" → family nginx; "Apache HTTP Server" → apache
+            text_compact = re.sub(r"[^a-z0-9]", "", text)
+            for family in fix_families:
+                fam = family.lower()
+                fam_compact = re.sub(r"[^a-z0-9]", "", fam)
+                if (
+                    fam in tokens
+                    or fam_compact in tokens
+                    or re.search(rf"(?<![a-z0-9]){re.escape(fam)}(?![a-z0-9])", text)
+                    or (fam_compact and fam_compact in text_compact)
+                ):
+                    keywords.append(fam)
+
+        return list(dict.fromkeys(keywords))
 
     def _stack_has(self, stack_keywords: List[str], token: str) -> bool:
         token = token.lower()
@@ -310,9 +331,10 @@ class ActionAgent:
         return any(token in kw for kw in stack_keywords)
 
     def _best_stack_for_header(self, stack_keywords: List[str]) -> str:
-        priority = ["sveltekit", "next.js", "express", "django",
-                    "fastapi", "nginx", "apache"]
-        for fw in priority:
+        """Pick a remediation template from families that match discovered keywords."""
+        fix_families = [k for k in _HEADER_FIXES.keys() if k != "generic"]
+        # Longer / more specific family names first (e.g. next.js before generic tokens)
+        for fw in sorted(fix_families, key=lambda x: (-len(x), x)):
             if self._stack_has(stack_keywords, fw):
                 return fw
         return "generic"

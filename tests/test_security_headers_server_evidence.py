@@ -175,7 +175,7 @@ def test_process_all_recovers_server_from_finding_evidence():
 
 
 def test_apache_http_server_dict_yields_apache_fix_snippets():
-    """Wappalyzer-style 'Apache HTTP Server' must map to apache Header fixes."""
+    """Discovered fingerprint labels (not a product allowlist) select apache fixes."""
     agent = ActionAgent()
     stack = {
         "technologies": [{
@@ -230,3 +230,31 @@ def test_apache_http_server_dict_yields_apache_fix_snippets():
     assert server["fix_language"] == "apache"
     assert "ServerTokens Prod" in server["fix_snippet"]
     assert server["fix_context"] == "httpd.conf"
+
+
+def test_server_header_alone_selects_fix_family_without_tech_list():
+    """Live Server header is enough — no hardcoded product catalog required."""
+    agent = ActionAgent()
+    # Empty fingerprint tech list; only the captured Server header.
+    keywords = agent._infer_stack_keywords(
+        {},
+        response_headers={"server": "nginx/1.24.0"},
+    )
+    assert "nginx" in keywords
+    assert agent._best_stack_for_header(keywords) == "nginx"
+
+    actions = agent.process_all(
+        [{
+            "type": "Missing Security Header: X-Content-Type-Options",
+            "status": "Confirmed",
+            "severity": "Low",
+            "location": "http://localhost:8080",
+            "evidence": {"response_status": 200, "confirmation_method": "header"},
+        }],
+        "http://localhost:8080",
+        {},
+        response_headers={"server": "nginx/1.24.0"},
+    )
+    assert len(actions) == 1
+    assert actions[0]["fix_language"] == "nginx"
+    assert "add_header X-Content-Type-Options" in actions[0]["fix_snippet"]
