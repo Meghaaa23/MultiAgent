@@ -641,6 +641,7 @@ class WebScannerAgent:
                 if ai_infra_result else None
             ),
             "action_results": action_results,
+            "response_headers":       initial_headers,
             "headers_capture_failed": headers_capture_failed,
         }
 

@@ -290,7 +290,8 @@ class ActionAgent:
             return self._action_cors(location, stack_keywords, evidence)
         elif "Information Disclosure" in vuln_type and "header" in vuln_type.lower():
             return self._action_info_disclosure_header(
-                vuln_type, location, stack_keywords, response_headers, evidence
+                vuln_type, location, stack_keywords, response_headers, evidence,
+                details=finding.get("details") or finding.get("description") or "",
             )
         elif "XSS" in vuln_type or "Cross-Site Scripting" in vuln_type:
             return self._action_xss(vuln_type, location, parameter, evidence, stack_keywords)
@@ -567,16 +568,68 @@ class ActionAgent:
             "effort_minutes": _EFFORT_MINUTES["CORS Misconfiguration"],
         }
 
+    @staticmethod
+    def _extract_disclosed_header_value(
+        header_key: str,
+        response_headers: Optional[Dict],
+        evidence: Optional[Dict] = None,
+        details: str = "",
+    ) -> str:
+        """
+        Recover the disclosed Server / X-Powered-By value from the best
+        available source so §3b never says NO EVIDENCE when §3 already
+        confirmed the header via direct inspection.
+        """
+        hdr_key = header_key.lower()
+
+        for source in (response_headers or {},):
+            if not isinstance(source, dict):
+                continue
+            for k, v in source.items():
+                if str(k).lower() == hdr_key:
+                    val = str(v or "").strip()
+                    if val and val.lower() != "(missing)":
+                        return val
+
+        ev_headers = (evidence or {}).get("response_headers") or {}
+        if isinstance(ev_headers, dict):
+            for k, v in ev_headers.items():
+                if str(k).lower() == hdr_key:
+                    val = str(v or "").strip()
+                    if val and val.lower() != "(missing)":
+                        return val
+
+        text = (details or "").strip()
+        if text:
+            # "server: Apache/2.4.58 (Ubuntu)" or
+            # "Server exposes technology info: server: Apache/2.4.58 (version…)"
+            m = re.search(
+                rf"(?i)\b{re.escape(hdr_key)}\s*:\s*(.+?)(?:\s+\(version\b|\s*$)",
+                text,
+            )
+            if m:
+                return m.group(1).strip()
+
+        return ""
+
     def _action_info_disclosure_header(self, vuln_type: str, location: str,
                                         stack_keywords: List[str],
                                         response_headers: Dict,
-                                        evidence: Optional[Dict] = None) -> Optional[Dict]:
+                                        evidence: Optional[Dict] = None,
+                                        details: str = "") -> Optional[Dict]:
      
-        is_xpb   = "x-powered-by" in vuln_type.lower()
-        header   = "X-Powered-By" if is_xpb else "Server"
+        vt = vuln_type.lower()
+        if "x-aspnet-version" in vt:
+            header = "X-AspNet-Version"
+        elif "x-powered-by" in vt:
+            header = "X-Powered-By"
+        else:
+            header = "Server"
         hdr_key  = header.lower()
 
-        captured = response_headers.get(hdr_key, "").strip()
+        captured = self._extract_disclosed_header_value(
+            hdr_key, response_headers, evidence, details
+        )
 
         if captured and not _server_is_leaky(captured):
             logger.debug(
@@ -585,16 +638,18 @@ class ActionAgent:
             )
             return None
 
-         
-        if captured:
-            shows_line = f" Captured: {header}: {captured}"
-            evidence_captured = True
-        else:
-            shows_line = (
-                f" [NO EVIDENCE CAPTURED — {header} header value was not recorded "
-                f"during the scan; re-run with header capture enabled to confirm]"
+        # Without a recoverable value, do not emit a Confirmed PoC that
+        # contradicts itself with "NO EVIDENCE CAPTURED" / unconfirmed.
+        if not captured:
+            logger.debug(
+                "action_agent: suppressing %s finding — no captured header value "
+                "in shared headers, finding evidence, or details",
+                header,
             )
-            evidence_captured = False
+            return None
+
+        shows_line = f" Captured: {header}: {captured}"
+        evidence_captured = True
 
         poc = (
             f'curl -I {location} | grep -i "{header}"\n'
@@ -609,7 +664,13 @@ class ActionAgent:
             fix_language = "nginx"
             fix_context  = "nginx.conf"
         elif "apache" in stack_keywords:
-            fix_snippet  = "# httpd.conf\nServerTokens Prod\nServerSignature Off\nHeader unset X-Powered-By"
+            fix_snippet  = (
+                "# httpd.conf\n"
+                "ServerTokens Prod\n"
+                "ServerSignature Off\n"
+                "Header unset Server\n"
+                "Header unset X-Powered-By"
+            )
             fix_language = "apache"
             fix_context  = "httpd.conf"
         elif "express" in stack_keywords or "node" in stack_keywords:
@@ -623,8 +684,7 @@ class ActionAgent:
 
         return {
             "finding_type":   vuln_type,
-    
-            "severity":       "Low" if evidence_captured else "Low (unconfirmed)",
+            "severity":       "Low",
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
@@ -634,6 +694,48 @@ class ActionAgent:
             "fix_context":    fix_context,
             "effort_minutes": _EFFORT_MINUTES["Information Disclosure"],
         }
+
+    @staticmethod
+    def reconcile_server_header_evidence(
+        confirmed_vulns: List[Dict],
+        potential_vulns: List[Dict],
+        action_results: List[Dict],
+        response_headers: Optional[Dict] = None,
+    ):
+        """
+        Keep §1/§3 in sync with §3b for Information Disclosure header findings.
+
+        If ActionAgent could not produce an evidence-backed PoC (no recoverable
+        header value), downgrade the finding from Confirmed → Potential so the
+        executive summary never claims Confirmed while verification says
+        NO EVIDENCE CAPTURED.
+        """
+        evidenced_types = {
+            (a.get("finding_type") or "").lower()
+            for a in (action_results or [])
+            if a.get("evidence_captured")
+            and "information disclosure" in (a.get("finding_type") or "").lower()
+        }
+
+        kept_confirmed: List[Dict] = []
+        for v in confirmed_vulns:
+            vt = v.get("type") or ""
+            if "Information Disclosure" in vt and "header" in vt.lower():
+                if vt.lower() in evidenced_types:
+                    kept_confirmed.append(v)
+                else:
+                    downgraded = dict(v)
+                    downgraded["status"] = "Potential"
+                    base = (v.get("details") or v.get("description") or "").strip()
+                    note = (
+                        "header value was not recorded in scan evidence; "
+                        "manual verification required"
+                    )
+                    downgraded["details"] = f"{base} — {note}" if base else note
+                    potential_vulns.append(downgraded)
+            else:
+                kept_confirmed.append(v)
+        return kept_confirmed, potential_vulns
 
     def _action_xss(self, vuln_type: str, location: str,
                     parameter: str, evidence: Dict,

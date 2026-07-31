@@ -225,7 +225,9 @@ class AttackVerificationAgent:
         seen_cwe: dict = {}
         deduped: List[Finding] = []
         for f in findings:
-            key      = (f.cwe, f.location)
+            # Include vuln_type so distinct missing headers (all CWE-693)
+            # are not collapsed into a single finding.
+            key      = (f.cwe, f.location, f.vuln_type)
             existing = seen_cwe.get(key)
             if existing is None:
                 seen_cwe[key] = f
@@ -265,7 +267,20 @@ class AttackVerificationAgent:
             if not headers:
                 return findings
 
-            for h in [hdr for hdr in SECURITY_HEADERS if hdr not in headers]:
+            headers_lower = {k.lower(): v for k, v in headers.items()}
+            for h in SECURITY_HEADERS:
+                if h.lower() in headers_lower:
+                    continue
+                if h == "Strict-Transport-Security":
+                    try:
+                        p = urllib.parse.urlparse(url)
+                        host = (p.hostname or "").lower()
+                        if (p.scheme or "").lower() != "https" or host in (
+                            "localhost", "127.0.0.1", "::1"
+                        ) or host.endswith(".localhost"):
+                            continue
+                    except Exception:
+                        continue
                 findings.append(Finding(
                     vuln_type   = f"Missing Security Header: {h}",
                     severity    = "Medium" if h in (

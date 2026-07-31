@@ -1366,7 +1366,26 @@ Answer:"""
 
         stride_threats = (scan_results or {}).get("stride_threats", [])
         action_agent   = ActionAgent()
-        action_results = action_agent.process_all(confirmed_vulns, target_url, stack)
+
+        response_headers = (
+            (scan_results or {}).get("response_headers")
+            or (stack.get("headers") if isinstance(stack, dict) else None)
+            or {}
+        )
+        # Always regenerate with persisted headers so finding.evidence can
+        # backfill Server / X-Powered-By values (fixes Confirmed + NO EVIDENCE).
+        action_results = action_agent.process_all(
+            confirmed_vulns,
+            target_url,
+            stack,
+            response_headers=response_headers,
+        )
+
+        # Align §1/§3 with §3b: server-header findings without a recoverable
+        # captured value must not remain "Confirmed".
+        confirmed_vulns, potential_vulns = ActionAgent.reconcile_server_header_evidence(
+            confirmed_vulns, potential_vulns, action_results, response_headers
+        )
 
         section_1   = _build_section_1(confirmed_vulns, potential_vulns, target_url or "", scan_results) or ""
         section_2   = _build_section_2(stack, (scan_results or {}).get("endpoints_discovered", []), cves) or ""
