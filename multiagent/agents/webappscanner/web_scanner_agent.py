@@ -541,7 +541,8 @@ class WebScannerAgent:
         all_findings: List[Dict] = []
 
         has_clickjacking = any(
-            "Clickjacking" in f.get("type", "") and f.get("status") == "Confirmed"
+            "Clickjacking" in f.get("type", "")
+            and str(getattr(f.get("status"), "value", f.get("status", ""))).lower() == "confirmed"
             for f in verified_findings
         )
 
@@ -641,6 +642,7 @@ class WebScannerAgent:
                 if ai_infra_result else None
             ),
             "action_results": action_results,
+            "response_headers":       initial_headers,
             "headers_capture_failed": headers_capture_failed,
         }
 

@@ -201,6 +201,11 @@ def _server_is_leaky(value: str) -> bool:
     return True
 
 
+def _tokenize_discovered_label(label: str) -> List[str]:
+    """Split a fingerprinted / header label into lowercase tokens."""
+    return re.findall(r"[a-z0-9][a-z0-9.+_-]*", (label or "").lower())
+
+
 class ActionAgent:
 
     def process_all(self, findings: List[Dict],
@@ -219,9 +224,15 @@ class ActionAgent:
         if verbose:
             print(f"\n  Action Agent — generating PoCs and fix snippets")
 
-        confirmed      = [f for f in findings if f.get("status") == "Confirmed"]
-        stack_keywords = self._infer_stack_keywords(stack)
-        hdrs           = {k.lower(): v for k, v in (response_headers or {}).items()}
+        confirmed      = [
+            f for f in findings
+            if str(getattr(f.get("status"), "value", f.get("status", ""))).lower() == "confirmed"
+        ]
+        hdrs = {k.lower(): v for k, v in (response_headers or {}).items()}
+        # Fingerprint may also have captured headers — merge without overwriting
+        for k, v in (stack.get("headers") or {}).items():
+            hdrs.setdefault(str(k).lower(), v)
+        stack_keywords = self._infer_stack_keywords(stack, response_headers=hdrs)
 
         if verbose:
             print(f"   Stack keywords: {stack_keywords}")
@@ -242,30 +253,89 @@ class ActionAgent:
 
         return actions
 
-    def _infer_stack_keywords(self, stack: Dict) -> List[str]:
-        keywords = []
-        techs    = stack.get("technologies", [])
-        summary  = stack.get("stack_summary", "")
-
-        for t in (techs + [summary]):
-            if isinstance(t, str):
-                kw = t.lower().split("/")[0].strip()
-                if kw:
-                    keywords.append(kw)
+    def _discovered_stack_labels(
+        self,
+        stack: Dict,
+        response_headers: Optional[Dict] = None,
+    ) -> List[str]:
+        """
+        Collect labels the scanner already discovered (fingerprint tech names,
+        Server header, stack fields). No product allowlist — discovery is upstream.
+        """
+        labels: List[str] = []
+        for t in (stack.get("technologies") or []):
+            if isinstance(t, str) and t.strip():
+                labels.append(t.strip())
             elif isinstance(t, dict):
-                kw = t.get("name", "").lower().split("/")[0].strip()
-                if kw:
-                    keywords.append(kw)
+                name = (t.get("name") or "").strip()
+                ver  = (t.get("version") or "").strip()
+                if name:
+                    labels.append(f"{name} {ver}".strip() if ver else name)
 
-        aliases    = {"node.js": "express", "nodejs": "express", "svelte": "sveltekit"}
-        normalized = [aliases.get(kw, kw) for kw in keywords]
-        return list(dict.fromkeys(normalized))
+        for field in ("server", "language", "framework", "cms", "cdn", "stack_summary"):
+            val = stack.get(field)
+            if isinstance(val, str) and val.strip():
+                labels.append(val.strip())
+
+        for source in (response_headers, stack.get("headers")):
+            if not isinstance(source, dict):
+                continue
+            for key, val in source.items():
+                if str(key).lower() in ("server", "x-powered-by") and str(val or "").strip():
+                    labels.append(str(val).strip())
+
+        return labels
+
+    def _infer_stack_keywords(
+        self,
+        stack: Dict,
+        response_headers: Optional[Dict] = None,
+    ) -> List[str]:
+        """
+        Map discovered labels onto remediation template keys.
+
+        Discovery comes from the fingerprinter / live Server header. The only
+        closed set used here is `_HEADER_FIXES` — which templates we can emit —
+        not a hardcoded product catalog.
+        """
+        labels = self._discovered_stack_labels(stack, response_headers)
+        fix_families = [k for k in _HEADER_FIXES.keys() if k != "generic"]
+
+        keywords: List[str] = []
+        for label in labels:
+            text = label.lower().strip()
+            if not text:
+                continue
+            tokens = _tokenize_discovered_label(text)
+            keywords.extend(tokens)
+
+            # "nginx/1.18.0" → family nginx; "Apache HTTP Server" → apache
+            text_compact = re.sub(r"[^a-z0-9]", "", text)
+            for family in fix_families:
+                fam = family.lower()
+                fam_compact = re.sub(r"[^a-z0-9]", "", fam)
+                if (
+                    fam in tokens
+                    or fam_compact in tokens
+                    or re.search(rf"(?<![a-z0-9]){re.escape(fam)}(?![a-z0-9])", text)
+                    or (fam_compact and fam_compact in text_compact)
+                ):
+                    keywords.append(fam)
+
+        return list(dict.fromkeys(keywords))
+
+    def _stack_has(self, stack_keywords: List[str], token: str) -> bool:
+        token = token.lower()
+        if token in stack_keywords:
+            return True
+        return any(token in kw for kw in stack_keywords)
 
     def _best_stack_for_header(self, stack_keywords: List[str]) -> str:
-        priority = ["sveltekit", "next.js", "express", "django",
-                    "fastapi", "nginx", "apache"]
-        for fw in priority:
-            if fw in stack_keywords:
+        """Pick a remediation template from families that match discovered keywords."""
+        fix_families = [k for k in _HEADER_FIXES.keys() if k != "generic"]
+        # Longer / more specific family names first (e.g. next.js before generic tokens)
+        for fw in sorted(fix_families, key=lambda x: (-len(x), x)):
+            if self._stack_has(stack_keywords, fw):
                 return fw
         return "generic"
 
@@ -290,7 +360,8 @@ class ActionAgent:
             return self._action_cors(location, stack_keywords, evidence)
         elif "Information Disclosure" in vuln_type and "header" in vuln_type.lower():
             return self._action_info_disclosure_header(
-                vuln_type, location, stack_keywords, response_headers, evidence
+                vuln_type, location, stack_keywords, response_headers, evidence,
+                details=finding.get("details") or finding.get("description") or "",
             )
         elif "XSS" in vuln_type or "Cross-Site Scripting" in vuln_type:
             return self._action_xss(vuln_type, location, parameter, evidence, stack_keywords)
@@ -567,16 +638,68 @@ class ActionAgent:
             "effort_minutes": _EFFORT_MINUTES["CORS Misconfiguration"],
         }
 
+    @staticmethod
+    def _extract_disclosed_header_value(
+        header_key: str,
+        response_headers: Optional[Dict],
+        evidence: Optional[Dict] = None,
+        details: str = "",
+    ) -> str:
+        """
+        Recover the disclosed Server / X-Powered-By value from the best
+        available source so §3b never says NO EVIDENCE when §3 already
+        confirmed the header via direct inspection.
+        """
+        hdr_key = header_key.lower()
+
+        for source in (response_headers or {},):
+            if not isinstance(source, dict):
+                continue
+            for k, v in source.items():
+                if str(k).lower() == hdr_key:
+                    val = str(v or "").strip()
+                    if val and val.lower() != "(missing)":
+                        return val
+
+        ev_headers = (evidence or {}).get("response_headers") or {}
+        if isinstance(ev_headers, dict):
+            for k, v in ev_headers.items():
+                if str(k).lower() == hdr_key:
+                    val = str(v or "").strip()
+                    if val and val.lower() != "(missing)":
+                        return val
+
+        text = (details or "").strip()
+        if text:
+            # "server: Apache/2.4.58 (Ubuntu)" or
+            # "Server exposes technology info: server: Apache/2.4.58 (version…)"
+            m = re.search(
+                rf"(?i)\b{re.escape(hdr_key)}\s*:\s*(.+?)(?:\s+\(version\b|\s*$)",
+                text,
+            )
+            if m:
+                return m.group(1).strip()
+
+        return ""
+
     def _action_info_disclosure_header(self, vuln_type: str, location: str,
                                         stack_keywords: List[str],
                                         response_headers: Dict,
-                                        evidence: Optional[Dict] = None) -> Optional[Dict]:
+                                        evidence: Optional[Dict] = None,
+                                        details: str = "") -> Optional[Dict]:
      
-        is_xpb   = "x-powered-by" in vuln_type.lower()
-        header   = "X-Powered-By" if is_xpb else "Server"
+        vt = vuln_type.lower()
+        if "x-aspnet-version" in vt:
+            header = "X-AspNet-Version"
+        elif "x-powered-by" in vt:
+            header = "X-Powered-By"
+        else:
+            header = "Server"
         hdr_key  = header.lower()
 
-        captured = response_headers.get(hdr_key, "").strip()
+        captured = self._extract_disclosed_header_value(
+            hdr_key, response_headers, evidence, details
+        )
 
         if captured and not _server_is_leaky(captured):
             logger.debug(
@@ -585,16 +708,18 @@ class ActionAgent:
             )
             return None
 
-         
-        if captured:
-            shows_line = f" Captured: {header}: {captured}"
-            evidence_captured = True
-        else:
-            shows_line = (
-                f" [NO EVIDENCE CAPTURED — {header} header value was not recorded "
-                f"during the scan; re-run with header capture enabled to confirm]"
+        # Without a recoverable value, do not emit a Confirmed PoC that
+        # contradicts itself with "NO EVIDENCE CAPTURED" / unconfirmed.
+        if not captured:
+            logger.debug(
+                "action_agent: suppressing %s finding — no captured header value "
+                "in shared headers, finding evidence, or details",
+                header,
             )
-            evidence_captured = False
+            return None
+
+        shows_line = f" Captured: {header}: {captured}"
+        evidence_captured = True
 
         poc = (
             f'curl -I {location} | grep -i "{header}"\n'
@@ -604,15 +729,21 @@ class ActionAgent:
         )
 
         # Fix snippet — stack-aware
-        if "nginx" in stack_keywords:
+        if self._stack_has(stack_keywords, "nginx"):
             fix_snippet  = "# nginx.conf\nserver_tokens off;\nmore_clear_headers Server;"
             fix_language = "nginx"
             fix_context  = "nginx.conf"
-        elif "apache" in stack_keywords:
-            fix_snippet  = "# httpd.conf\nServerTokens Prod\nServerSignature Off\nHeader unset X-Powered-By"
+        elif self._stack_has(stack_keywords, "apache"):
+            fix_snippet  = (
+                "# httpd.conf\n"
+                "ServerTokens Prod\n"
+                "ServerSignature Off\n"
+                "Header unset Server\n"
+                "Header unset X-Powered-By"
+            )
             fix_language = "apache"
             fix_context  = "httpd.conf"
-        elif "express" in stack_keywords or "node" in stack_keywords:
+        elif self._stack_has(stack_keywords, "express") or self._stack_has(stack_keywords, "node"):
             fix_snippet  = "const helmet = require('helmet');\napp.use(helmet());\n// Or: app.disable('x-powered-by');"
             fix_language = "javascript"
             fix_context  = "app.js"
@@ -623,8 +754,7 @@ class ActionAgent:
 
         return {
             "finding_type":   vuln_type,
-    
-            "severity":       "Low" if evidence_captured else "Low (unconfirmed)",
+            "severity":       "Low",
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
@@ -634,6 +764,48 @@ class ActionAgent:
             "fix_context":    fix_context,
             "effort_minutes": _EFFORT_MINUTES["Information Disclosure"],
         }
+
+    @staticmethod
+    def reconcile_server_header_evidence(
+        confirmed_vulns: List[Dict],
+        potential_vulns: List[Dict],
+        action_results: List[Dict],
+        response_headers: Optional[Dict] = None,
+    ):
+        """
+        Keep §1/§3 in sync with §3b for Information Disclosure header findings.
+
+        If ActionAgent could not produce an evidence-backed PoC (no recoverable
+        header value), downgrade the finding from Confirmed → Potential so the
+        executive summary never claims Confirmed while verification says
+        NO EVIDENCE CAPTURED.
+        """
+        evidenced_types = {
+            (a.get("finding_type") or "").lower()
+            for a in (action_results or [])
+            if a.get("evidence_captured")
+            and "information disclosure" in (a.get("finding_type") or "").lower()
+        }
+
+        kept_confirmed: List[Dict] = []
+        for v in confirmed_vulns:
+            vt = v.get("type") or ""
+            if "Information Disclosure" in vt and "header" in vt.lower():
+                if vt.lower() in evidenced_types:
+                    kept_confirmed.append(v)
+                else:
+                    downgraded = dict(v)
+                    downgraded["status"] = "Potential"
+                    base = (v.get("details") or v.get("description") or "").strip()
+                    note = (
+                        "header value was not recorded in scan evidence; "
+                        "manual verification required"
+                    )
+                    downgraded["details"] = f"{base} — {note}" if base else note
+                    potential_vulns.append(downgraded)
+            else:
+                kept_confirmed.append(v)
+        return kept_confirmed, potential_vulns
 
     def _action_xss(self, vuln_type: str, location: str,
                     parameter: str, evidence: Dict,
