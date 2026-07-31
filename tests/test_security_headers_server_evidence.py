@@ -172,3 +172,61 @@ def test_process_all_recovers_server_from_finding_evidence():
     assert actions[0]["evidence_captured"] is True
     assert "Apache/2.4.58" in actions[0]["attack_poc"]
     assert "NO EVIDENCE CAPTURED" not in actions[0]["attack_poc"]
+
+
+def test_apache_http_server_dict_yields_apache_fix_snippets():
+    """Wappalyzer-style 'Apache HTTP Server' must map to apache Header fixes."""
+    agent = ActionAgent()
+    stack = {
+        "technologies": [{
+            "name": "Apache HTTP Server",
+            "version": "2.4.58",
+            "category": "Server",
+            "confidence": 0.95,
+        }],
+        "stack_summary": "Apache HTTP Server 2.4.58",
+        "server": "Apache HTTP Server 2.4.58",
+    }
+    keywords = agent._infer_stack_keywords(stack)
+    assert "apache" in keywords
+    assert agent._best_stack_for_header(keywords) == "apache"
+
+    findings = [
+        {
+            "type": "Missing Security Header: Content-Security-Policy",
+            "status": "Confirmed",
+            "severity": "Medium",
+            "location": "http://localhost:3119",
+            "evidence": {"response_status": 200, "confirmation_method": "header"},
+        },
+        {
+            "type": "Information Disclosure: server header",
+            "status": "Confirmed",
+            "severity": "Low",
+            "location": "http://localhost:3119",
+            "details": "server: Apache/2.4.58 (Ubuntu)",
+            "evidence": {
+                "confirmation_method": "header",
+                "response_headers": {"server": "Apache/2.4.58 (Ubuntu)"},
+            },
+        },
+    ]
+    actions = agent.process_all(
+        findings,
+        "http://localhost:3119",
+        stack,
+        response_headers={
+            "server": "Apache/2.4.58 (Ubuntu)",
+            "content-type": "text/html",
+        },
+    )
+    by_type = {a["finding_type"]: a for a in actions}
+    csp = by_type["Missing Security Header: Content-Security-Policy"]
+    assert csp["fix_language"] == "apache"
+    assert "Header always set Content-Security-Policy" in csp["fix_snippet"]
+    assert csp["fix_context"] == "httpd.conf or .htaccess"
+
+    server = by_type["Information Disclosure: server header"]
+    assert server["fix_language"] == "apache"
+    assert "ServerTokens Prod" in server["fix_snippet"]
+    assert server["fix_context"] == "httpd.conf"

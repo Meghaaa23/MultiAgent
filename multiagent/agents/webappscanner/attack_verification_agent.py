@@ -57,7 +57,18 @@ class Finding:
     owasp:       str      = ""
 
     def to_dict(self) -> Dict:
-        return asdict(self)
+        d = asdict(self)
+        # Plain strings so downstream `status == "Confirmed"` checks never
+        # miss Enum instances after Finding → dict conversion.
+        for key in ("status", "confidence"):
+            val = d.get(key)
+            if hasattr(val, "value"):
+                d[key] = val.value
+        if isinstance(d.get("evidence"), dict):
+            ev_conf = d["evidence"].get("confidence")
+            if hasattr(ev_conf, "value"):
+                d["evidence"]["confidence"] = ev_conf.value
+        return d
 
 
 XSS_PAYLOADS = [

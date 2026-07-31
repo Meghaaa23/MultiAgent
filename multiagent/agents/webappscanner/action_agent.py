@@ -201,6 +201,25 @@ def _server_is_leaky(value: str) -> bool:
     return True
 
 
+_STACK_TOKEN_ALIASES = {
+    "node.js": "express",
+    "nodejs": "express",
+    "svelte": "sveltekit",
+    "httpd": "apache",
+    "apache http server": "apache",
+    "apache2": "apache",
+    "microsoft-iis": "iis",
+}
+
+# Tokens matched as whole words inside Wappalyzer / fingerprint display names
+# (e.g. "Apache HTTP Server 2.4.58" → apache).
+_STACK_MATCH_TOKENS = (
+    "sveltekit", "next.js", "express", "django", "fastapi",
+    "flask", "nginx", "apache", "iis", "tomcat", "caddy",
+    "lighttpd", "wordpress", "laravel", "rails", "spring",
+)
+
+
 class ActionAgent:
 
     def process_all(self, findings: List[Dict],
@@ -219,7 +238,10 @@ class ActionAgent:
         if verbose:
             print(f"\n  Action Agent — generating PoCs and fix snippets")
 
-        confirmed      = [f for f in findings if f.get("status") == "Confirmed"]
+        confirmed      = [
+            f for f in findings
+            if str(getattr(f.get("status"), "value", f.get("status", ""))).lower() == "confirmed"
+        ]
         stack_keywords = self._infer_stack_keywords(stack)
         hdrs           = {k.lower(): v for k, v in (response_headers or {}).items()}
 
@@ -243,29 +265,55 @@ class ActionAgent:
         return actions
 
     def _infer_stack_keywords(self, stack: Dict) -> List[str]:
-        keywords = []
-        techs    = stack.get("technologies", [])
-        summary  = stack.get("stack_summary", "")
-
-        for t in (techs + [summary]):
+        """
+        Derive short stack tokens (apache, nginx, express, …) from fingerprint
+        output. Technologies are often dicts like
+        {"name": "Apache HTTP Server", "version": "2.4.58"} — matching must
+        not require an exact list membership of the bare token "apache".
+        """
+        raw_parts: List[str] = []
+        techs = stack.get("technologies", []) or []
+        for t in techs:
             if isinstance(t, str):
-                kw = t.lower().split("/")[0].strip()
-                if kw:
-                    keywords.append(kw)
+                raw_parts.append(t)
             elif isinstance(t, dict):
-                kw = t.get("name", "").lower().split("/")[0].strip()
-                if kw:
-                    keywords.append(kw)
+                name = (t.get("name") or "").strip()
+                ver  = (t.get("version") or "").strip()
+                raw_parts.append(f"{name} {ver}".strip() if ver else name)
 
-        aliases    = {"node.js": "express", "nodejs": "express", "svelte": "sveltekit"}
-        normalized = [aliases.get(kw, kw) for kw in keywords]
+        for field in ("server", "language", "framework", "cms", "cdn", "stack_summary"):
+            val = stack.get(field)
+            if isinstance(val, str) and val.strip():
+                raw_parts.append(val)
+
+        keywords: List[str] = []
+        for raw in raw_parts:
+            text = raw.lower().strip()
+            if not text:
+                continue
+            # Bare label before version slash: "nginx/1.18.0" → nginx
+            first = text.split("/")[0].strip()
+            if first:
+                keywords.append(_STACK_TOKEN_ALIASES.get(first, first))
+            # Known product tokens inside longer display names
+            for token in _STACK_MATCH_TOKENS:
+                if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text):
+                    keywords.append(token)
+
+        normalized = [_STACK_TOKEN_ALIASES.get(kw, kw) for kw in keywords]
         return list(dict.fromkeys(normalized))
+
+    def _stack_has(self, stack_keywords: List[str], token: str) -> bool:
+        token = token.lower()
+        if token in stack_keywords:
+            return True
+        return any(token in kw for kw in stack_keywords)
 
     def _best_stack_for_header(self, stack_keywords: List[str]) -> str:
         priority = ["sveltekit", "next.js", "express", "django",
                     "fastapi", "nginx", "apache"]
         for fw in priority:
-            if fw in stack_keywords:
+            if self._stack_has(stack_keywords, fw):
                 return fw
         return "generic"
 
@@ -659,11 +707,11 @@ class ActionAgent:
         )
 
         # Fix snippet — stack-aware
-        if "nginx" in stack_keywords:
+        if self._stack_has(stack_keywords, "nginx"):
             fix_snippet  = "# nginx.conf\nserver_tokens off;\nmore_clear_headers Server;"
             fix_language = "nginx"
             fix_context  = "nginx.conf"
-        elif "apache" in stack_keywords:
+        elif self._stack_has(stack_keywords, "apache"):
             fix_snippet  = (
                 "# httpd.conf\n"
                 "ServerTokens Prod\n"
@@ -673,7 +721,7 @@ class ActionAgent:
             )
             fix_language = "apache"
             fix_context  = "httpd.conf"
-        elif "express" in stack_keywords or "node" in stack_keywords:
+        elif self._stack_has(stack_keywords, "express") or self._stack_has(stack_keywords, "node"):
             fix_snippet  = "const helmet = require('helmet');\napp.use(helmet());\n// Or: app.disable('x-powered-by');"
             fix_language = "javascript"
             fix_context  = "app.js"

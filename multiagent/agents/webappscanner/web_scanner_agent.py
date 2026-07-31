@@ -541,7 +541,8 @@ class WebScannerAgent:
         all_findings: List[Dict] = []
 
         has_clickjacking = any(
-            "Clickjacking" in f.get("type", "") and f.get("status") == "Confirmed"
+            "Clickjacking" in f.get("type", "")
+            and str(getattr(f.get("status"), "value", f.get("status", ""))).lower() == "confirmed"
             for f in verified_findings
         )
 
