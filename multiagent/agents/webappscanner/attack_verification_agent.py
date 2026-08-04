@@ -265,10 +265,10 @@ class AttackVerificationAgent:
             if not headers:
                 return findings
 
+            # Keep latest publisher header logic from remove-mongodb-doc-ui branch
             headers_lower = {k.lower(): v for k, v in headers.items()}
             csp_value = headers_lower.get("content-security-policy", "")
             is_https = str(url).lower().startswith("https://")
-            # Align with vulnerability_tester publisher header set
             publishable = [
                 "X-Frame-Options",
                 "X-Content-Type-Options",
@@ -463,7 +463,7 @@ class AttackVerificationAgent:
                     findings.append(xss_finding)
 
                 if any(kw in param_name.lower() for kw in
-                       ("redirect", "url", "next", "return", "goto", "dest")):
+                       ("redirect", "url", "next", "return", "goto", "dest", "to")):
                     redir_finding = await self._test_open_redirect(url, param_name, parsed)
                     if redir_finding:
                         findings.append(redir_finding)
@@ -472,35 +472,67 @@ class AttackVerificationAgent:
 
     async def _test_reflected_xss(self, url: str, param: str,
                                    parsed) -> Optional[Finding]:
+        # Redirect params commonly echo into error pages (Juice Shop 406) — not XSS
+        if any(kw in param.lower() for kw in
+               ("redirect", "url", "next", "return", "goto", "dest", "to")):
+            return None
+
         for payload in XSS_PAYLOADS[:3]:
             try:
                 test_url             = self._inject_param(parsed, param, payload)
                 status, headers, body = await self._get_full_response(test_url)
 
-                if body and payload in body:
-                    return Finding(
-                        vuln_type   = "Reflected XSS",
-                        severity    = "High",
-                        status      = VulnStatus.CONFIRMED,
-                        location    = url,
-                        parameter   = param,
-                        payload     = payload,
-                        description = f"The '{param}' parameter reflects user input without sanitization.",
-                        impact      = "Attacker can execute arbitrary JavaScript in the victim's browser.",
-                        remediation = "Apply output encoding to all user-supplied input. Implement a strict Content-Security-Policy.",
-                        confidence  = Confidence.HIGH,
-                        evidence    = Evidence(
-                            request               = f"GET {test_url}",
-                            response_status       = status,
-                            response_body_snippet = self._extract_context(body, payload),
-                            payload_reflected     = True,
-                            verified              = True,
-                            confidence            = Confidence.HIGH,
-                            confirmation_method   = "http_body"
-                        ),
-                        cwe   = "CWE-79",
-                        owasp = "A03:2021"
-                    )
+                if not body or payload not in body:
+                    continue
+                if status < 200 or status >= 300:
+                    continue
+
+                ctype = ""
+                for k, v in (headers or {}).items():
+                    if k.lower() == "content-type":
+                        ctype = str(v).lower()
+                        break
+                lower = body.lower()
+                # Reject error-page / allowlist echoes
+                if any(m in lower for m in (
+                    "unrecognized target url", "invalid redirect",
+                    "bad request", "internal server error",
+                )):
+                    continue
+                # Require unescaped payload (not &lt;script&gt;)
+                idx = body.find(payload)
+                window = body[max(0, idx - 40):idx + len(payload) + 40]
+                if "&lt;" in window and "<script" not in window.lower() \
+                        and "onerror" not in window.lower():
+                    continue
+                if ctype and "json" in ctype and "<" not in payload:
+                    # Plain string reflection inside JSON is not browser XSS by itself
+                    continue
+
+                return Finding(
+                    vuln_type   = "Reflected XSS",
+                    severity    = "High",
+                    status      = VulnStatus.CONFIRMED,
+                    location    = url,
+                    parameter   = param,
+                    payload     = payload,
+                    description = f"The '{param}' parameter reflects user input without sanitization.",
+                    impact      = "Attacker can execute arbitrary JavaScript in the victim's browser.",
+                    remediation = "Apply output encoding to all user-supplied input. Implement a strict Content-Security-Policy.",
+                    confidence  = Confidence.HIGH,
+                    evidence    = Evidence(
+                        request               = f"GET {test_url}",
+                        response_status       = status,
+                        response_body_snippet = self._extract_context(body, payload),
+                        response_headers      = {"Content-Type": ctype} if ctype else {},
+                        payload_reflected     = True,
+                        verified              = True,
+                        confidence            = Confidence.HIGH,
+                        confirmation_method   = "http_body"
+                    ),
+                    cwe   = "CWE-79",
+                    owasp = "A03:2021"
+                )
             except Exception:
                 continue
         return None
@@ -809,7 +841,12 @@ class AttackVerificationAgent:
                 body = resp.read(8192).decode("utf-8", errors="replace")
                 return resp.status, dict(resp.headers), body
         except urllib.error.HTTPError as e:
-            return e.code, dict(e.headers) if e.headers else {}, ""
+            body = ""
+            try:
+                body = e.read(8192).decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            return e.code, dict(e.headers) if e.headers else {}, body
         except Exception:
             return 0, {}, ""
 

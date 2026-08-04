@@ -352,28 +352,29 @@ class SPAScanner:
         script_urls = re.findall(
             r'<script[^>]+src=[\'"]([^\'"]+\.js[^\'"]*)[\'"]',
             raw_html, re.IGNORECASE
-        )[:2]
+        )[:5]
 
         for src in script_urls:
             js_url = src if src.startswith("http") \
                      else urllib.parse.urljoin(base + "/", src)
             try:
-                _, js_body, _ = _fetch(js_url, max_bytes=256 * 1024)
+                _, js_body, _ = _fetch(js_url, max_bytes=512 * 1024)
                 if not js_body:
                     continue
                 for pattern in patterns:
                     for m in re.finditer(pattern, js_body):
-                        full = base + m.group(1)
+                        path = m.group(1)
+                        full = path if path.startswith("http") else base + path
                         if full not in api_urls:
                             api_urls.append(full)
-                        if len(api_urls) >= 10:
+                        if len(api_urls) >= 25:
                             break
             except Exception:
                 pass
 
         if verbose and api_urls:
             print(f"      API endpoints discovered: {len(api_urls)}")
-        return api_urls[:10]
+        return api_urls[:25]
 
     # ------------------------------------------------------------------
     # Route visiting with Playwright

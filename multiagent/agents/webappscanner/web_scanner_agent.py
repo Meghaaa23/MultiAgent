@@ -123,7 +123,7 @@ class WebScannerAgent:
 
         self.fingerprinter  = TechFingerprintAgent(openai_client, llm_model)
         self.cve_pipeline   = CVEVerificationPipeline(nvd_api_key=os.environ.get("NVD_API_KEY", ""))
-        self.endpoint_disco = EndpointDiscoveryAgent(timeout=5, max_probe_paths=30)
+        self.endpoint_disco = EndpointDiscoveryAgent(timeout=5, max_probe_paths=50)
         self.browser        = BrowserController(openai_client, llm_model)
         self.vuln_tester    = VulnerabilityTester(timeout=10)
         self.verifier       = AttackVerificationAgent(openai_client, llm_model)
@@ -257,6 +257,12 @@ class WebScannerAgent:
                    
                     if ep.get("category") != "discovered_protected":
                         all_urls.append(ep["url"])
+            # Promote bare API paths into parametrized URLs for active testing
+            from .vulnerability_tester import synthesize_injectable_urls
+            all_urls.extend(synthesize_injectable_urls(
+                target_url,
+                [ep.get("url", "") for ep in discovered_endpoints if ep.get("url")],
+            ))
         except Exception as e:
             logger.warning(f"Endpoint discovery failed: {e}")
 

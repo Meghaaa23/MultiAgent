@@ -18,6 +18,17 @@ logger = logging.getLogger(__name__)
 
 
 COMMON_PATHS = [
+    # High-value injectable API surfaces first (probed before the 30-path cap)
+    "/rest/products/search",
+    "/rest/user/login",
+    "/rest/user/security-question",
+    "/rest/products",
+    "/rest/admin/application-configuration",
+    "/api/Users",
+    "/api/Products",
+    "/api/Feedbacks",
+    "/api/Challenges",
+    "/api/Quantitys",
     # API roots
     "/api",
     "/api/v1",
@@ -33,6 +44,7 @@ COMMON_PATHS = [
     "/api/register",
     "/api/token",
     "/api/refresh",
+    "/rest/user/authentication",
     "/oauth",
     "/oauth2",
     # User / admin
@@ -116,6 +128,7 @@ COMMON_PATHS = [
 # Patterns to find API endpoints in JS source
 JS_ENDPOINT_PATTERNS = [
     r'["\'](/api/[^"\'?\s]{2,80})["\']',
+    r'["\'](/rest/[^"\'?\s]{2,80})["\']',
     r'["\'](/v\d+/[^"\'?\s]{2,80})["\']',
     r'fetch\(["\']([^"\']+)["\']',
     r'axios\.[a-z]+\(["\']([^"\']+)["\']',
@@ -153,7 +166,7 @@ class EndpointDiscoveryAgent:
     All requests are GET-only (read-only).  No payload injection at this stage.
     """
 
-    def __init__(self, timeout: int = 5, max_probe_paths: int = 30):
+    def __init__(self, timeout: int = 5, max_probe_paths: int = 50):
         self.timeout          = timeout
         self.max_probe_paths  = max_probe_paths
         self._soft_mode:          bool       = False
