@@ -43,7 +43,8 @@ EVIDENCE_WEIGHTS: Dict[str, int] = {
     "error_generic_validation":  4,
 
     "sse_streaming_header":     10,
-    "sse_chunked_transfer":      8,
+    # Chunked TE is ubiquitous — keep low; only counted when gated (see probe)
+    "sse_chunked_transfer":      2,
     "sse_in_js":                 6,
     "websocket_ai_path":         6,
 
@@ -1188,10 +1189,20 @@ class AIFingerprintAgent:
                     f"SSE at {path}", "probe", endpoint=url))
                 endpoints.append(url)
 
+            # Chunked alone is not an AI signal; require SSE or AI-shaped body
             if "chunked" in headers_low.get("transfer-encoding", ""):
-                evidence.append(EvidenceItem.make(
-                    "sse_chunked_transfer",
-                    f"Chunked transfer at {path}", "probe", endpoint=url))
+                ai_shaped = (
+                    "text/event-stream" in ct
+                    or any(
+                        re.search(p, body or "", re.I)
+                        for p in AI_RESPONSE_BODY_PATTERNS
+                    )
+                )
+                if ai_shaped:
+                    evidence.append(EvidenceItem.make(
+                        "sse_chunked_transfer",
+                        f"Chunked transfer with AI/SSE body at {path}",
+                        "probe", endpoint=url))
 
         if status in (401, 403):
             auth_type = self._detect_auth_type(headers_low, body_l)

@@ -4,7 +4,7 @@ import re
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 try:
@@ -42,7 +42,7 @@ _CAT_MAP: Dict[str, str] = {
     "Programming languages": "Language",
     "Web servers":           "Server",
     "Reverse proxies":       "Server",
-    "Caching":               "Server",
+    "Caching":               "Other",  # plugins like WP Rocket — not a web server
     "Media servers":         "Server",
     "CDN":                   "CDN",
     "Databases":             "Database",
@@ -56,6 +56,44 @@ _CAT_MAP: Dict[str, str] = {
 
 def _normalise_category(wappalyzer_cat_name: str) -> str:
     return _CAT_MAP.get(wappalyzer_cat_name, "Other")
+
+
+def _collapse_premium_duplicates(techs: List[Dict]) -> List[Dict]:
+    """
+    Collapse "<X> Premium" + "<X>" at the same (or missing) version into one
+    stack entry so CVE rows are not double-counted (e.g. Yoast SEO).
+    Prefer the non-Premium name; keep the higher confidence / versioned row.
+    """
+    if not techs:
+        return techs
+    by_name = {
+        (t.get("name") or ""): t
+        for t in techs
+        if isinstance(t, dict) and t.get("name")
+    }
+    drop: Set[str] = set()
+    for name, t in list(by_name.items()):
+        if not name.endswith(" Premium"):
+            continue
+        base = name[: -len(" Premium")].rstrip()
+        if base not in by_name:
+            continue
+        v_prem = (t.get("version") or "").strip()
+        v_base = (by_name[base].get("version") or "").strip()
+        if not v_prem or not v_base or v_prem == v_base:
+            # Merge version/confidence onto base if needed, then drop Premium
+            base_t = by_name[base]
+            if not base_t.get("version") and v_prem:
+                base_t["version"] = v_prem
+            try:
+                if float(t.get("confidence") or 0) > float(base_t.get("confidence") or 0):
+                    base_t["confidence"] = t.get("confidence")
+            except (TypeError, ValueError):
+                pass
+            drop.add(name)
+    if not drop:
+        return techs
+    return [t for t in techs if (t.get("name") or "") not in drop]
 
 
 def _to_list(value) -> List[str]:
@@ -463,6 +501,7 @@ class TechFingerprintAgent:
         detected: List[Dict] = []
         if db_loaded:
             detected = self._matcher.match_all(signals)
+            detected = _collapse_premium_duplicates(detected)
             if verbose:
                 print(f"   Wappalyzer: {len(detected)} technologies detected")
                 for dt in detected[:6]:
