@@ -474,11 +474,10 @@ class WebScannerAgent:
         tasks_executed = int(crawl.get("tasks_executed") or 0)
         all_forms.extend(crawl.get("forms") or [])
         all_urls.extend(crawl.get("urls") or [])
-        if crawl.get("authenticated"):
-            authenticated = True
-        # Propagate session cookies from deep crawl into HTTP vuln probes
+        # Do not promote anonymous crawl cookies to "Authenticated scan".
+        # Only trust explicit operator auth (cookie/creds) already set above.
         exported_cookie = crawl.get("auth_cookie") or ""
-        if exported_cookie:
+        if authenticated and exported_cookie:
             self.vuln_tester.auth_cookie = exported_cookie
 
         all_urls  = _dedup_urls(all_urls)[:120]

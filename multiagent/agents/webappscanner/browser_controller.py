@@ -762,8 +762,19 @@ Output JSON only:
         tasks_executed = 0
         started = asyncio.get_event_loop().time()
 
+        # Authenticated mode is opt-in only — anonymous CDN/WP cookies must
+        # never flip the report to "Authenticated scan".
+        auth_requested = bool(
+            (self.auth_cookie or "").strip()
+            or (
+                (self.credentials.get("username") or "").strip()
+                and (self.credentials.get("password") or "").strip()
+            )
+        )
+        provided_cookie = (self.auth_cookie or "").strip()
+
         session_ok = await self.start_deep_session(base_url)
-        session_cookie = self.auth_cookie or ""
+        session_cookie = provided_cookie
         try:
             for task in tasks[:max_tasks]:
                 if time_budget_seconds and (
@@ -787,17 +798,19 @@ Output JSON only:
                         f"{len(result.get('urls') or [])} urls, "
                         f"{len(result.get('forms') or [])} forms"
                     )
-            # Export cookies after login so HTTP vuln probes are authenticated
-            if self._context is not None:
+            # Only export browser cookies when the operator requested auth
+            # (credentials login or supplied session cookie).
+            if auth_requested and self._context is not None:
                 try:
                     cookies = await self._context.cookies()
                     if cookies:
-                        session_cookie = "; ".join(
+                        exported = "; ".join(
                             f"{c['name']}={c['value']}" for c in cookies
                             if c.get("name") and c.get("value") is not None
                         )
-                        if session_cookie:
-                            self.auth_cookie = session_cookie
+                        if exported:
+                            session_cookie = exported
+                            self.auth_cookie = exported
                 except Exception as e:
                     logger.debug(f"cookie export failed: {e}")
         finally:
@@ -807,13 +820,8 @@ Output JSON only:
             "forms": all_forms,
             "urls": all_urls,
             "tasks_executed": tasks_executed,
-            "auth_cookie": session_cookie,
-            "authenticated": bool(
-                session_cookie or (
-                    self.credentials.get("username")
-                    and self.credentials.get("password")
-                )
-            ),
+            "auth_cookie": session_cookie if auth_requested else "",
+            "authenticated": auth_requested,
         }
 
     # ==================================================================

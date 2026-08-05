@@ -84,6 +84,38 @@ class TestHeuristicDeepActions:
         assert action["target_id"] == 0
 
 
+class TestAuthenticatedFlagOptInOnly:
+    def test_anonymous_cookies_do_not_mean_authenticated(self):
+        """Regression: Cloudflare/WP cookies must not mark Authenticated scan."""
+        bc = _bc()
+        # Simulate what deep_crawl used to do wrong: any cookie ⇒ authenticated
+        auth_requested = bool(
+            (bc.auth_cookie or "").strip()
+            or (
+                (bc.credentials.get("username") or "").strip()
+                and (bc.credentials.get("password") or "").strip()
+            )
+        )
+        assert auth_requested is False
+
+    def test_credentials_request_auth_mode(self):
+        bc = _bc()
+        bc.configure_auth(username="admin", password="password")
+        auth_requested = bool(
+            (bc.auth_cookie or "").strip()
+            or (
+                (bc.credentials.get("username") or "").strip()
+                and (bc.credentials.get("password") or "").strip()
+            )
+        )
+        assert auth_requested is True
+
+    def test_auth_cookie_requests_auth_mode(self):
+        bc = _bc()
+        bc.configure_auth(auth_cookie="PHPSESSID=abc")
+        assert bool((bc.auth_cookie or "").strip()) is True
+
+
 class TestTaskGenerationIncludesLoginPriority:
     def test_credentials_prepend_login_task(self):
         import asyncio
