@@ -133,7 +133,12 @@ def _evidence_has_substance(ev: Dict) -> bool:
         return bool(req) and ev.get("response_status") not in (None, 0, "")
 
     if method in ("timing",):
-        return ev.get("timing_delta_seconds") is not None or bool(ev.get("verified"))
+        # Time-based SQLi needs a real HTTP status + measured delta.
+        # HTTP 0 / client timeout must never count as SLEEP confirmation.
+        status = ev.get("response_status")
+        if status in (None, 0, ""):
+            return False
+        return ev.get("timing_delta_seconds") is not None
 
     if method in ("pattern", "http_body", "dom_reflection", "js_execution"):
         return bool(str(body).strip())
@@ -240,7 +245,6 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
         "Low-Medium" if exploit_score >  0  else "Low"
     )
 
-    authenticated = (scan_results or {}).get("authenticated_scan", False)
     actions = [
         v.get("remediation", "")[:200]
         for v in confirmed_vulns[:3]
@@ -248,21 +252,15 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     ] or ["No immediate action required — continue monitoring."]
 
     actions_text = " ".join(f"({i+1}) {a}" for i, a in enumerate(actions[:3]))
-    auth_note    = (
-        " [Authenticated scan]" if authenticated
-        else " [Unauthenticated — post-login surfaces not tested]"
-    )
     summary = (
-        f"Active scan of `{target_url}` completed in {duration:.0f}s{auth_note}. "
+        f"Active scan of `{target_url}` completed in {duration:.0f}s "
+        f"[Black-box unauthenticated]. "
         f"Identified {n_confirmed} confirmed and {n_potential} potential "
         f"vulnerability type(s). Overall risk level: {risk} "
         f"(score: {exploit_score:.0f})"
     )
     if n_confirmed == 0 and n_potential == 0:
-        summary += (
-            " — no exploitable surfaces found. "
-            "Consider providing a session cookie for authenticated scanning."
-        )
+        summary += " — no exploitable surfaces found on unauthenticated surfaces."
     else:
         summary += f". Top actions: {actions_text}"
 
@@ -947,9 +945,7 @@ Answer:"""
                       use_cache: bool = True, filenames: List[str] = None,
                       enable_web_scan: bool = False,
                       target_url: str = None,
-                      auth_cookie: str = "",
-                      auth_username: str = "",
-                      auth_password: str = "") -> Dict:
+                      ) -> Dict:
 
         if verbose:
             print("\n" + "=" * 80)
@@ -997,9 +993,6 @@ Answer:"""
                 print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
             scan_results = await scanner.scan_application(
                 target_url=target_url, max_time_minutes=15, verbose=verbose,
-                auth_cookie=auth_cookie,
-                auth_username=auth_username,
-                auth_password=auth_password,
             )
 
         if verbose:

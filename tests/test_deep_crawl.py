@@ -1,6 +1,7 @@
 """Unit tests for Yura-style deep crawl session helpers."""
 import sys
 import os
+import asyncio
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
@@ -26,17 +27,12 @@ class TestCookieParse:
         assert cookies[0]["domain"] == "localhost"
 
 
-class TestCredentialsFill:
-    def test_uses_provided_credentials(self):
+class TestDummyFill:
+    def test_benign_dummy_values(self):
         bc = _bc()
-        bc.configure_auth(username="admin", password="password")
-        assert bc._dummy_value("username", "text") == "admin"
-        assert bc._dummy_value("password", "password") == "password"
-
-    def test_falls_back_without_credentials(self):
-        bc = _bc()
-        assert "Password" in bc._dummy_value("password", "password") or \
-            bc._dummy_value("password", "password") == "TestPassword123!"
+        assert bc._dummy_value("username", "text") == "testuser"
+        assert bc._dummy_value("password", "password") == "TestPassword123!"
+        assert bc._dummy_value("email", "email") == "test@example.com"
 
 
 class TestFormNormalize:
@@ -52,9 +48,8 @@ class TestFormNormalize:
 
 
 class TestHeuristicDeepActions:
-    def test_prefers_login_form(self):
+    def test_prefers_login_form_when_task_mentions_login(self):
         bc = _bc()
-        bc.configure_auth(username="a", password="b")
         state = {
             "url": "http://localhost/login.php",
             "forms": [{
@@ -84,43 +79,27 @@ class TestHeuristicDeepActions:
         assert action["target_id"] == 0
 
 
-class TestAuthenticatedFlagOptInOnly:
-    def test_anonymous_cookies_do_not_mean_authenticated(self):
-        """Regression: Cloudflare/WP cookies must not mark Authenticated scan."""
+class TestBlackBoxDeepCrawl:
+    def test_deep_crawl_return_has_no_auth_fields(self):
+        """Black-box mode must not export auth_cookie / authenticated flags."""
         bc = _bc()
-        # Simulate what deep_crawl used to do wrong: any cookie ⇒ authenticated
-        auth_requested = bool(
-            (bc.auth_cookie or "").strip()
-            or (
-                (bc.credentials.get("username") or "").strip()
-                and (bc.credentials.get("password") or "").strip()
+
+        async def run():
+            return await bc.deep_crawl(
+                tasks=[{"name": "noop", "url": "http://localhost/"}],
+                base_url="http://localhost/",
+                max_tasks=0,
             )
-        )
-        assert auth_requested is False
 
-    def test_credentials_request_auth_mode(self):
+        result = asyncio.run(run())
+        assert "auth_cookie" not in result
+        assert "authenticated" not in result
+        assert result["tasks_executed"] == 0
+
+
+class TestTaskGenerationUnauthenticated:
+    def test_no_credentials_login_task_prepended(self):
         bc = _bc()
-        bc.configure_auth(username="admin", password="password")
-        auth_requested = bool(
-            (bc.auth_cookie or "").strip()
-            or (
-                (bc.credentials.get("username") or "").strip()
-                and (bc.credentials.get("password") or "").strip()
-            )
-        )
-        assert auth_requested is True
-
-    def test_auth_cookie_requests_auth_mode(self):
-        bc = _bc()
-        bc.configure_auth(auth_cookie="PHPSESSID=abc")
-        assert bool((bc.auth_cookie or "").strip()) is True
-
-
-class TestTaskGenerationIncludesLoginPriority:
-    def test_credentials_prepend_login_task(self):
-        import asyncio
-        bc = _bc()
-        bc.configure_auth(username="admin", password="password")
 
         class Completions:
             def create(self, **kwargs):
@@ -148,4 +127,4 @@ class TestTaskGenerationIncludesLoginPriority:
 
         tasks = asyncio.run(run())
         assert tasks
-        assert "credential" in tasks[0]["name"].lower() or "authenticate" in tasks[0]["name"].lower()
+        assert "authenticate with provided" not in (tasks[0].get("name") or "").lower()

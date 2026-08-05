@@ -444,10 +444,6 @@ async def query_with_full_autogen(request: Request):
         body        = await request.json()
         question    = body.get("question")
         session_id  = body.get("session_id", "default")
-        auth_cookie    = body.get("auth_cookie", "")
-        auth_username  = body.get("auth_username", "") or body.get("username", "")
-        auth_password  = body.get("auth_password", "") or body.get("password", "")
-
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
 
@@ -480,9 +476,6 @@ async def query_with_full_autogen(request: Request):
                         use_cache=False,
                         enable_web_scan=True,
                         target_url=target_url,
-                        auth_cookie=auth_cookie,
-                        auth_username=auth_username,
-                        auth_password=auth_password,
                     )
                     scan_data = (
                         result.get("reasoning_chain", {}).get("scan_results") or {}
@@ -584,11 +577,8 @@ async def query_with_full_autogen(request: Request):
 # ============================================================================
 
 class StreamQueryRequest(BaseModel):
-    question:      str
-    session_id:    Optional[str] = None
-    auth_cookie:   Optional[str] = None
-    auth_username: Optional[str] = None
-    auth_password: Optional[str] = None
+    question:   str
+    session_id: Optional[str] = None
 
 
 @app.post("/query/stream")
@@ -596,11 +586,8 @@ async def query_stream(request: StreamQueryRequest):
 
     async def event_generator():
         try:
-            question       = request.question
-            session_id     = request.session_id or "default"
-            auth_cookie    = request.auth_cookie or ""
-            auth_username  = request.auth_username or ""
-            auth_password  = request.auth_password or ""
+            question   = request.question
+            session_id = request.session_id or "default"
 
             yield _format_sse("progress", {
                 "phase": "classification", "step": 1, "total_steps": 6,
@@ -714,9 +701,6 @@ async def query_stream(request: StreamQueryRequest):
                     scan_task = asyncio.create_task(
                         scanner.scan_application(
                             target_url=target_url, max_time_minutes=15, verbose=True,
-                            auth_cookie=auth_cookie,
-                            auth_username=auth_username,
-                            auth_password=auth_password,
                         )
                     )
 

@@ -143,36 +143,21 @@ class WebScannerAgent:
 
     async def scan_application(self, target_url: str,
                                max_time_minutes: int = 15,
-                               verbose: bool = False,
-                               auth_cookie: str = "",
-                               auth_username: str = "",
-                               auth_password: str = "") -> Dict:
+                               verbose: bool = False) -> Dict:
         start = datetime.now()
 
         if "#" in target_url:
             target_url = target_url.split("#")[0].rstrip("/")
 
         target_url = _resolve_docker_url(target_url, verbose=verbose)
-        self.vuln_tester.auth_cookie = auth_cookie or ""
-        self.browser.configure_auth(
-            auth_cookie=auth_cookie or "",
-            username=auth_username or "",
-            password=auth_password or "",
-        )
-        authenticated = bool(
-            auth_cookie or (auth_username and auth_password)
-        )
 
         if verbose:
             print(f"\n{'='*70}")
             print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
-            if auth_cookie:
-                print(f"  Auth   : Session cookie provided (authenticated scan)")
-            elif auth_username and auth_password:
-                print(f"  Auth   : Credentials provided for deep crawl login")
+            print(f"  Mode   : Black-box unauthenticated")
             print(f"  Target : {target_url}")
             print(f"  Budget : {max_time_minutes} minutes")
-            print(f"  Crawl  : Deep (shared session, multi-step tasks)")
+            print(f"  Crawl  : Deep (shared anonymous session)")
             print(f"{'='*70}\n")
 
         all_forms:       List[Dict] = []
@@ -474,11 +459,6 @@ class WebScannerAgent:
         tasks_executed = int(crawl.get("tasks_executed") or 0)
         all_forms.extend(crawl.get("forms") or [])
         all_urls.extend(crawl.get("urls") or [])
-        # Do not promote anonymous crawl cookies to "Authenticated scan".
-        # Only trust explicit operator auth (cookie/creds) already set above.
-        exported_cookie = crawl.get("auth_cookie") or ""
-        if authenticated and exported_cookie:
-            self.vuln_tester.auth_cookie = exported_cookie
 
         all_urls  = _dedup_urls(all_urls)[:120]
         all_forms = _dedup_forms(all_forms)[:50]
@@ -664,7 +644,6 @@ class WebScannerAgent:
             "forms_discovered":       len(all_forms),
             "urls_discovered":        len(all_urls),
             "scan_duration":          round(duration, 1),
-            "authenticated_scan":     bool(authenticated),
             "timestamp":              datetime.now().isoformat(),
             "is_ai_powered":          is_ai_powered,
             "ai_fingerprint":         ai_fingerprint,

@@ -14,19 +14,14 @@ class BrowserController:
     """
     Yura-style browser agent: task extraction → multi-step execution → surface collection.
 
-    Deep crawl keeps one Playwright context across tasks so login/session state
-    survives, harvests forms/links at every step, and can use auth_cookie or
-    username/password credentials.
+    Deep crawl keeps one anonymous Playwright context across tasks, harvesting
+    forms/links at every step. Black-box unauthenticated only — no login/creds.
     """
 
     def __init__(self, openai_client, llm_model: str = "Qwen-2.5"):
         self.openai_client  = openai_client
         self.llm_model      = llm_model
         self.action_history: List[Dict] = []
-
-        # Auth for deep crawl (HTTP cookie string and/or login credentials)
-        self.auth_cookie: str = ""
-        self.credentials: Dict[str, str] = {}  # {"username": ..., "password": ...}
 
         # Shared deep-crawl Playwright session (one browser across tasks)
         self._pw = None
@@ -45,14 +40,6 @@ class BrowserController:
             logger.warning("Playwright not installed — using urllib fallback")
             print(" Browser Controller initialized (urllib fallback)")
 
-    def configure_auth(self, auth_cookie: str = "",
-                       username: str = "", password: str = "") -> None:
-        self.auth_cookie = auth_cookie or ""
-        self.credentials = {}
-        if username:
-            self.credentials["username"] = username
-        if password:
-            self.credentials["password"] = password
 
     # ==================================================================
     # SENSORS — page capture
@@ -316,12 +303,12 @@ Page: {page_description or "(no description)"}
 UI Elements (chunk {idx}/{len(chunks)}):
 {self._format_ui_elements(chunk)}
 
-Generate 4-6 realistic deep-crawl security tasks that reach inner app states.
+Generate 4-6 realistic deep-crawl security tasks for black-box unauthenticated probing.
 Focus on:
-- Authentication / login workflows (do this first when a login form exists)
-- Multi-step navigation into authenticated or secondary pages
-- CRUD operations and form submission
-- Input handling on search, profile, admin, and data views
+- Public login / search / contact forms (probe without real credentials)
+- Multi-step navigation into publicly reachable secondary pages
+- CRUD-shaped form submission on anonymous surfaces
+- Input handling on search, profile, admin, and data views that do not require login
 
 Each task must include a specific URL to navigate to.
 
@@ -329,8 +316,8 @@ Respond with JSON only — no explanation:
 {{
     "tasks": [
         {{
-            "name":        "Login to application",
-            "description": "Authenticate then explore post-login pages",
+            "name":        "Explore public search form",
+            "description": "Submit benign input on publicly reachable forms",
             "url":         "{target_url}"
         }}
     ]
@@ -379,18 +366,6 @@ Respond with JSON only — no explanation:
                 seen.add(name)
                 unique.append(t)
 
-        # Credentials → prepend explicit login task
-        if self.credentials.get("username") and self.credentials.get("password"):
-            login_task = {
-                "name": "Authenticate with provided credentials",
-                "description": "Log in using supplied credentials, then stop",
-                "url": target_url,
-                "priority": "login",
-            }
-            unique = [login_task] + [
-                t for t in unique
-                if "authenticate with provided" not in (t.get("name") or "").lower()
-            ]
 
         return unique[:(20 if deep else 15)]
 
@@ -469,16 +444,10 @@ Respond with JSON only — no explanation:
             for a in history[-5:]
         ) or "None"
 
-        cred_note = ""
-        if self.credentials.get("username"):
-            cred_note = (
-                "\nCredentials are available — FILL_FORM on login/auth forms "
-                "with the real username/password (browser fills them automatically).\n"
-            )
         prompt = f"""You are Yura, an agent controlling a web browser for deep security crawling.
 
 Task: {task}
-{cred_note}
+
 Current Page:
 {state_text}
 
@@ -490,7 +459,7 @@ Commands available:
   FILL_FORM  {{id}} — fill and submit form
   STOP            — task complete or impossible
 
-Prefer actions that reach new authenticated or secondary pages.
+Prefer actions that reach new publicly reachable secondary pages.
 Only STOP when the task is done or no useful action remains.
 
 Output JSON only:
@@ -574,17 +543,14 @@ Output JSON only:
         return False
 
     def _dummy_value(self, field_name: str, field_type: str) -> str:
-        """Generate form value — prefer real credentials when configured."""
+        """Generate benign dummy value for form fields (unauthenticated probe)."""
         n = field_name.lower()
-        creds = self.credentials or {}
         if "password" in n or field_type == "password":
-            return creds.get("password") or "TestPassword123!"
+            return "TestPassword123!"
         if "email" in n or field_type == "email":
-            # Prefer username if it looks like email; else dummy
-            u = creds.get("username") or ""
-            return u if "@" in u else (u or "test@example.com")
+            return "test@example.com"
         if any(k in n for k in ("user", "login", "account", "name")):
-            return creds.get("username") or "testuser"
+            return "testuser"
         if "phone" in n or "tel" in n:
             return "555-0123"
         if "url" in n or "website" in n:
@@ -640,9 +606,6 @@ Output JSON only:
             self._context = await self._browser.new_context(
                 user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
             )
-            cookies = self._parse_cookie_header(self.auth_cookie, base_url)
-            if cookies:
-                await self._context.add_cookies(cookies)
             self._page = await self._context.new_page()
             self._session_base = self._base_url(base_url)
             self._visited_urls = set()
@@ -686,14 +649,14 @@ Output JSON only:
                                 history: List[Dict]) -> Dict:
         """
         Deterministic fallback when the LLM stops early or fails.
-        Prefer login FILL_FORM, then unvisited same-host links.
+        Prefer login FILL_FORM when the task mentions login, then unvisited links.
         """
         forms = state.get("forms") or []
         clickables = state.get("clickables") or []
         task_l = (task or "").lower()
         want_login = any(
             k in task_l for k in ("login", "auth", "sign in", "signin", "credential")
-        ) or bool(self.credentials)
+        )
 
         if want_login and forms:
             for i, f in enumerate(forms):
@@ -762,19 +725,7 @@ Output JSON only:
         tasks_executed = 0
         started = asyncio.get_event_loop().time()
 
-        # Authenticated mode is opt-in only — anonymous CDN/WP cookies must
-        # never flip the report to "Authenticated scan".
-        auth_requested = bool(
-            (self.auth_cookie or "").strip()
-            or (
-                (self.credentials.get("username") or "").strip()
-                and (self.credentials.get("password") or "").strip()
-            )
-        )
-        provided_cookie = (self.auth_cookie or "").strip()
-
         session_ok = await self.start_deep_session(base_url)
-        session_cookie = provided_cookie
         try:
             for task in tasks[:max_tasks]:
                 if time_budget_seconds and (
@@ -798,21 +749,6 @@ Output JSON only:
                         f"{len(result.get('urls') or [])} urls, "
                         f"{len(result.get('forms') or [])} forms"
                     )
-            # Only export browser cookies when the operator requested auth
-            # (credentials login or supplied session cookie).
-            if auth_requested and self._context is not None:
-                try:
-                    cookies = await self._context.cookies()
-                    if cookies:
-                        exported = "; ".join(
-                            f"{c['name']}={c['value']}" for c in cookies
-                            if c.get("name") and c.get("value") is not None
-                        )
-                        if exported:
-                            session_cookie = exported
-                            self.auth_cookie = exported
-                except Exception as e:
-                    logger.debug(f"cookie export failed: {e}")
         finally:
             await self.close_deep_session()
 
@@ -820,8 +756,6 @@ Output JSON only:
             "forms": all_forms,
             "urls": all_urls,
             "tasks_executed": tasks_executed,
-            "auth_cookie": session_cookie if auth_requested else "",
-            "authenticated": auth_requested,
         }
 
     # ==================================================================
@@ -870,9 +804,6 @@ Output JSON only:
                 self._context = await self._browser.new_context(
                     user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
                 )
-                cookies = self._parse_cookie_header(self.auth_cookie, base_url)
-                if cookies:
-                    await self._context.add_cookies(cookies)
                 page = await self._context.new_page()
                 self._page = page
                 self._session_base = self._base_url(base_url)
