@@ -17,19 +17,40 @@ logger = logging.getLogger(__name__)
 
 
 
-COMMON_PATHS = [
-    # High-value injectable API surfaces first (probed before the 30-path cap)
-    "/rest/products/search",
-    "/rest/user/login",
-    "/rest/user/security-question",
-    "/rest/products",
-    "/rest/admin/application-configuration",
-    "/api/Users",
-    "/api/Products",
-    "/api/Feedbacks",
-    "/api/Challenges",
-    "/api/Quantitys",
-    # API roots
+# Classic server-rendered / PHP / CMS entrypoints (product-agnostic)
+SSR_COMMON_PATHS = [
+    "/login.php",
+    "/login",
+    "/signin",
+    "/sign-in",
+    "/setup.php",
+    "/install.php",
+    "/register.php",
+    "/signup",
+    "/index.php",
+    "/admin.php",
+    "/admin/login.php",
+    "/admin/login",
+    "/security.php",
+    "/logout.php",
+    "/user/login",
+    "/account/login",
+    "/wp-login.php",
+    "/wp-admin",
+    "/xmlrpc.php",
+    "/phpmyadmin",
+    "/phpinfo.php",
+    "/admin",
+    "/administrator",
+    "/dashboard",
+    "/manage",
+    "/upload",
+    "/uploads",
+    "/files",
+]
+
+# Generic API / SPA surfaces (product-agnostic — no app brand paths)
+API_COMMON_PATHS = [
     "/api",
     "/api/v1",
     "/api/v2",
@@ -37,30 +58,54 @@ COMMON_PATHS = [
     "/rest",
     "/graphql",
     "/query",
-    # Auth
     "/api/auth",
     "/api/login",
     "/api/logout",
     "/api/register",
     "/api/token",
-    "/api/refresh",
-    "/rest/user/authentication",
-    "/oauth",
-    "/oauth2",
-    # User / admin
     "/api/users",
     "/api/user",
     "/api/me",
     "/api/profile",
     "/api/admin",
-    "/admin",
-    "/administrator",
-    "/dashboard",
-    "/manage",
-    "/management",
-    # Debug / info
+    "/api/search",
+    "/api/v1/search",
+    "/rest/search",
+    "/api/config",
+    "/api/admin/config",
     "/api/health",
     "/api/status",
+    "/api/docs",
+    "/swagger",
+    "/swagger-ui",
+    "/swagger.json",
+    "/openapi.json",
+    "/api/openapi.json",
+    "/oauth",
+    "/oauth2",
+]
+
+# Sensitive / ops / docs (always worth a few slots)
+SENSITIVE_COMMON_PATHS = [
+    "/.env",
+    "/.env.local",
+    "/.env.production",
+    "/.git/config",
+    "/config",
+    "/config.json",
+    "/config.php",
+    "/settings",
+    "/web.config",
+    "/.htaccess",
+    "/backup",
+    "/backup.zip",
+    "/backup.sql",
+    "/dump.sql",
+    "/db.sql",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/.well-known/security.txt",
+    "/server-status",
     "/health",
     "/status",
     "/ping",
@@ -68,62 +113,13 @@ COMMON_PATHS = [
     "/actuator",
     "/actuator/health",
     "/actuator/env",
-    "/actuator/mappings",
     "/debug",
     "/info",
-    # Docs
-    "/api/docs",
-    "/docs",
-    "/swagger",
-    "/swagger-ui",
-    "/swagger-ui.html",
-    "/swagger.json",
-    "/swagger.yaml",
-    "/openapi.json",
-    "/openapi.yaml",
-    "/api/swagger.json",
-    "/api/openapi.json",
-    "/redoc",
-    # Config / secrets
-    "/.env",
-    "/.env.local",
-    "/.env.production",
-    "/.git/config",
-    "/config",
-    "/config.json",
-    "/config.yaml",
-    "/settings",
-    "/web.config",
-    "/.htaccess",
-    # Backups
-    "/backup",
-    "/backup.zip",
-    "/backup.sql",
-    "/dump.sql",
-    "/db.sql",
-    # CMS
-    "/wp-admin",
-    "/wp-login.php",
-    "/wp-json/wp/v2/users",
-    "/xmlrpc.php",
-    "/phpmyadmin",
-    "/phpinfo.php",
-    # Misc
-    "/robots.txt",
-    "/sitemap.xml",
-    "/sitemap_index.xml",
-    "/.well-known/security.txt",
-    "/server-status",
-    "/server-info",
     "/console",
-    "/shell",
-    "/terminal",
-    "/upload",
-    "/uploads",
-    "/files",
-    "/static",
-    "/assets",
 ]
+
+# Backward-compatible flat list (SSR first so the probe budget hits classic apps)
+COMMON_PATHS = SSR_COMMON_PATHS + API_COMMON_PATHS + SENSITIVE_COMMON_PATHS
 
 # Patterns to find API endpoints in JS source
 JS_ENDPOINT_PATTERNS = [
@@ -166,7 +162,7 @@ class EndpointDiscoveryAgent:
     All requests are GET-only (read-only).  No payload injection at this stage.
     """
 
-    def __init__(self, timeout: int = 5, max_probe_paths: int = 50):
+    def __init__(self, timeout: int = 5, max_probe_paths: int = 60):
         self.timeout          = timeout
         self.max_probe_paths  = max_probe_paths
         self._soft_mode:          bool       = False
@@ -176,12 +172,17 @@ class EndpointDiscoveryAgent:
   
     # Soft-404 calibration
     async def calibrate(self, base: str) -> None:
-       
+        """
+        Enable soft-404 mode only when unknown paths return a same-path 200
+        with a reusable body baseline (true SPA/catch-all).
+        Off-path redirects alone do NOT enable soft mode — classic PHP apps
+        often redirect unknown URLs to login without being SPAs.
+        """
         rand_paths = [
             f"/{hashlib.sha1(f'{base}{i}'.encode()).hexdigest()[:16]}-zz{i}"
             for i in range(3)
         ]
-        hits = 0
+        same_path_hits = 0
         self._soft404_lengths = []
         self._soft404_bodies = []
 
@@ -193,29 +194,86 @@ class EndpointDiscoveryAgent:
                     None, lambda _u=url: self._sync_head(_u)
                 )
                 if 200 <= status < 300:
-                   
                     asked  = (urlsplit(url).path or "/").rstrip("/") or "/"
                     landed = (urlsplit(final_url).path or "/").rstrip("/") or "/"
                     if landed == asked or landed == asked + "/" or asked == landed + "/":
-                       
-                        hits += 1
+                        same_path_hits += 1
                         body = await self._fetch_text(url) or ""
                         self._soft404_lengths.append(len(body))
                         if body:
                             self._soft404_bodies.append(body)
-                    else:
-                        
-                        hits += 1
+                    # else: redirect to another path (e.g. /login.php) — not SPA soft-404
             except Exception:
                 pass
 
-        self._soft_mode = hits >= 2
+        # Require body baselines so we can similarity-gate probes
+        self._soft_mode = same_path_hits >= 2 and len(self._soft404_bodies) >= 1
         if self._soft_mode:
             logger.info(
                 "EndpointDiscovery: soft-404/catch-all site detected "
                 "(baseline body lengths: %s, bodies=%d)",
                 self._soft404_lengths, len(self._soft404_bodies),
             )
+
+    def _select_probe_paths(self, page_html: str = "") -> List[str]:
+        """
+        Product-agnostic probe list: prefer SSR/PHP paths when HTML/stack
+        signals a classic app; prefer API paths when JS/API signals dominate.
+        Always mix both families within the budget.
+        """
+        html = page_html or ""
+        html_l = html.lower()
+        php_signal = (
+            ".php" in html_l
+            or "x-powered-by: php" in html_l
+            or "name=\"username\"" in html_l
+            or "name='username'" in html_l
+            or "name=\"password\"" in html_l
+            or "<form" in html_l
+        )
+        api_signal = (
+            "/api/" in html_l
+            or "/rest/" in html_l
+            or "fetch(" in html_l
+            or "axios." in html_l
+            or "graphql" in html_l
+            or "application/json" in html_l
+        )
+
+        # Paths referenced in HTML always get priority (grounded, not guessed brands)
+        html_paths: List[str] = []
+        for m in re.finditer(
+            r'''(?:href|action)=["']([^"']+)["']''', html, re.I
+        ):
+            raw = m.group(1).strip()
+            if not raw or raw.startswith(("#", "javascript:", "mailto:")):
+                continue
+            path = urlsplit(raw).path or ""
+            if path.startswith("/") and 1 < len(path) < 80:
+                html_paths.append(path.split(";")[0])
+
+        ordered: List[str] = []
+        seen: Set[str] = set()
+
+        def _extend(paths):
+            for p in paths:
+                if p not in seen:
+                    seen.add(p)
+                    ordered.append(p)
+
+        _extend(html_paths)
+        if php_signal and not api_signal:
+            _extend(SSR_COMMON_PATHS)
+            _extend(API_COMMON_PATHS[:12])
+        elif api_signal and not php_signal:
+            _extend(API_COMMON_PATHS)
+            _extend(SSR_COMMON_PATHS[:12])
+        else:
+            # Mixed / unknown — interleave so classic apps aren't starved
+            _extend(SSR_COMMON_PATHS)
+            _extend(API_COMMON_PATHS)
+        _extend(SENSITIVE_COMMON_PATHS)
+        return ordered[: self.max_probe_paths]
 
     def _matches_spa_shell(self, body: str, content_type: str = "") -> bool:
         """True when response is the SPA catch-all shell (not a real endpoint)."""
@@ -277,7 +335,7 @@ class EndpointDiscoveryAgent:
         results = await asyncio.gather(
             self._strategy_passive_files(base, verbose),
             self._strategy_js_extraction(base, page_html, verbose),
-            self._strategy_common_paths(base, verbose),
+            self._strategy_common_paths(base, page_html=page_html, verbose=verbose),
             return_exceptions=True
         )
 
@@ -407,10 +465,19 @@ class EndpointDiscoveryAgent:
                 ep["severity"]          = "Medium"
                 return ep
 
-            # Unclassified HTML 200 on soft-404 sites is not interesting
+            # Only drop unclassified HTML when it truly matches the SPA shell.
+            # Classic SSR apps often return unique HTML 200s that must stay.
             if self._soft_mode and ("html" in ctype or "<html" in body_lower):
-                ep["interesting"]  = False
-                ep["verification"] = "HTTP 200 HTML unclassified on catch-all site — dropped"
+                if self._matches_spa_shell(body, ctype):
+                    ep["interesting"]  = False
+                    ep["verification"] = "SPA/soft-404 shell — not a real endpoint"
+                    return ep
+
+            # SSR signal: HTML page with a form is an injectable surface
+            if "<form" in body_lower and ("html" in ctype or "<html" in body_lower):
+                ep["interesting"]  = True
+                ep["has_form"]     = True
+                ep["verification"] = "HTML form surface detected"
                 return ep
 
             ep["verification"] = "HTTP 200 — content unclassified"
@@ -692,11 +759,12 @@ class EndpointDiscoveryAgent:
 
 
     async def _strategy_common_paths(self, base: str,
+                                      page_html: str = "",
                                       verbose: bool = False) -> List[Dict]:
         if verbose:
             print("    Strategy 3: Common path probing...")
 
-        paths_to_probe = COMMON_PATHS[:self.max_probe_paths]
+        paths_to_probe = self._select_probe_paths(page_html)
         batch_size     = 10
         endpoints: List[Dict] = []
 
@@ -726,6 +794,14 @@ class EndpointDiscoveryAgent:
             if status == 0:
                 return None
 
+            path_lower    = path.lower()
+            content_type  = ""
+            for k, v in (headers or {}).items():
+                if str(k).lower() == "content-type":
+                    content_type = str(v).lower()
+                    break
+            auth_required = status in (401, 403)
+
             if final_url and final_url != url:
                 asked  = (urlsplit(url).path or "/").rstrip("/") or "/"
                 landed = (urlsplit(final_url).path or "/").rstrip("/") or "/"
@@ -734,15 +810,30 @@ class EndpointDiscoveryAgent:
                     landed == asked + "/" or asked == landed + "/"
                 )
                 if not is_slash_redirect and landed != asked:
+                    # Keep only when redirect target or requested path looks like auth/setup.
+                    landed_l = landed.lower()
+                    authish = any(k in landed_l or k in path_lower for k in (
+                        "login", "signin", "sign-in", "auth", "sso",
+                        "account", "setup", "install", "register", "signup",
+                    ))
+                    if authish:
+                        return {
+                            "url":           url,
+                            "method":        "GET",
+                            "source":        "probe",
+                            "status":        status,
+                            "final_url":     final_url,
+                            "interesting":   True,
+                            "auth_required": True,
+                            "auth_endpoint": True,
+                            "params":        [],
+                            "content_type":  content_type,
+                            "verification":  f"Redirects to auth surface {landed}",
+                        }
                     logger.debug(
                         "probe: drop %s — redirected off-path to %s", url, final_url
                     )
                     return None
-
-
-            path_lower    = path.lower()
-            content_type  = headers.get("Content-Type", "").lower()
-            auth_required = status in (401, 403)
 
 
             if path_lower in EXPECTED_200_PATHS and status == 200:
@@ -797,8 +888,10 @@ class EndpointDiscoveryAgent:
 
             if status == 200 and "text/html" in content_type and not is_sensitive:
                 looks_like_endpoint = any(kw in path_lower for kw in (
-                    "admin", "api", "login", "dashboard", "console",
-                    "panel", "manage", "swagger", "debug", "shell", "graphql"
+                    "admin", "api", "login", "signin", "sign-in", "setup",
+                    "install", "register", "signup", "dashboard", "console",
+                    "panel", "manage", "swagger", "debug", "shell", "graphql",
+                    "security", "upload", "vulnerability", ".php",
                 ))
                 if not looks_like_endpoint:
                     return None

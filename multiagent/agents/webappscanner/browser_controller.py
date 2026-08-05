@@ -5,7 +5,7 @@ import json
 import re
 import logging
 from typing import Dict, List, Optional, Set
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +141,15 @@ class BrowserController:
                         }
                     });
 
-                    // Links with query params (for parameter testing)
+                    // All same-origin links (classic SSR apps rarely put params in menus)
+                    const origin = location.origin;
                     const links = document.querySelectorAll('a[href]');
                     links.forEach(link => {
                         const href = link.href || '';
-                        if (href.includes('?')) {
+                        if (!href || href.startsWith('javascript:') || href.startsWith('mailto:')) {
+                            return;
+                        }
+                        if (href.startsWith(origin) || href.startsWith('/')) {
                             result.push({
                                 type: 'link',
                                 href: href,
@@ -193,7 +197,9 @@ class BrowserController:
                     "id":    inp_attrs.get("id",    ""),
                 })
 
-            if action and not action.startswith("http"):
+            if not action:
+                action = base_url  # empty action posts to current page
+            elif not action.startswith("http"):
                 action = urljoin(base_url, action)
 
             elements.append({
@@ -205,9 +211,14 @@ class BrowserController:
                 "inputs": inp_list
             })
 
-        # Links with query params
-        for href in re.findall(r'href=["\']([^"\']+\?[^"\']+)["\']', html, re.I):
+        # All same-host links (not only query-string URLs)
+        base_host = urlsplit(base_url).netloc if base_url else ""
+        for href in re.findall(r'href=["\']([^"\'#]+)["\']', html, re.I):
+            if href.lower().startswith(("javascript:", "mailto:", "data:")):
+                continue
             full = urljoin(base_url, href) if not href.startswith("http") else href
+            if base_host and urlsplit(full).netloc not in ("", base_host):
+                continue
             elements.append({"type": "link", "href": full})
 
         return elements
@@ -337,8 +348,50 @@ Respond with JSON only — no explanation:
                 seen.add(name)
                 unique.append(task)
 
-       
+        # Deterministic fallback when LLM returns nothing — still crawl real surfaces
+        if not unique:
+            unique = self._deterministic_tasks(filtered, target_url)
+
         return unique[:15]
+
+    def _deterministic_tasks(self, elements: List[Dict],
+                              target_url: str) -> List[Dict]:
+        """Product-agnostic crawl tasks from forms/links (no LLM required)."""
+        tasks: List[Dict] = []
+        seen: Set[str] = set()
+
+        def _add(name: str, url: str, description: str):
+            key = (name or "").lower()
+            if not url or key in seen:
+                return
+            seen.add(key)
+            tasks.append({
+                "name": name,
+                "description": description,
+                "url": url,
+            })
+
+        _add("Inspect landing page", target_url,
+             "Extract forms and links from the landing page")
+
+        for el in elements:
+            if el.get("type") == "form":
+                action = el.get("action") or target_url
+                method = (el.get("method") or "get").upper()
+                _add(
+                    f"Submit {method} form {action}",
+                    action,
+                    "Exercise form inputs for injection and auth testing",
+                )
+            elif el.get("type") == "link":
+                href = el.get("href") or ""
+                if not href:
+                    continue
+                text = (el.get("text") or href)[:40]
+                _add(f"Visit {text}", href, "Crawl linked surface for forms and params")
+            if len(tasks) >= 10:
+                break
+        return tasks
 
     # ==================================================================
     # BRIDGE — LLM decision-making

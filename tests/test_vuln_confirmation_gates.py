@@ -64,9 +64,10 @@ class TestXssConfirmationGate:
 
 
 class TestInjectableUrlSeeding:
-    def test_seeds_juice_shop_search(self):
+    def test_seeds_generic_search_when_empty(self):
         urls = synthesize_injectable_urls("http://localhost:3141", [])
-        assert any("/rest/products/search?q=" in u for u in urls)
+        assert any("/search?q=" in u or "/api/search?q=" in u for u in urls)
+        assert not any("/rest/products/" in u for u in urls)
 
     def test_adds_query_to_bare_rest_path(self):
         urls = synthesize_injectable_urls(

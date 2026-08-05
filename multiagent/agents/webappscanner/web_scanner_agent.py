@@ -123,7 +123,7 @@ class WebScannerAgent:
 
         self.fingerprinter  = TechFingerprintAgent(openai_client, llm_model)
         self.cve_pipeline   = CVEVerificationPipeline(nvd_api_key=os.environ.get("NVD_API_KEY", ""))
-        self.endpoint_disco = EndpointDiscoveryAgent(timeout=5, max_probe_paths=50)
+        self.endpoint_disco = EndpointDiscoveryAgent(timeout=5, max_probe_paths=60)
         self.browser        = BrowserController(openai_client, llm_model)
         self.vuln_tester    = VulnerabilityTester(timeout=10)
         self.verifier       = AttackVerificationAgent(openai_client, llm_model)
@@ -257,11 +257,12 @@ class WebScannerAgent:
                    
                     if ep.get("category") != "discovered_protected":
                         all_urls.append(ep["url"])
-            # Promote bare API paths into parametrized URLs for active testing
+            # Promote bare paths into parametrized URLs for active testing
             from .vulnerability_tester import synthesize_injectable_urls
             all_urls.extend(synthesize_injectable_urls(
                 target_url,
                 [ep.get("url", "") for ep in discovered_endpoints if ep.get("url")],
+                page_html=html or "",
             ))
         except Exception as e:
             logger.warning(f"Endpoint discovery failed: {e}")
@@ -415,6 +416,21 @@ class WebScannerAgent:
         if verbose:
             print("Browser Crawl...")
 
+        # Seed surface from the initial page capture BEFORE LLM crawl.
+        # Classic SSR apps expose login/setup forms on the first HTML response;
+        # waiting for task execution alone was starving the tester.
+        for el in elements or []:
+            if el.get("type") == "form":
+                action = el.get("action") or target_url
+                all_forms.append({
+                    "action": action,
+                    "method": el.get("method") or "get",
+                    "inputs": el.get("inputs") or el.get("fields") or [],
+                    "route":  action,
+                })
+            elif el.get("type") == "link" and el.get("href"):
+                all_urls.append(el["href"])
+
         filtered = [e for e in elements if e.get("type") in ("form", "link")]
         tasks    = await self.browser.generate_tasks(
             elements=filtered, page_description="",
@@ -434,8 +450,8 @@ class WebScannerAgent:
             all_urls.extend(result.get("urls", []))
             tasks_executed += 1
 
-        all_urls  = _dedup_urls(all_urls)[:30]
-        all_forms = _dedup_forms(all_forms)[:15]
+        all_urls  = _dedup_urls(all_urls)[:50]
+        all_forms = _dedup_forms(all_forms)[:25]
 
         all_params: Set[str] = set()
         for url in all_urls:
