@@ -1,0 +1,12 @@
+{
+  "target_url": "https://www.librechat.ai/",
+  "scan_complete": true,
+  "authenticated_scan": false,
+  "verified_cves": [],
+  "endpoints_discovered": [
+    {"url": "https://www.librechat.ai/_next/static/chunks/main.js", "status": 200, "interesting": true},
+    {"url": "https://www.librechat.ai/docs/configuration/meilisearch", "status": 200, "interesting": true}
+  ],
+  "not_assessed_endpoints": [],
+  "vulnerabilities": []
+}

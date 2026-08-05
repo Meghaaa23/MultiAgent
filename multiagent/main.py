@@ -823,21 +823,30 @@ async def scan_web_application(request: Request):
         return JSONResponse({
             "target_url":    target_url,
             "scan_complete": True,
+            "scan_scope":    scan_data.get("scan_scope", "blackbox_unauth"),
             "report":        result["report"],
             "scan_summary":  {
                 "tasks_generated":    scan_data.get("tasks_generated", 0),
                 "tasks_executed":     scan_data.get("tasks_executed", 0),
                 "forms_discovered":   scan_data.get("forms_discovered", 0),
                 "urls_discovered":    scan_data.get("urls_discovered", 0),
-                "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
+                "vulnerabilities_found": (
+                    scan_data.get("confirmed_count", 0)
+                    + scan_data.get("potential_count", 0)
+                ),
+                "not_assessed_count": len(scan_data.get("not_assessed_endpoints") or []),
                 "scan_duration":      scan_data.get("scan_duration", 0),
                 # AI backdoor fields
                 "is_ai_powered":      scan_data.get("is_ai_powered", False),
                 "avid_findings":      scan_data.get("avid_findings", 0),
                 "strategic_recs":     scan_data.get("strategic_recommendations", 0),
             },
-            "vulnerabilities": scan_data.get("vulnerabilities", []),
-            "session_id":      session_id,
+            "vulnerabilities":        scan_data.get("vulnerabilities", []),
+            "endpoints_discovered":   scan_data.get("endpoints_discovered", []),
+            "not_assessed_endpoints": scan_data.get("not_assessed_endpoints", []),
+            "stride_threats":         scan_data.get("stride_threats", []),
+            "verified_cves":          scan_data.get("verified_cves") or [],
+            "session_id":             session_id,
         })
 
     except HTTPException:

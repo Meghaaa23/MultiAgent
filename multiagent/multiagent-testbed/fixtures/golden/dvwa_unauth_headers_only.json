@@ -1,0 +1,73 @@
+{
+  "target_url": "http://localhost:3142",
+  "scan_complete": true,
+  "authenticated_scan": false,
+  "report": "Active scan of `http://localhost:3142` completed in 169s [Black-box unauthenticated]. Identified 3 confirmed...",
+  "verified_cves": [],
+  "endpoints_discovered": [
+    {"url": "http://localhost:3142/index.php", "status": 200, "redirects_to_auth": true, "interesting": true},
+    {"url": "http://localhost:3142/login.php", "status": 200, "interesting": true},
+    {"url": "http://localhost:3142/logout.php", "status": 200, "redirects_to_auth": true},
+    {"url": "http://localhost:3142/phpinfo.php", "status": 200, "redirects_to_auth": true},
+    {"url": "http://localhost:3142/security.php", "status": 200, "redirects_to_auth": true},
+    {"url": "http://localhost:3142/setup.php", "status": 200, "interesting": true}
+  ],
+  "not_assessed_endpoints": [
+    {"url": "http://localhost:3142/index.php", "reason": "auth_required", "status": 200},
+    {"url": "http://localhost:3142/logout.php", "reason": "auth_required", "status": 200},
+    {"url": "http://localhost:3142/phpinfo.php", "reason": "auth_required", "status": 200},
+    {"url": "http://localhost:3142/security.php", "reason": "auth_required", "status": 200}
+  ],
+  "vulnerabilities": [
+    {
+      "type": "Missing Security Header: X-Content-Type-Options",
+      "severity": "Low",
+      "status": "Confirmed",
+      "location": "http://localhost:3142",
+      "confidence": "High",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "confidence": "High",
+        "verified": true,
+        "request": "GET http://localhost:3142"
+      }
+    },
+    {
+      "type": "Missing Security Header: Content-Security-Policy",
+      "severity": "Medium",
+      "status": "Confirmed",
+      "location": "http://localhost:3142",
+      "confidence": "High",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "confidence": "High",
+        "verified": true,
+        "request": "GET http://localhost:3142"
+      }
+    },
+    {
+      "type": "Information Disclosure: server header",
+      "severity": "Low",
+      "status": "Confirmed",
+      "location": "http://localhost:3142",
+      "confidence": "High",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "response_headers": {"Server": "Apache/2.4.25 (Debian)"},
+        "confidence": "High",
+        "verified": true,
+        "request": "GET http://localhost:3142"
+      }
+    }
+  ],
+  "stride_threats": [
+    {
+      "threat": "Clickjacking",
+      "confirmed": true,
+      "evidence": "X-Frame-Options and CSP frame-ancestors absent"
+    }
+  ]
+}

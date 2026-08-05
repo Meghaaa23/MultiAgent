@@ -13,6 +13,25 @@
 | `restore.sh` | Restore a saved snapshot between test runs |
 | `targets.json` | Machine-readable manifest — feed to your multiagent scanner |
 | `test_harness.py` | Python runner: iterate over targets, collect results, write reports |
+| `ground_truth/` | Per-target labels: expected findings + **must_not_report** |
+| `fixtures/golden/` | Scan JSONs that must PASS regression |
+| `fixtures/negative/` | Known FP scans that must FAIL regression |
+| `regression_eval.py` | Precision-first TP/FP/FN harness (offline + live) |
+
+### Regression harness (run after every commit)
+
+```bash
+cd multiagent-testbed
+# Golden corpus must pass
+python3 regression_eval.py --fixtures-dir fixtures/golden --strict
+# Negative FP corpus must fail (proves must_not_report still bites)
+python3 regression_eval.py --fixtures-dir fixtures/negative --expect-fail
+# Or via pytest
+PYTHONPATH=../..:.. pytest ../../tests/test_regression_harness.py -q
+```
+
+Operating point: **precision-first, black-box unauthenticated**. Auth-gated
+surfaces are `not_assessed`, not false negatives. See `ground_truth/SCHEMA.md`.
 
 ---
 

@@ -708,16 +708,24 @@ class WebScannerAgent:
             print(f"{'='*70}\n")
 
         report_endpoints = []
+        not_assessed_endpoints: List[Dict] = []
         for ep in discovered_endpoints:
-            if ep.get("access_controlled"):
-          
+            if ep.get("access_controlled") or ep.get("auth_required") or ep.get(
+                "redirects_to_auth"
+            ):
                 report_ep = dict(ep)
-                report_ep["category"]   = "discovered_protected"
-                report_ep["note"]       = (
+                report_ep["category"] = "discovered_protected"
+                report_ep["note"] = (
                     f"HTTP {ep.get('status')} — path exists but is access-controlled. "
                     "Recon only, not an exposure."
                 )
                 report_endpoints.append(report_ep)
+                not_assessed_endpoints.append({
+                    "url": ep.get("url") or "",
+                    "reason": "auth_required",
+                    "status": ep.get("status"),
+                    "assessment": "not_assessed",
+                })
             elif ep.get("interesting"):
                 report_endpoints.append(ep)
 
@@ -729,6 +737,7 @@ class WebScannerAgent:
             "verified_cves":          verified_cves,
             "nvd_section_visible":    not is_ai_powered,
             "endpoints_discovered":   report_endpoints,
+            "not_assessed_endpoints": not_assessed_endpoints,
             "vulnerabilities":        all_findings,
             "stride_threats":         stride_threats,
             "confirmed_count":        sum(1 for f in all_findings if f.get("status") == "Confirmed"),
@@ -738,6 +747,7 @@ class WebScannerAgent:
             "forms_discovered":       len(all_forms),
             "urls_discovered":        len(all_urls),
             "scan_duration":          round(duration, 1),
+            "scan_scope":             "blackbox_unauth",
             "timestamp":              datetime.now().isoformat(),
             "is_ai_powered":          is_ai_powered,
             "ai_fingerprint":         ai_fingerprint,
