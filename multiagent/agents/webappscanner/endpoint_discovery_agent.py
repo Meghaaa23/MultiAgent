@@ -124,11 +124,12 @@ SENSITIVE_COMMON_PATHS = [
 # Backward-compatible flat list (SSR first so the probe budget hits classic apps)
 COMMON_PATHS = SSR_COMMON_PATHS + API_COMMON_PATHS + SENSITIVE_COMMON_PATHS
 
-# Patterns to find API endpoints in JS source
+# Patterns to find API endpoints in JS source (allow ?query for injectables)
 JS_ENDPOINT_PATTERNS = [
-    r'["\'](/api/[^"\'?\s]{2,80})["\']',
-    r'["\'](/rest/[^"\'?\s]{2,80})["\']',
-    r'["\'](/v\d+/[^"\'?\s]{2,80})["\']',
+    r'["\'](/(?:api|rest|v\d+)/[^"\'\s]{2,120})["\']',
+    r'["\'](/api/[^"\'\s]{2,100})["\']',
+    r'["\'](/rest/[^"\'\s]{2,100})["\']',
+    r'["\'](/v\d+/[^"\'\s]{2,100})["\']',
     r'fetch\(["\']([^"\']+)["\']',
     r'axios\.[a-z]+\(["\']([^"\']+)["\']',
     r'\.get\(["\']([^"\']+)["\']',
@@ -265,12 +266,13 @@ class EndpointDiscoveryAgent:
                     ordered.append(p)
 
         _extend(html_paths)
-        if php_signal and not api_signal:
-            _extend(SSR_COMMON_PATHS)
-            _extend(API_COMMON_PATHS[:12])
-        elif api_signal and not php_signal:
+        # Soft-404 / SPA catch-all: reserve probe budget for API family first
+        if getattr(self, "_soft_mode", False) or (api_signal and not php_signal):
             _extend(API_COMMON_PATHS)
             _extend(SSR_COMMON_PATHS[:12])
+        elif php_signal and not api_signal:
+            _extend(SSR_COMMON_PATHS)
+            _extend(API_COMMON_PATHS[:12])
         else:
             # Mixed / unknown — interleave so classic apps aren't starved
             _extend(SSR_COMMON_PATHS)
@@ -700,30 +702,48 @@ class EndpointDiscoveryAgent:
             for match in re.finditer(pat, page_html):
                 js_urls.add(urljoin(base, match.group(0)))
 
-        fetch_tasks = [self._fetch_text(url) for url in list(js_urls)[:8]]
+        # Prefer main/runtime/vendor bundles (SPA API strings live there)
+        def _js_priority(u: str) -> int:
+            ul = u.lower()
+            score = 0
+            for kw, w in (
+                ("main", 5), ("runtime", 4), ("vendor", 3), ("polyfill", 2),
+                ("chunk", 1), ("app.", 3), ("bundle", 2),
+            ):
+                if kw in ul:
+                    score += w
+            return -score  # lower sort key = higher priority
+
+        js_list = sorted(js_urls, key=_js_priority)[:16]
+        fetch_tasks = [self._fetch_text(url) for url in js_list]
         js_bodies   = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
         all_sources  = list(js_bodies) + inline_scripts
-        seen_paths: Set[str] = set()
+        seen_keys: Set[str] = set()
 
         for source in all_sources:
             if not isinstance(source, str) or not source:
                 continue
             for pattern in JS_ENDPOINT_PATTERNS:
                 for match in re.finditer(pattern, source):
-                    path = match.group(1).strip()
-                    if not path or path in seen_paths:
+                    raw = match.group(1).strip()
+                    if not raw:
                         continue
-                    if not (path.startswith("/") or path.startswith("http")):
+                    if not (raw.startswith("/") or raw.startswith("http")):
                         continue
-                    if path.startswith("http"):
-                        try:
-                            parsed_path = urllib.parse.urlparse(path)
+                    query = ""
+                    path = raw
+                    try:
+                        parsed_path = urllib.parse.urlparse(
+                            raw if raw.startswith("http") else f"http://x{raw}"
+                        )
+                        if raw.startswith("http"):
                             if parsed_path.netloc and parsed_path.netloc not in base:
                                 continue
-                            path = parsed_path.path
-                        except Exception:
-                            continue
+                        path = parsed_path.path or ""
+                        query = parsed_path.query or ""
+                    except Exception:
+                        continue
                     if re.search(
                         r'\.(png|jpg|gif|css|woff|woff2|svg|ico|map|ttf|eot)$',
                         path, re.I
@@ -731,8 +751,26 @@ class EndpointDiscoveryAgent:
                         continue
                     if len(path) < 3 or path in ("/", "//"):
                         continue
-                    seen_paths.add(path)
-                    full_url = urljoin(base, path)
+                    # Keep API-ish paths; drop random relative assets
+                    pl = path.lower()
+                    if not any(
+                        pl.startswith(p) for p in (
+                            "/api/", "/rest/", "/v1/", "/v2/", "/v3/", "/graphql"
+                        )
+                    ) and not any(
+                        k in pl for k in ("/api", "/rest", "login", "search", "config")
+                    ):
+                        # Still allow fetch("/something") when clearly API-shaped
+                        if not re.search(r"/(api|rest|graphql)/", pl):
+                            continue
+                    key = f"{path}?{query}" if query else path
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    params = []
+                    if query:
+                        params = list(urllib.parse.parse_qs(query).keys())
+                    full_url = urljoin(base, path + (f"?{query}" if query else ""))
                     endpoints.append({
                         "url":          full_url,
                         "method":       "GET",
@@ -741,12 +779,13 @@ class EndpointDiscoveryAgent:
                         "final_url":    full_url,
                         "interesting":  True,
                         "auth_required":False,
-                        "params":       []
+                        "params":       params,
                     })
 
         if verbose:
             print(f"     ✓ JS extraction: {len(endpoints)} endpoints "
-                  f"(from {len(js_urls)} JS files + {len(inline_scripts)} inline blocks)")
+                  f"(from {len(js_list)}/{len(js_urls)} JS files + "
+                  f"{len(inline_scripts)} inline blocks)")
         return endpoints
 
     def _extract_js_urls(self, base: str, html: str) -> Set[str]:
@@ -880,14 +919,35 @@ class EndpointDiscoveryAgent:
                     "is_sensitive": is_sensitive,
                 }
 
-            # SPA catch-all gate: do not trust status 200 alone
+            # SPA catch-all gate: do not trust status 200 alone.
+            # For /api|/rest paths, retry with Accept: application/json and
+            # optional ?q=test so JSON APIs aren't dropped as HTML shells.
             if status == 200 and self._soft_mode:
                 body = await self._fetch_text(url) or ""
                 if self._matches_spa_shell(body, content_type):
-                    logger.debug(
-                        "probe: drop %s — SPA/soft-404 shell match (status 200)", url
+                    api_ish = any(
+                        k in path_lower for k in ("/api", "/rest", "/graphql")
                     )
-                    return None
+                    rescued = None
+                    if api_ish:
+                        for try_url in (
+                            url,
+                            (url + ("&" if "?" in url else "?") + "q=test"),
+                        ):
+                            rescued = await self._fetch_text_accept_json(try_url)
+                            if rescued and not self._matches_spa_shell(
+                                rescued, "application/json"
+                            ):
+                                body = rescued
+                                content_type = "application/json"
+                                url = try_url
+                                break
+                            rescued = None
+                    if rescued is None and self._matches_spa_shell(body, content_type):
+                        logger.debug(
+                            "probe: drop %s — SPA/soft-404 shell match (status 200)", url
+                        )
+                        return None
                 # Persist body fingerprint hint for verify stage
                 content_type = content_type or (
                     "application/json" if body.lstrip()[:1] in "{[" else content_type
@@ -895,10 +955,10 @@ class EndpointDiscoveryAgent:
 
             if status == 200 and "text/html" in content_type and not is_sensitive:
                 looks_like_endpoint = any(kw in path_lower for kw in (
-                    "admin", "api", "login", "signin", "sign-in", "setup",
+                    "admin", "api", "rest", "login", "signin", "sign-in", "setup",
                     "install", "register", "signup", "dashboard", "console",
                     "panel", "manage", "swagger", "debug", "shell", "graphql",
-                    "security", "upload", "vulnerability", ".php",
+                    "security", "upload", "vulnerability", "search", ".php",
                 ))
                 if not looks_like_endpoint:
                     return None
@@ -929,13 +989,23 @@ class EndpointDiscoveryAgent:
         except Exception:
             return None
 
-    def _sync_get_text(self, url: str, max_bytes: int = 500_000) -> Optional[str]:
+    async def _fetch_text_accept_json(self, url: str) -> Optional[str]:
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(
+                None, lambda: self._sync_get_text(url, accept="application/json")
+            )
+        except Exception:
+            return None
+
+    def _sync_get_text(self, url: str, max_bytes: int = 500_000,
+                       accept: str = "*/*") -> Optional[str]:
         try:
             req = urllib.request.Request(
                 url,
                 headers={
                     "User-Agent": "Mozilla/5.0 (SecurityScanner)",
-                    "Accept":     "*/*"
+                    "Accept":     accept,
                 }
             )
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:

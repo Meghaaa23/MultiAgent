@@ -589,6 +589,22 @@ class AttackVerificationAgent:
                 return name == "token" or any(kw in name for kw in csrf_keywords)
 
             if not any(_has_csrf(inp) for inp in inputs) and form.get("method", "get").lower() == "post":
+                # Align with VulnerabilityTester CSRF honesty gates
+                try:
+                    from .vulnerability_tester import (
+                        _csrf_finding_should_skip, _form_inputs,
+                    )
+                    norm_inputs = _form_inputs(form) if inputs else []
+                    if _csrf_finding_should_skip(form, norm_inputs or [
+                        i if isinstance(i, dict) else {"name": str(i)}
+                        for i in inputs
+                    ]):
+                        continue
+                except Exception:
+                    # Fallback: skip obvious login forms
+                    action_l = (action or "").lower()
+                    if any(k in action_l for k in ("/login", "/signin", "/register")):
+                        continue
                 findings.append(Finding(
                     vuln_type   = "Missing CSRF Protection",
                     severity    = "Medium",
@@ -651,18 +667,24 @@ class AttackVerificationAgent:
             except Exception:
                 return {"acao": "", "acac": "", "acam": "", "acah": "", "status": 0, "url": probe_url}
 
-        def _reflects_evil(acao: str) -> bool:
-            return bool(acao) and (evil_orig in acao or acao.strip() == "*")
+        def _is_wildcard(acao: str) -> bool:
+            return (acao or "").strip() == "*"
+
+        def _reflects_origin(acao: str) -> bool:
+            return bool(acao) and evil_orig in acao
 
         def _credentials_true(acac: str) -> bool:
-            return acac.strip().lower() == "true"
+            return (acac or "").strip().lower() == "true"
 
         try:
             base_result        = await loop.run_in_executor(None, lambda: _probe(base))
             acao               = base_result["acao"]
             acac               = base_result["acac"]
             preflight_result   = await loop.run_in_executor(None, lambda: _probe(base, method="OPTIONS"))
-            preflight_reflects = _reflects_evil(preflight_result["acao"])
+            preflight_reflects = (
+                _reflects_origin(preflight_result["acao"])
+                or _is_wildcard(preflight_result["acao"])
+            )
 
             api_probes = await asyncio.gather(
                 *[loop.run_in_executor(None, lambda p=path: _probe(base + p)) for path in api_paths],
@@ -671,17 +693,22 @@ class AttackVerificationAgent:
             api_hits = [
                 r for r in api_probes
                 if isinstance(r, dict) and r.get("status", 0) not in (0, 404)
-                and _reflects_evil(r.get("acao", ""))
+                and (
+                    _reflects_origin(r.get("acao", ""))
+                    or _is_wildcard(r.get("acao", ""))
+                )
+            ]
+            # Prefer reflected-origin API hits over bare * for severity
+            api_reflected = [
+                r for r in api_hits if _reflects_origin(r.get("acao", ""))
             ]
 
-            reflects_base = _reflects_evil(acao)
+            reflects_base = _reflects_origin(acao)
+            star_base     = _is_wildcard(acao)
             creds_true    = _credentials_true(acac)
             api_creds     = any(_credentials_true(r.get("acac", "")) for r in api_hits)
 
-            if not reflects_base and not api_hits:
-                return findings
-
-            if acao.strip() == "*" and not creds_true and not api_hits and not preflight_reflects:
+            if not reflects_base and not star_base and not api_hits:
                 return findings
 
             if creds_true or api_creds:
@@ -690,22 +717,26 @@ class AttackVerificationAgent:
                               "An attacker can make authenticated cross-origin requests from any domain.")
                 status     = VulnStatus.CONFIRMED
                 confidence = Confidence.HIGH
-            elif api_hits:
+            elif api_reflected or reflects_base:
                 severity   = "Medium"
-                impact     = (f"Server reflects attacker origin on {len(api_hits)} API endpoint(s). "
-                              "Enables cross-origin API probing.")
+                impact     = (
+                    "Attacker-controlled origin reflected"
+                    + (f" on {len(api_reflected)} API endpoint(s)" if api_reflected else "")
+                    + ". Anonymous cross-origin reads possible (no credentials)."
+                )
                 status     = VulnStatus.CONFIRMED
                 confidence = Confidence.HIGH
-            elif reflects_base and preflight_reflects:
-                severity   = "Medium"
-                impact     = "Server reflects attacker-controlled origin on main page and preflight requests."
-                status     = VulnStatus.CONFIRMED
-                confidence = Confidence.MEDIUM
-            else:
+            elif star_base or any(_is_wildcard(r.get("acao", "")) for r in api_hits):
+                # Bare ACAO=* without credentials — Low, still Confirmed as header fact
                 severity   = "Low"
-                impact     = "Server reflects attacker-controlled origin on homepage only. Low exploitability."
-                status     = VulnStatus.POTENTIAL
-                confidence = Confidence.MEDIUM
+                impact     = (
+                    "Wildcard ACAO (*) without credentials — public responses "
+                    "readable cross-origin; cookie theft not enabled."
+                )
+                status     = VulnStatus.CONFIRMED
+                confidence = Confidence.HIGH
+            else:
+                return findings
 
             evidence_lines = [f"GET {base} (Origin: {evil_orig})"]
             for r in api_hits[:3]:
@@ -722,9 +753,9 @@ class AttackVerificationAgent:
                 status      = status,
                 location    = base,
                 description = (
-                    f"Server reflects attacker-controlled Origin (ACAO: {acao})"
+                    f"Server CORS ACAO={acao or '(empty)'}"
                     + (" with credentials=true" if creds_true else "")
-                    + (f". Also reflected on {len(api_hits)} API endpoint(s)." if api_hits else ".")
+                    + (f". Also on {len(api_hits)} API endpoint(s)." if api_hits else ".")
                 ),
                 impact      = impact,
                 remediation = ("Restrict Access-Control-Allow-Origin to an explicit allowlist of trusted origins. "

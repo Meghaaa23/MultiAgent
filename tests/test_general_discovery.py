@@ -3,6 +3,7 @@ Product-agnostic discovery / injectable seeding — no app-brand hardcoding.
 """
 import sys
 import os
+import asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from multiagent.agents.webappscanner.endpoint_discovery_agent import (
@@ -92,11 +93,50 @@ class TestInjectableUrlSeedingGeneral:
         )
         assert any(u.endswith("/rest/products/search?q=test") for u in urls)
 
+    def test_auth_gated_api_stub_expands_search_children(self):
+        """Thin SPA surface (/api/users 401) must still seed search injectables."""
+        urls = synthesize_injectable_urls(
+            "http://localhost:3141",
+            ["http://localhost:3141/api/users"],
+        )
+        assert any("/api/search?q=" in u for u in urls)
+        assert any("/api/users/search?q=" in u for u in urls)
+
+    def test_rest_collection_expands_search_child(self):
+        urls = synthesize_injectable_urls(
+            "http://localhost:3141",
+            ["http://localhost:3141/rest/products"],
+        )
+        assert any(u.endswith("/rest/products/search?q=test") for u in urls)
+        assert any("/rest/search?q=" in u for u in urls)
+
     def test_generic_templates_constant_has_no_brand_paths(self):
         for path, _ in GENERIC_INJECTABLE_TEMPLATES:
             assert "product" not in path.lower()
             assert "challenge" not in path.lower()
             assert "juice" not in path.lower()
+
+
+class TestJsExtractionKeepsApiPaths:
+    def test_inline_script_api_paths_extracted(self):
+        agent = EndpointDiscoveryAgent(max_probe_paths=40)
+        html = '''
+        <html><script>
+          fetch("/rest/products/search?q=apple");
+          axios.get("/rest/admin/application-configuration");
+          const u = "/api/Users";
+        </script></html>
+        '''
+
+        async def run():
+            return await agent._strategy_js_extraction(
+                "http://localhost:3141", html, verbose=False
+            )
+
+        eps = asyncio.run(run())
+        urls = [e["url"] for e in eps]
+        assert any("/rest/products/search" in u for u in urls)
+        assert any("application-configuration" in u for u in urls)
 
 
 class TestBrowserCrawlGeneral:

@@ -539,14 +539,26 @@ def _build_section_4(potential_vulns):
         if key in seen:
             continue
         seen.add(key)
-        ev      = v.get("evidence", {})
-        method  = ev.get("confirmation_method", "code analysis")
+        ev = v.get("evidence") or {}
+        if not isinstance(ev, dict):
+            ev = {}
+        method = ev.get("confirmation_method", "code analysis")
         snippet = ev.get("response_body_snippet", "")
+        # Potentials stay unconfirmed; still report stored confidence honestly
+        # (do not hardcode LOW — that hid Medium CSRF/etc.).
+        raw_conf = str(
+            v.get("confidence") or ev.get("confidence") or "Medium"
+        ).strip().lower()
+        conf_label = {
+            "high":   "MEDIUM-HIGH (strong indicators — manual verification required)",
+            "medium": "MEDIUM (unconfirmed — manual verification required)",
+            "low":    "LOW (weak indicators — manual verification required)",
+        }.get(raw_conf, "MEDIUM (unconfirmed — manual verification required)")
         lines += [
             "",
             f" [{i}] {v.get('type','?')}",
             f"- Severity: {v.get('severity','Low')} | "
-            f"Confidence: LOW (unconfirmed — manual verification required)",
+            f"Confidence: {conf_label}",
             f"- Location: {v.get('location','?')}",
             f"- Why Potential: Requires manual confirmation — {v.get('details','')}",
             f"- Detection Method: {method}",

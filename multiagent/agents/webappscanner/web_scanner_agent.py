@@ -64,10 +64,15 @@ def _validate_stack(stack, response_headers, body):
 
 def _build_evidence_gated_stride(target_url, response_headers,
                                   discovered_params, discovered_forms,
-                                  cors_misconfigured, stack,
+                                  cors_mode, stack,
                                   headers_capture_failed: bool = False) -> List[Dict]:
+    """
+    cors_mode: None | "wildcard" | "reflected" | "credentialed"
+    Only reflected/credentialed CORS enter publisher STRIDE; bare ACAO=*
+    without credentials is Low and omitted (honesty — not cookie theft).
+    """
     threats = []
-    hdrs    = {k.lower(): v for k, v in response_headers.items()}
+    hdrs    = {k.lower(): v for k, v in (response_headers or {}).items()}
     xfo     = hdrs.get("x-frame-options", "")
     csp     = hdrs.get("content-security-policy", "")
 
@@ -95,16 +100,27 @@ def _build_evidence_gated_stride(target_url, response_headers,
             "confirmed":  False,
         })
 
-    if cors_misconfigured:
+    if cors_mode == "credentialed":
         threats.append({
             "category":   "Information Disclosure",
             "threat":     "CORS Misconfiguration",
-            "evidence":   "ACAO reflects attacker-controlled origin (confirmed)",
+            "evidence":   "ACAO reflects attacker origin with Allow-Credentials: true",
             "likelihood": "High",
             "impact":     "High",
-            "mitigation": "Restrict ACAO to trusted origins; remove wildcard",
+            "mitigation": "Restrict ACAO to trusted origins; never pair * with credentials",
             "confirmed":  True,
         })
+    elif cors_mode == "reflected":
+        threats.append({
+            "category":   "Information Disclosure",
+            "threat":     "CORS Misconfiguration",
+            "evidence":   "ACAO reflects attacker-controlled origin (no credentials)",
+            "likelihood": "Medium",
+            "impact":     "Medium",
+            "mitigation": "Restrict ACAO to trusted origins; remove origin reflection",
+            "confirmed":  True,
+        })
+    # cors_mode == "wildcard" (ACAO=* without ACAC): omit from STRIDE — Low only
 
     def _inputs(form):
         return form.get("inputs") or form.get("fields") or []
@@ -123,7 +139,7 @@ class WebScannerAgent:
 
         self.fingerprinter  = TechFingerprintAgent(openai_client, llm_model)
         self.cve_pipeline   = CVEVerificationPipeline(nvd_api_key=os.environ.get("NVD_API_KEY", ""))
-        self.endpoint_disco = EndpointDiscoveryAgent(timeout=5, max_probe_paths=60)
+        self.endpoint_disco = EndpointDiscoveryAgent(timeout=5, max_probe_paths=90)
         self.browser        = BrowserController(openai_client, llm_model)
         self.vuln_tester    = VulnerabilityTester(timeout=10)
         self.verifier       = AttackVerificationAgent(openai_client, llm_model)
@@ -481,7 +497,20 @@ class WebScannerAgent:
             if spa_forms or spa_urls:
                 all_forms.extend(spa_forms)
                 all_urls.extend(spa_urls)
-                all_urls  = _dedup_urls(all_urls)[:120]
+                # Re-seed injectables from SPA/JS API surfaces (fixes thin SPA FN)
+                from .vulnerability_tester import synthesize_injectable_urls
+                all_urls.extend(synthesize_injectable_urls(
+                    target_url,
+                    list(spa_urls) + [
+                        ep.get("url", "") for ep in discovered_endpoints
+                        if ep.get("url") and (
+                            ep.get("interesting")
+                            or ep.get("source") in ("js_bundle", "spa")
+                        )
+                    ],
+                    page_html=html or "",
+                ))
+                all_urls  = _dedup_urls(all_urls)[:160]
                 all_forms = _dedup_forms(all_forms)[:50]
                 if verbose:
                     print(f"   SPA: {len(spa_forms)} forms, {len(spa_urls)} URLs\n")
@@ -495,13 +524,19 @@ class WebScannerAgent:
             print("Vulnerability Testing...")
         raw_findings: List[Dict] = []
         try:
+            disco_paths = [
+                ep.get("url", "") for ep in discovered_endpoints
+                if ep.get("url") and (
+                    ep.get("interesting")
+                    or ep.get("source") in ("js_bundle", "spa", "manifest")
+                    or ep.get("api_endpoint")
+                )
+            ]
+            disco_paths.extend(u for u in all_urls if "/api/" in u or "/rest/" in u)
             raw_findings = await self.vuln_tester.test_all(
                 forms=all_forms, urls=all_urls, page_html=html,
                 target_url=target_url,
-                discovered_paths=[
-                    ep.get("url", "") for ep in discovered_endpoints
-                    if ep.get("interesting")
-                ],
+                discovered_paths=disco_paths,
                 shared_headers=initial_headers,
                 verbose=verbose,
             )
@@ -517,7 +552,43 @@ class WebScannerAgent:
         if verbose:
             print(" Attack Verification...")
         verified_findings: List[Dict] = []
-        cors_misconfigured = False
+        cors_mode = None  # None | wildcard | reflected | credentialed
+
+        def _cors_mode_from_finding(f: Dict) -> Optional[str]:
+            if "CORS" not in (f.get("type") or "") or f.get("status") != "Confirmed":
+                return None
+            ev = f.get("evidence") or {}
+            headers = ev.get("response_headers") or {}
+            if not isinstance(headers, dict):
+                headers = {}
+            headers_l = {str(k).lower(): str(v or "") for k, v in headers.items()}
+            acao = (
+                str(ev.get("access_control_allow_origin") or "")
+                or headers_l.get("access-control-allow-origin", "")
+            ).strip()
+            acac = (
+                str(ev.get("access_control_allow_credentials") or "")
+                or headers_l.get("access-control-allow-credentials", "")
+            ).strip().lower()
+            creds = acac == "true"
+            if creds and (acao == "*" or "evil" in acao.lower()):
+                return "credentialed"
+            if acao == "*":
+                return "wildcard"
+            if acao and ("evil" in acao.lower() or acao.startswith("http")):
+                return "reflected"
+            # Fall back to severity from finding
+            sev = (f.get("severity") or "").lower()
+            if sev == "high":
+                return "credentialed"
+            if sev == "medium":
+                return "reflected"
+            if sev == "low":
+                return "wildcard"
+            return "reflected"
+
+        _CORS_RANK = {"wildcard": 1, "reflected": 2, "credentialed": 3}
+
         try:
             av_findings = await self.verifier.verify_all(
                 target_url=target_url, candidate_urls=all_urls,
@@ -538,17 +609,24 @@ class WebScannerAgent:
                         d["category"] = "security_header"
                         if d.get("severity") in ("Critical", "High"):
                             d["severity"] = "Medium"
-                    if "CORS" in d.get("type", "") and d.get("status") == "Confirmed":
-                        cors_misconfigured = True
+                    mode = _cors_mode_from_finding(d)
+                    if mode and _CORS_RANK.get(mode, 0) > _CORS_RANK.get(cors_mode or "", 0):
+                        cors_mode = mode
                     verified_findings.append(d)
         except Exception as e:
             logger.error(f"Attack verification failed: {e}")
 
+        # Also consider CORS from active vuln tester (may run before AV)
+        for f in raw_findings:
+            mode = _cors_mode_from_finding(f if isinstance(f, dict) else {})
+            if mode and _CORS_RANK.get(mode, 0) > _CORS_RANK.get(cors_mode or "", 0):
+                cors_mode = mode
+
         stride_threats = []
-        if all_forms or all_params or cors_misconfigured or initial_headers:
+        if all_forms or all_params or cors_mode or initial_headers:
             stride_threats = _build_evidence_gated_stride(
                 target_url, initial_headers, all_params,
-                all_forms, cors_misconfigured, stack,
+                all_forms, cors_mode, stack,
                 headers_capture_failed=headers_capture_failed,
             )
 
