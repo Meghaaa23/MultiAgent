@@ -5,6 +5,7 @@ import openai
 import hashlib
 import logging
 import traceback
+import urllib.parse
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -103,10 +104,48 @@ def _format_confirmed_stack(stack: Dict) -> str:
 
 
 
+def _evidence_has_substance(ev: Dict) -> bool:
+    """
+    True only when the evidence blob contains something a reviewer can verify.
+    Empty / placeholder evidence must never ship as Confirmed/HIGH.
+    """
+    if not isinstance(ev, dict) or not ev:
+        return False
+    method = str(ev.get("confirmation_method") or "").lower()
+    body = (
+        ev.get("response_body_snippet")
+        or ev.get("body_snippet")
+        or ev.get("response_snippet")
+        or ev.get("db_error_snippet")
+        or ""
+    )
+    headers = ev.get("response_headers") or ev.get("headers") or {}
+    if not isinstance(headers, dict):
+        headers = {}
+    header_vals = [str(v).strip() for v in headers.values() if str(v).strip()]
+
+    if method in ("header",):
+        # Header findings need at least one concrete header value OR an
+        # explicit missing-header probe recorded in the request line.
+        if header_vals:
+            return True
+        req = str(ev.get("request") or ev.get("request_line") or "")
+        return bool(req) and ev.get("response_status") not in (None, 0, "")
+
+    if method in ("timing",):
+        return ev.get("timing_delta_seconds") is not None or bool(ev.get("verified"))
+
+    if method in ("pattern", "http_body", "dom_reflection", "js_execution"):
+        return bool(str(body).strip())
+
+    # Unknown method: require body or headers
+    return bool(str(body).strip()) or bool(header_vals)
+
+
 def _is_publishable_confirmed(v: Dict) -> bool:
     """
     Publisher gate: only report Confirmed findings with High confidence
-    and verified evidence. No site/app hardcoding — evidence-driven only.
+    and verified, non-empty evidence. No site/app hardcoding — evidence-driven only.
     """
     if not isinstance(v, dict):
         return False
@@ -114,10 +153,14 @@ def _is_publishable_confirmed(v: Dict) -> bool:
         return False
     conf = str(v.get("confidence") or "").strip().lower()
     ev = v.get("evidence") or {}
+    if not isinstance(ev, dict):
+        ev = {}
     ev_conf = str(ev.get("confidence") or "").strip().lower()
     if conf not in ("high",) and ev_conf not in ("high",):
         return False
     if ev.get("verified") is False:
+        return False
+    if not _evidence_has_substance(ev):
         return False
     loc = str(v.get("location") or "")
     details = str(v.get("details") or v.get("description") or "")
@@ -126,6 +169,26 @@ def _is_publishable_confirmed(v: Dict) -> bool:
     if loc.strip().lower() in ("", "unknown"):
         return False
     return True
+
+
+def _is_private_or_local_host(url: str) -> bool:
+    """True for localhost / RFC1918 / link-local targets — no CDN/WAF excuse."""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if host.endswith(".local") or host.endswith(".internal"):
+        return True
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host)
+        return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+    except ValueError:
+        return False
 
 
 def _is_manual_queue_finding(v: Dict) -> bool:
@@ -225,7 +288,7 @@ def _cves_for_tech(tech_name: str, cves: Optional[List[Dict]]) -> List[Dict]:
     return deduped
 
 
-def _build_section_2(stack, endpoints, cves):
+def _build_section_2(stack, endpoints, cves, target_url: str = ""):
     lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack & Known CVEs"]
 
     technologies = stack.get("technologies") or []
@@ -293,10 +356,18 @@ def _build_section_2(stack, endpoints, cves):
                     lines.append(f"- {val}")
                     added = True
             if not added:
-                lines.append(
-                    "Unknown — target is behind a CDN/WAF that strips "
-                    "identifying headers. See Section 3 for detected headers."
-                )
+                if _is_private_or_local_host(target_url or ""):
+                    lines.append(
+                        "Unidentified — no Server/X-Powered-By (or equivalent) "
+                        "headers confirmed on this local/private target. "
+                        "See Section 3 for detected headers and route evidence."
+                    )
+                else:
+                    lines.append(
+                        "Unidentified — no confirming Server/X-Powered-By (or "
+                        "equivalent) headers observed. See Section 3 for "
+                        "detected headers."
+                    )
 
     if cves:
         orphaned = [
@@ -368,8 +439,8 @@ _CONFIDENCE_LABEL = {
     "js_execution":   "HIGH  (JavaScript executed)",
     "timing":         "HIGH  (timing-confirmed)",
     "dom_reflection": "HIGH  (DOM reflection confirmed)",
-    "http_body":      "MEDIUM (HTTP body reflection)",
-    "pattern":        "MEDIUM (error pattern match)",
+    "http_body":      "HIGH  (HTTP body evidence)",
+    "pattern":        "HIGH  (error pattern in response body)",
     "header":         "HIGH  (direct header inspection)",
 }
 
@@ -385,16 +456,30 @@ def _build_section_3(confirmed_vulns):
         if key in seen:
             continue
         seen.add(key)
-        ev     = v.get("evidence", {})
+        ev     = v.get("evidence", {}) or {}
         method = ev.get("confirmation_method", "http_body")
-        conf   = _CONFIDENCE_LABEL.get(method, "MEDIUM (code confirmed)")
+        # Only emit HIGH labels when evidence blob is substantive
+        if _evidence_has_substance(ev):
+            conf = _CONFIDENCE_LABEL.get(method, "HIGH  (verified evidence)")
+        else:
+            conf = "LOW   (insufficient evidence — should not publish)"
+        body_snip = (
+            ev.get("response_body_snippet")
+            or ev.get("db_error_snippet")
+            or ""
+        )
+        evid_line = (
+            f"`{ev.get('request','?')}` "
+            f"(HTTP {ev.get('response_status','?')}, confirmed by {method})"
+        )
+        if body_snip:
+            evid_line += f"\n- Body evidence: `{str(body_snip)[:180]}`"
         lines += [
             "",
             f"Severity: {v.get('severity','?')} | {v.get('type','?')}",
             f"- Confidence: {conf}",
             f"- Location: `{v.get('location','?')}`",
-            f"- Evidence: `{ev.get('request','?')}` "
-            f"(HTTP {ev.get('response_status','?')}, confirmed by {method})",
+            f"- Evidence: {evid_line}",
             f"- Impact: {v.get('impact','')}",
             f"- Fix: {v.get('remediation','')}",
             f"- CWE: {v.get('cwe','')}",
@@ -1365,7 +1450,12 @@ Answer:"""
         action_results = action_agent.process_all(confirmed_vulns, target_url, stack)
 
         section_1   = _build_section_1(confirmed_vulns, potential_vulns, target_url or "", scan_results) or ""
-        section_2   = _build_section_2(stack, (scan_results or {}).get("endpoints_discovered", []), cves) or ""
+        section_2   = _build_section_2(
+            stack,
+            (scan_results or {}).get("endpoints_discovered", []),
+            cves,
+            target_url=target_url or "",
+        ) or ""
         section_3   = _build_section_3(confirmed_vulns)                  or ""
         section_3b  = render_section_3b(action_results)                  or ""
         section_4   = _build_section_4(potential_vulns)                  or ""

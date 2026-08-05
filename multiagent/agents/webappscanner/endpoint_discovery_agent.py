@@ -171,6 +171,7 @@ class EndpointDiscoveryAgent:
         self.max_probe_paths  = max_probe_paths
         self._soft_mode:          bool       = False
         self._soft404_lengths:    List[int]  = []
+        self._soft404_bodies:     List[str]  = []
 
   
     # Soft-404 calibration
@@ -182,6 +183,7 @@ class EndpointDiscoveryAgent:
         ]
         hits = 0
         self._soft404_lengths = []
+        self._soft404_bodies = []
 
         for p in rand_paths:
             url = f"{base}{p}"
@@ -199,6 +201,8 @@ class EndpointDiscoveryAgent:
                         hits += 1
                         body = await self._fetch_text(url) or ""
                         self._soft404_lengths.append(len(body))
+                        if body:
+                            self._soft404_bodies.append(body)
                     else:
                         
                         hits += 1
@@ -209,8 +213,45 @@ class EndpointDiscoveryAgent:
         if self._soft_mode:
             logger.info(
                 "EndpointDiscovery: soft-404/catch-all site detected "
-                "(baseline body lengths: %s)", self._soft404_lengths
+                "(baseline body lengths: %s, bodies=%d)",
+                self._soft404_lengths, len(self._soft404_bodies),
             )
+
+    def _matches_spa_shell(self, body: str, content_type: str = "") -> bool:
+        """True when response is the SPA catch-all shell (not a real endpoint)."""
+        if not self._soft_mode or not body:
+            return False
+        ct = (content_type or "").lower()
+        stripped = body.lstrip()
+        # Real JSON/API bodies are never the Angular/HTML shell
+        if "json" in ct or stripped.startswith(("{", "[")):
+            return False
+        try:
+            from .vulnerability_tester import (
+                _same_document_shell, _normalize_body_fingerprint,
+            )
+        except Exception:
+            from multiagent.agents.webappscanner.vulnerability_tester import (  # type: ignore
+                _same_document_shell, _normalize_body_fingerprint,
+            )
+        for baseline in self._soft404_bodies:
+            # Real SPA shells are large; also accept exact normalized equality
+            # for smaller catch-all templates (min_len relaxed to 80).
+            if _same_document_shell(body, baseline, min_len=80):
+                return True
+            nb = _normalize_body_fingerprint(body)
+            nbase = _normalize_body_fingerprint(baseline)
+            if nb and nbase and nb == nbase:
+                return True
+        # Length prefilter when bodies weren't stored but lengths were
+        if self._soft404_lengths and not self._soft404_bodies:
+            blen = len(body)
+            for bl in self._soft404_lengths:
+                if bl > 200 and abs(blen - bl) <= max(80, int(bl * 0.05)):
+                    # HTML-ish and same size as bogus path → treat as shell
+                    if "<html" in body.lower() or "<!doctype" in body.lower():
+                        return True
+        return False
 
 
     async def discover(self, target_url: str,
@@ -301,7 +342,13 @@ class EndpointDiscoveryAgent:
         if status == 200:
             body       = await self._fetch_text(url) or ""
             body_lower = body.lower()
+            ctype      = (ep.get("content_type") or "").lower()
 
+            # Drop SPA catch-all shells before keyword heuristics
+            if self._matches_spa_shell(body, ctype):
+                ep["interesting"]  = False
+                ep["verification"] = "SPA/soft-404 shell — not a real endpoint"
+                return ep
 
             sensitive_content_patterns = [
                 ("DB_PASSWORD",   "env_file_exposed"),
@@ -319,27 +366,7 @@ class EndpointDiscoveryAgent:
                     ep["severity"]         = "Critical"
                     return ep
 
-            # Login / auth form
-            if any(kw in body_lower for kw in (
-                'type="password"', "type='password'",
-                "login", "sign in", "signin", "authenticate"
-            )):
-                ep["interesting"]   = True
-                ep["auth_endpoint"] = True
-                ep["verification"]  = "Login form detected"
-                return ep
-
-            # Admin panel
-            if any(kw in body_lower for kw in (
-                "admin", "dashboard", "control panel",
-                "management console", "administrator"
-            )):
-                ep["interesting"]  = True
-                ep["admin_panel"]  = True
-                ep["verification"] = "Admin panel indicators detected"
-                return ep
-
-            # JSON API response
+            # JSON API response (real surface — keep)
             stripped = body.strip()
             if stripped.startswith(("{", "[")):
                 try:
@@ -352,6 +379,26 @@ class EndpointDiscoveryAgent:
                 except Exception:
                     pass
 
+            # Login / auth form (HTML only — never on SPA shell, already gated)
+            if any(kw in body_lower for kw in (
+                'type="password"', "type='password'",
+                "login", "sign in", "signin", "authenticate"
+            )):
+                ep["interesting"]   = True
+                ep["auth_endpoint"] = True
+                ep["verification"]  = "Login form detected"
+                return ep
+
+            # Admin panel indicators in HTML
+            if any(kw in body_lower for kw in (
+                "admin", "dashboard", "control panel",
+                "management console", "administrator"
+            )):
+                ep["interesting"]  = True
+                ep["admin_panel"]  = True
+                ep["verification"] = "Admin panel indicators detected"
+                return ep
+
             # Directory listing
             if "index of /" in body_lower or "<title>directory listing" in body_lower:
                 ep["interesting"]       = True
@@ -360,7 +407,12 @@ class EndpointDiscoveryAgent:
                 ep["severity"]          = "Medium"
                 return ep
 
-          
+            # Unclassified HTML 200 on soft-404 sites is not interesting
+            if self._soft_mode and ("html" in ctype or "<html" in body_lower):
+                ep["interesting"]  = False
+                ep["verification"] = "HTTP 200 HTML unclassified on catch-all site — dropped"
+                return ep
+
             ep["verification"] = "HTTP 200 — content unclassified"
             return ep
 
@@ -714,6 +766,34 @@ class EndpointDiscoveryAgent:
 
             if not is_interesting:
                 return None
+
+            # Auth challenges prove the route exists without needing body compare
+            if status in (401, 405):
+                return {
+                    "url":          url,
+                    "method":       "GET",
+                    "source":       "probe",
+                    "status":       status,
+                    "final_url":    final_url or url,
+                    "interesting":  True,
+                    "auth_required": auth_required,
+                    "params":       [],
+                    "content_type": content_type,
+                    "is_sensitive": is_sensitive,
+                }
+
+            # SPA catch-all gate: do not trust status 200 alone
+            if status == 200 and self._soft_mode:
+                body = await self._fetch_text(url) or ""
+                if self._matches_spa_shell(body, content_type):
+                    logger.debug(
+                        "probe: drop %s — SPA/soft-404 shell match (status 200)", url
+                    )
+                    return None
+                # Persist body fingerprint hint for verify stage
+                content_type = content_type or (
+                    "application/json" if body.lstrip()[:1] in "{[" else content_type
+                )
 
             if status == 200 and "text/html" in content_type and not is_sensitive:
                 looks_like_endpoint = any(kw in path_lower for kw in (
