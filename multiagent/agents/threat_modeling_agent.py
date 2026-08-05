@@ -146,6 +146,9 @@ def _is_publishable_confirmed(v: Dict) -> bool:
     """
     Publisher gate: only report Confirmed findings with High confidence
     and verified, non-empty evidence. No site/app hardcoding — evidence-driven only.
+
+    XSS Confirmed requires js_execution proof; HTTP/DOM reflection alone is
+    demoted to the Potential queue (general rule — not app-specific).
     """
     if not isinstance(v, dict):
         return False
@@ -167,6 +170,11 @@ def _is_publishable_confirmed(v: Dict) -> bool:
     if "<node>" in loc.lower() or "<node>" in details.lower():
         return False
     if loc.strip().lower() in ("", "unknown"):
+        return False
+
+    ftype = str(v.get("type") or "")
+    method = str(ev.get("confirmation_method") or "").lower()
+    if "XSS" in ftype and method not in ("js_execution",):
         return False
     return True
 
@@ -1352,7 +1360,30 @@ Answer:"""
                 seen.add(key)
                 if _is_publishable_confirmed(v):
                     confirmed_vulns.append(v)
-                elif _is_manual_queue_finding(v):
+                    continue
+                # Demote Confirmed XSS that lacks js_execution → Potential
+                ftype = str(v.get("type") or "")
+                ev = v.get("evidence") or {}
+                method = str(
+                    (ev.get("confirmation_method") if isinstance(ev, dict) else "")
+                    or ""
+                ).lower()
+                if (
+                    v.get("status") == "Confirmed"
+                    and "XSS" in ftype
+                    and method not in ("js_execution",)
+                ):
+                    demoted = dict(v)
+                    demoted["status"] = "Potential"
+                    demoted["confidence"] = "Medium"
+                    if isinstance(demoted.get("evidence"), dict):
+                        demoted["evidence"] = dict(demoted["evidence"])
+                        demoted["evidence"]["confidence"] = "Medium"
+                        demoted["evidence"]["verified"] = False
+                    if _is_manual_queue_finding(demoted):
+                        potential_vulns.append(demoted)
+                    continue
+                if _is_manual_queue_finding(v):
                     potential_vulns.append(v)
 
             seen_types: set = set()
