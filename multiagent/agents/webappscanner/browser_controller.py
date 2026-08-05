@@ -30,6 +30,8 @@ class BrowserController:
         self._page = None
         self._session_base: str = ""
         self._visited_urls: Set[str] = set()
+        # Same-host XHR/fetch/API URLs observed during Playwright navigation
+        self._network_apis: Set[str] = set()
 
         try:
             from playwright.async_api import async_playwright  # noqa: F401
@@ -39,6 +41,62 @@ class BrowserController:
             self._has_playwright = False
             logger.warning("Playwright not installed — using urllib fallback")
             print(" Browser Controller initialized (urllib fallback)")
+
+    # ------------------------------------------------------------------
+    # Network API harvest (public surface reach)
+    # ------------------------------------------------------------------
+
+    _API_PATH_HINTS = (
+        "/api/", "/rest/", "/graphql", "/query", "/v1/", "/v2/", "/v3/",
+        "/login", "/search", "/config", "/admin", "/users", "/user/",
+        "/products", "/auth",
+    )
+
+    def _is_harvestable_api_url(self, url: str) -> bool:
+        """True for same-host XHR-like URLs worth seeding into vuln tests."""
+        if not url or not url.startswith(("http://", "https://")):
+            return False
+        try:
+            p = urlsplit(url)
+        except Exception:
+            return False
+        base_host = urlsplit(self._session_base).netloc if self._session_base else ""
+        if base_host and p.netloc and p.netloc != base_host:
+            return False
+        path = (p.path or "").lower()
+        # Skip static assets
+        if re.search(
+            r"\.(js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|map|webp)(\?|$)", path
+        ):
+            return False
+        if any(h in path for h in self._API_PATH_HINTS):
+            return True
+        # Any same-host URL with query params is potentially injectable
+        if p.query and path not in ("/", ""):
+            return True
+        return False
+
+    def _attach_network_listener(self) -> None:
+        """Record API/XHR URLs from the shared Playwright context."""
+        if self._context is None:
+            return
+
+        def _on_request(request) -> None:
+            try:
+                rtype = (request.resource_type or "").lower()
+                url = request.url or ""
+                if rtype in ("xhr", "fetch", "websocket") or self._is_harvestable_api_url(url):
+                    if self._is_harvestable_api_url(url):
+                        # Strip fragments; keep query for injectables
+                        clean = url.split("#", 1)[0]
+                        self._network_apis.add(clean)
+            except Exception:
+                pass
+
+        try:
+            self._context.on("request", _on_request)
+        except Exception as e:
+            logger.debug("network listener attach failed: %s", e)
 
 
     # ==================================================================
@@ -492,6 +550,17 @@ Output JSON only:
     # ACTUATORS — action execution
     # ==================================================================
 
+    async def _wait_after_nav(self, page, ms: int = 1200) -> None:
+        """Give SPAs time to render + fire XHR after a navigation/click."""
+        try:
+            await page.wait_for_load_state("networkidle", timeout=min(ms + 2000, 5000))
+        except Exception:
+            pass
+        try:
+            await page.wait_for_timeout(ms)
+        except Exception:
+            pass
+
     async def _execute_action(self, page, action: Dict, state: Dict) -> bool:
         """
         ACTUATORS: execute a BRIDGE decision on the Playwright page.
@@ -504,12 +573,36 @@ Output JSON only:
             if command == "CLICK":
                 clickables = state.get("clickables", [])
                 if target_id < len(clickables):
-                    text = clickables[target_id].get("text", "")[:50]
+                    target = clickables[target_id]
+                    text = (target.get("text") or "")[:50]
+                    href = (target.get("href") or "").strip()
+                    # Prefer direct navigation for hash/router SPA links
+                    if href and (
+                        "#/" in href
+                        or href.startswith(self._session_base or "http")
+                    ):
+                        try:
+                            await page.goto(
+                                href, wait_until="domcontentloaded", timeout=20000
+                            )
+                            await self._wait_after_nav(page, 1000)
+                            return True
+                        except Exception:
+                            pass
                     if text:
                         await page.get_by_text(text, exact=False).first.click(
                             timeout=5000
                         )
+                        await self._wait_after_nav(page, 900)
                         return True
+                    # Fallback: click by index among visible anchors/buttons
+                    try:
+                        loc = page.locator("a, button, [routerLink], [onclick]")
+                        await loc.nth(target_id).click(timeout=5000)
+                        await self._wait_after_nav(page, 900)
+                        return True
+                    except Exception:
+                        return False
                 return False
 
             elif command == "FILL_FORM":
@@ -527,10 +620,17 @@ Output JSON only:
                             pass
 
                     submit = await page.query_selector(
-                        'button[type="submit"], input[type="submit"]'
+                        'button[type="submit"], input[type="submit"], '
+                        'button:has-text("Search"), button:has-text("Submit")'
                     )
                     if submit:
                         await submit.click()
+                    else:
+                        try:
+                            await page.keyboard.press("Enter")
+                        except Exception:
+                            pass
+                    await self._wait_after_nav(page, 1000)
                     return True
                 return False
 
@@ -606,9 +706,11 @@ Output JSON only:
             self._context = await self._browser.new_context(
                 user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
             )
-            self._page = await self._context.new_page()
             self._session_base = self._base_url(base_url)
             self._visited_urls = set()
+            self._network_apis = set()
+            self._attach_network_listener()
+            self._page = await self._context.new_page()
             return True
         except Exception as e:
             logger.warning(f"start_deep_session failed: {e}")
@@ -645,17 +747,43 @@ Output JSON only:
             "id":     form.get("id"),
         }
 
+    def _clickable_score(self, text: str, href: str, task_l: str = "") -> int:
+        """Higher = more useful for security surface discovery."""
+        t = (text or "").lower()
+        h = (href or "").lower()
+        score = 0
+        for kw in (
+            "vuln", "security", "admin", "user", "profile", "search", "product",
+            "order", "account", "setup", "sqli", "xss", "csrf", "upload",
+            "dashboard", "register", "login", "contact", "basket", "cart",
+            "photo", "complaint", "challenge",
+        ):
+            if kw in t or kw in h:
+                score += 2
+                # Task alignment only counts when the link itself matches
+                if task_l and kw in task_l:
+                    score += 3
+        # SPA hash routes and router links are high value
+        if "#/" in h or "router" in h:
+            score += 2
+        if h and h not in self._visited_urls:
+            score += 1
+        return score
+
     def _heuristic_next_action(self, task: str, state: Dict,
                                 history: List[Dict]) -> Dict:
         """
         Deterministic fallback when the LLM stops early or fails.
-        Prefer login FILL_FORM when the task mentions login, then unvisited links.
+        Rank unvisited same-host links; exercise forms when useful.
         """
         forms = state.get("forms") or []
         clickables = state.get("clickables") or []
         task_l = (task or "").lower()
         want_login = any(
             k in task_l for k in ("login", "auth", "sign in", "signin", "credential")
+        )
+        want_search = any(
+            k in task_l for k in ("search", "query", "find", "product")
         )
 
         if want_login and forms:
@@ -669,41 +797,68 @@ Output JSON only:
                         "reasoning": "heuristic: submit login/auth form",
                     }
 
+        if want_search and forms:
+            for i, f in enumerate(forms):
+                names = {(fld.get("name") or "").lower() for fld in f.get("fields") or []}
+                if any(k in n for n in names for k in ("q", "query", "search", "keyword")):
+                    return {
+                        "command": "FILL_FORM",
+                        "target_id": i,
+                        "reasoning": "heuristic: submit search form",
+                    }
+
         tried_clicks = {
             (a.get("action") or {}).get("target_id")
             for a in history
             if (a.get("action") or {}).get("command") == "CLICK"
         }
         base_host = urlsplit(self._session_base or state.get("url") or "").netloc
+        ranked: List[tuple] = []
         for i, c in enumerate(clickables):
             if i in tried_clicks:
                 continue
             href = c.get("href") or ""
-            if not href or href.startswith(("javascript:", "mailto:", "#")):
+            # Allow hash SPA routes (#/search); skip empty/js/mailto
+            if not href or href.startswith(("javascript:", "mailto:")):
+                # Still allow buttons with no href (text click)
+                if (c.get("tag") or "").lower() not in ("button", "a") and not c.get("text"):
+                    continue
+            if href.startswith("#") and not href.startswith("#/"):
                 continue
-            host = urlsplit(href).netloc
+            host = urlsplit(href).netloc if href.startswith("http") else ""
             if base_host and host and host != base_host:
                 continue
-            if href in self._visited_urls:
+            if href and href in self._visited_urls:
                 continue
-            text = (c.get("text") or "").lower()
-            # Prefer security-relevant nav
-            score = 0
-            for kw in ("vuln", "security", "admin", "user", "profile",
-                       "search", "product", "order", "account", "setup",
-                       "sqli", "xss", "csrf", "upload", "dashboard"):
-                if kw in text or kw in href.lower():
-                    score += 1
-            if score or True:
-                return {
-                    "command": "CLICK",
-                    "target_id": i,
-                    "reasoning": f"heuristic: explore link {text[:40] or href}",
-                }
+            text = c.get("text") or ""
+            score = self._clickable_score(text, href, task_l)
+            ranked.append((score, i, text, href))
 
-        if forms and not any(
+        if ranked:
+            ranked.sort(key=lambda x: (-x[0], x[1]))
+            score, i, text, href = ranked[0]
+            return {
+                "command": "CLICK",
+                "target_id": i,
+                "reasoning": (
+                    f"heuristic: explore link score={score} "
+                    f"{(text or href)[:40]}"
+                ),
+            }
+
+        filled = any(
             (a.get("action") or {}).get("command") == "FILL_FORM" for a in history
-        ):
+        )
+        if forms and not filled:
+            # Prefer search-like forms over random
+            for i, f in enumerate(forms):
+                names = {(fld.get("name") or "").lower() for fld in f.get("fields") or []}
+                if any(k in n for n in names for k in ("q", "query", "search")):
+                    return {
+                        "command": "FILL_FORM",
+                        "target_id": i,
+                        "reasoning": "heuristic: exercise search form",
+                    }
             return {
                 "command": "FILL_FORM",
                 "target_id": 0,
@@ -726,6 +881,7 @@ Output JSON only:
         started = asyncio.get_event_loop().time()
 
         session_ok = await self.start_deep_session(base_url)
+        tasks_with_progress = 0
         try:
             for task in tasks[:max_tasks]:
                 if time_budget_seconds and (
@@ -734,6 +890,7 @@ Output JSON only:
                     if verbose:
                         print("  Deep-crawl time budget reached")
                     break
+                urls_before = len(self._visited_urls) + len(self._network_apis)
                 result = await self.execute_task(
                     task, base_url,
                     max_steps=max_steps_per_task,
@@ -741,21 +898,32 @@ Output JSON only:
                 )
                 all_forms.extend(result.get("forms") or [])
                 all_urls.extend(result.get("urls") or [])
+                all_urls.extend(result.get("api_urls") or [])
                 tasks_executed += 1
+                urls_after = len(self._visited_urls) + len(self._network_apis)
+                progressed = urls_after > urls_before or bool(result.get("forms"))
+                if progressed:
+                    tasks_with_progress += 1
                 if verbose:
                     print(
                         f"   Deep task {tasks_executed}: "
                         f"{result.get('task')} → "
                         f"{len(result.get('urls') or [])} urls, "
-                        f"{len(result.get('forms') or [])} forms"
+                        f"{len(result.get('forms') or [])} forms, "
+                        f"{len(result.get('api_urls') or [])} apis"
+                        f"{'' if progressed else ' [no new surface]'}"
                     )
         finally:
+            api_snapshot = sorted(self._network_apis)
             await self.close_deep_session()
 
+        all_urls.extend(api_snapshot)
         return {
             "forms": all_forms,
             "urls": all_urls,
+            "api_urls": api_snapshot,
             "tasks_executed": tasks_executed,
+            "tasks_with_progress": tasks_with_progress,
         }
 
     # ==================================================================
@@ -791,6 +959,7 @@ Output JSON only:
         discovered_forms: List[Dict] = []
         discovered_urls:  Set[str]   = {url}
         owns_session = False
+        urls_seen_this_task: Set[str] = {url}
 
         try:
             if reuse_session and self._page is not None:
@@ -799,18 +968,19 @@ Output JSON only:
                 from playwright.async_api import async_playwright
                 self._pw = await async_playwright().start()
                 self._browser = await self._pw.chromium.launch(
-                    headless=True, args=["--no-sandbox"]
+                    headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
                 )
                 self._context = await self._browser.new_context(
                     user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
                 )
+                self._session_base = self._base_url(base_url)
+                self._attach_network_listener()
                 page = await self._context.new_page()
                 self._page = page
-                self._session_base = self._base_url(base_url)
                 owns_session = True
 
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(800)
+            await self._wait_after_nav(page, 1100)
             self.action_history = []
 
             for step in range(max_steps):
@@ -818,6 +988,7 @@ Output JSON only:
                 page_url = page.url
                 discovered_urls.add(page_url)
                 self._visited_urls.add(page_url)
+                urls_seen_this_task.add(page_url)
 
                 for form in state.get("forms") or []:
                     discovered_forms.append(self._normalize_form(form))
@@ -828,11 +999,16 @@ Output JSON only:
                 action = await self._decide_next_action(
                     task_name, state, self.action_history
                 )
-                # If LLM stops too early with unexplored surface, use heuristic
-                if action.get("command") == "STOP" and step < max(2, max_steps // 3):
-                    action = self._heuristic_next_action(
+                # Override early STOP whenever unexplored surface remains
+                if action.get("command") == "STOP":
+                    alt = self._heuristic_next_action(
                         task_name, state, self.action_history
                     )
+                    if alt.get("command") != "STOP":
+                        action = alt
+                    elif step < max(3, max_steps // 2):
+                        # Force one more heuristic attempt early in the task
+                        action = alt
 
                 if action.get("command") == "STOP":
                     break
@@ -843,7 +1019,6 @@ Output JSON only:
                     "action":  action,
                     "success": success
                 })
-                await page.wait_for_timeout(900)
 
                 # Soft-fail: try heuristic next instead of aborting the task
                 if not success:
@@ -861,18 +1036,26 @@ Output JSON only:
                     if not success:
                         break
 
+                # Fold newly observed network APIs into this task's URL set
+                for api in list(self._network_apis):
+                    discovered_urls.add(api)
+
         except Exception as e:
             logger.warning(f"execute_task failed for '{task_name}': {e}")
         finally:
             if owns_session:
                 await self.close_deep_session()
 
+        api_urls = [u for u in discovered_urls if self._is_harvestable_api_url(u)]
+
         return {
             "task":  task_name,
             "url":   url,
             "forms": discovered_forms,
             "urls":  list(discovered_urls),
-            "html":  ""
+            "api_urls": api_urls,
+            "html":  "",
+            "progressed": len(urls_seen_this_task) > 1 or len(discovered_forms) > 0,
         }
 
     # ==================================================================
@@ -890,34 +1073,74 @@ Output JSON only:
                     const result = { clickables: [], forms: [], links: [] };
                     const origin = location.origin;
 
-                    const clickables = document.querySelectorAll('a, button, [onclick]');
-                    clickables.forEach((elem, idx) => {
-                        if (elem.offsetParent !== null && idx < 30) {
-                            result.clickables.push({
-                                id:   idx,
-                                tag:  elem.tagName.toLowerCase(),
-                                text: (elem.innerText || elem.textContent || '')
-                                          .trim().substring(0, 100),
-                                href: elem.href || ''
-                            });
+                    const clickSel = 'a, button, [onclick], [routerLink], '
+                        + '[ng-reflect-router-link], mat-nav-list a, '
+                        + 'mat-card a, .mat-mdc-button, [role="button"]';
+                    const clickables = document.querySelectorAll(clickSel);
+                    let idx = 0;
+                    clickables.forEach((elem) => {
+                        if (idx >= 40) return;
+                        const style = window.getComputedStyle(elem);
+                        if (style && style.display === 'none') return;
+                        if (style && style.visibility === 'hidden') return;
+                        let href = elem.href || '';
+                        const rl = elem.getAttribute('routerLink')
+                            || elem.getAttribute('ng-reflect-router-link')
+                            || '';
+                        if (!href && rl) {
+                            const path = rl.replace(/^[\\['"]+|[\\]'",\\s]+$/g, '');
+                            href = path.startsWith('/')
+                                ? (origin + '/#' + path)
+                                : (origin + '/#/' + path);
                         }
+                        // Normalize bare hash SPA paths
+                        if (href.includes('#') && !href.includes('#/')) {
+                            /* keep */
+                        }
+                        result.clickables.push({
+                            id:   idx,
+                            tag:  elem.tagName.toLowerCase(),
+                            text: (elem.innerText || elem.textContent || '')
+                                      .trim().substring(0, 100),
+                            href: href
+                        });
+                        idx += 1;
                     });
 
                     document.querySelectorAll('a[href]').forEach(a => {
                         const href = a.href || '';
-                        if (href && (href.startsWith(origin) || href.startsWith('/'))) {
+                        if (href && (href.startsWith(origin) || href.startsWith('/')
+                                     || href.includes('#/'))) {
                             result.links.push(href);
                         }
                     });
 
+                    // Standalone search inputs (common in SPAs without <form>)
+                    const looseSearch = document.querySelectorAll(
+                        'input[type="search"], input[name="q"], input[name="query"], '
+                        + 'input[placeholder*="Search" i], input[aria-label*="Search" i]'
+                    );
+                    if (looseSearch.length > 0) {
+                        result.forms.push({
+                            id: 0,
+                            action: window.location.href,
+                            method: 'get',
+                            fields: Array.from(looseSearch).slice(0, 3).map(inp => ({
+                                name:        inp.name || inp.getAttribute('aria-label') || 'q',
+                                type:        inp.type || 'search',
+                                placeholder: inp.placeholder || ''
+                            }))
+                        });
+                    }
+
                     const forms = document.querySelectorAll('form');
-                    forms.forEach((form, idx) => {
+                    forms.forEach((form, fidx) => {
                         const inputs = form.querySelectorAll(
                             'input:not([type="hidden"]), textarea, select'
                         );
                         if (inputs.length > 0) {
                             result.forms.push({
-                                id:     idx,
+                                id:     result.forms.length,
                                 action: form.action || window.location.href,
                                 method: form.method || 'get',
                                 fields: Array.from(inputs).map(inp => ({
@@ -938,7 +1161,7 @@ Output JSON only:
                 "title":      title,
                 "clickables": state.get("clickables", []),
                 "forms":      state.get("forms", []),
-                "links":      state.get("links", [])[:40],
+                "links":      state.get("links", [])[:60],
             }
         except Exception as e:
             logger.debug(f"_capture_page_state failed: {e}")

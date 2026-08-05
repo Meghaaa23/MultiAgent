@@ -468,15 +468,25 @@ class WebScannerAgent:
             tasks=tasks,
             base_url=target_url,
             max_tasks=15,
-            max_steps_per_task=15,
+            max_steps_per_task=18,
             time_budget_seconds=crawl_budget_s,
             verbose=verbose,
         )
         tasks_executed = int(crawl.get("tasks_executed") or 0)
+        tasks_progressed = int(crawl.get("tasks_with_progress") or 0)
         all_forms.extend(crawl.get("forms") or [])
         all_urls.extend(crawl.get("urls") or [])
+        crawl_apis = list(crawl.get("api_urls") or [])
+        all_urls.extend(crawl_apis)
 
-        all_urls  = _dedup_urls(all_urls)[:120]
+        # Promote network-harvested APIs into injectable seeds immediately
+        if crawl_apis:
+            from .vulnerability_tester import synthesize_injectable_urls
+            all_urls.extend(synthesize_injectable_urls(
+                target_url, crawl_apis, page_html=html or "",
+            ))
+
+        all_urls  = _dedup_urls(all_urls)[:180]
         all_forms = _dedup_forms(all_forms)[:50]
 
         all_params: Set[str] = set()
@@ -485,8 +495,10 @@ class WebScannerAgent:
 
         if verbose:
             print(
-                f"   Deep crawl: {tasks_executed}/{len(tasks)} tasks | "
-                f"{len(all_forms)} forms | {len(all_urls)} URLs\n"
+                f"   Deep crawl: {tasks_executed}/{len(tasks)} tasks "
+                f"({tasks_progressed} with new surface) | "
+                f"{len(all_forms)} forms | {len(all_urls)} URLs | "
+                f"{len(crawl_apis)} network APIs\n"
             )
 
    
@@ -532,7 +544,11 @@ class WebScannerAgent:
                     or ep.get("api_endpoint")
                 )
             ]
-            disco_paths.extend(u for u in all_urls if "/api/" in u or "/rest/" in u)
+            disco_paths.extend(crawl_apis)
+            disco_paths.extend(
+                u for u in all_urls
+                if "/api/" in u or "/rest/" in u or "/graphql" in u
+            )
             raw_findings = await self.vuln_tester.test_all(
                 forms=all_forms, urls=all_urls, page_html=html,
                 target_url=target_url,

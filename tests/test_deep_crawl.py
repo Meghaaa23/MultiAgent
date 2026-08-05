@@ -94,7 +94,50 @@ class TestBlackBoxDeepCrawl:
         result = asyncio.run(run())
         assert "auth_cookie" not in result
         assert "authenticated" not in result
+        assert "api_urls" in result
         assert result["tasks_executed"] == 0
+
+
+class TestApiHarvestAndTaskHeuristics:
+    def test_harvestable_api_urls(self):
+        bc = _bc()
+        bc._session_base = "http://localhost:3141"
+        assert bc._is_harvestable_api_url(
+            "http://localhost:3141/rest/products/search?q=apple"
+        )
+        assert bc._is_harvestable_api_url(
+            "http://localhost:3141/api/users"
+        )
+        assert not bc._is_harvestable_api_url(
+            "http://localhost:3141/main.js"
+        )
+        assert not bc._is_harvestable_api_url(
+            "https://evil.example.com/api/users"
+        )
+
+    def test_clickable_score_prefers_search_and_spa_hash(self):
+        bc = _bc()
+        low = bc._clickable_score("Home", "http://localhost/#/", "")
+        high = bc._clickable_score(
+            "Search", "http://localhost/#/search", "explore search"
+        )
+        assert high > low
+
+    def test_heuristic_ranks_security_links_first(self):
+        bc = _bc()
+        bc._session_base = "http://localhost:3141"
+        bc._visited_urls = set()
+        state = {
+            "url": "http://localhost:3141/",
+            "forms": [],
+            "clickables": [
+                {"text": "About", "href": "http://localhost:3141/#/about"},
+                {"text": "Search", "href": "http://localhost:3141/#/search"},
+            ],
+        }
+        action = bc._heuristic_next_action("Explore search products", state, [])
+        assert action["command"] == "CLICK"
+        assert action["target_id"] == 1  # Search over About
 
 
 class TestTaskGenerationUnauthenticated:
