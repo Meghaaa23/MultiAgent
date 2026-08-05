@@ -288,7 +288,8 @@ def _cves_for_tech(tech_name: str, cves: Optional[List[Dict]]) -> List[Dict]:
     return deduped
 
 
-def _build_section_2(stack, endpoints, cves, target_url: str = ""):
+def _build_section_2(stack, endpoints, cves, target_url: str = "",
+                     forms_discovered: int = 0):
     lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack & Known CVEs"]
 
     technologies = stack.get("technologies") or []
@@ -421,7 +422,12 @@ def _build_section_2(stack, endpoints, cves, target_url: str = ""):
             if group:
                 lines.append(group_label)
                 for ep in group[:15]:
-                    auth = " [AUTH REQUIRED]" if ep.get("auth_required") else ""
+                    if ep.get("auth_required"):
+                        auth = " [AUTH REQUIRED]"
+                    elif ep.get("redirects_to_auth"):
+                        auth = " [REDIRECTS TO AUTH]"
+                    else:
+                        auth = ""
                     lines.append(
                         f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
                         f"{ep.get('url','')} [{ep.get('source','')}]{auth}"
@@ -429,8 +435,8 @@ def _build_section_2(stack, endpoints, cves, target_url: str = ""):
     else:
         lines.append("None discovered with verified HTTP responses.")
 
-
-
+    if forms_discovered:
+        lines.append(f"\n Forms discovered: {forms_discovered} (included in active testing)")
 
     return "\n".join(lines)
 
@@ -1455,6 +1461,7 @@ Answer:"""
             (scan_results or {}).get("endpoints_discovered", []),
             cves,
             target_url=target_url or "",
+            forms_discovered=int((scan_results or {}).get("forms_discovered") or 0),
         ) or ""
         section_3   = _build_section_3(confirmed_vulns)                  or ""
         section_3b  = render_section_3b(action_results)                  or ""

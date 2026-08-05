@@ -817,18 +817,22 @@ class EndpointDiscoveryAgent:
                         "account", "setup", "install", "register", "signup",
                     ))
                     if authish:
+                        # Do NOT mark auth_required on final HTTP 200 — that
+                        # produces misleading "[200] … [AUTH REQUIRED]" reports.
+                        # Keep a separate redirects_to_auth flag for inventory.
                         return {
-                            "url":           url,
-                            "method":        "GET",
-                            "source":        "probe",
-                            "status":        status,
-                            "final_url":     final_url,
-                            "interesting":   True,
-                            "auth_required": True,
-                            "auth_endpoint": True,
-                            "params":        [],
-                            "content_type":  content_type,
-                            "verification":  f"Redirects to auth surface {landed}",
+                            "url":               url,
+                            "method":            "GET",
+                            "source":            "probe",
+                            "status":            status,
+                            "final_url":         final_url,
+                            "interesting":       True,
+                            "auth_required":     status in (401, 403),
+                            "redirects_to_auth": True,
+                            "auth_endpoint":     True,
+                            "params":            [],
+                            "content_type":      content_type,
+                            "verification":      f"Redirects to auth surface {landed}",
                         }
                     logger.debug(
                         "probe: drop %s — redirected off-path to %s", url, final_url

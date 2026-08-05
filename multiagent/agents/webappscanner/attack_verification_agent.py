@@ -597,12 +597,12 @@ class AttackVerificationAgent:
                     description = "POST form does not appear to include a CSRF token.",
                     impact      = "Attacker can forge requests on behalf of authenticated users.",
                     remediation = "Implement synchronizer token pattern or SameSite cookie attribute.",
-                    confidence  = Confidence.LOW,
+                    confidence  = Confidence.MEDIUM,
                     evidence    = Evidence(
                         request             = f"Analyzed form at {action}",
                         response_status     = 0,
                         verified            = False,
-                        confidence          = Confidence.LOW,
+                        confidence          = Confidence.MEDIUM,
                         confirmation_method = "code analysis"
                     ),
                     cwe   = "CWE-352",
