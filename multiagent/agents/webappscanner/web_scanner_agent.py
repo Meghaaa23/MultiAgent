@@ -142,9 +142,11 @@ class WebScannerAgent:
         print(" WebScannerAgent initialized ")
 
     async def scan_application(self, target_url: str,
-                               max_time_minutes: int = 10,
+                               max_time_minutes: int = 15,
                                verbose: bool = False,
-                               auth_cookie: str = "") -> Dict:
+                               auth_cookie: str = "",
+                               auth_username: str = "",
+                               auth_password: str = "") -> Dict:
         start = datetime.now()
 
         if "#" in target_url:
@@ -152,14 +154,25 @@ class WebScannerAgent:
 
         target_url = _resolve_docker_url(target_url, verbose=verbose)
         self.vuln_tester.auth_cookie = auth_cookie or ""
+        self.browser.configure_auth(
+            auth_cookie=auth_cookie or "",
+            username=auth_username or "",
+            password=auth_password or "",
+        )
+        authenticated = bool(
+            auth_cookie or (auth_username and auth_password)
+        )
 
         if verbose:
             print(f"\n{'='*70}")
             print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
             if auth_cookie:
                 print(f"  Auth   : Session cookie provided (authenticated scan)")
+            elif auth_username and auth_password:
+                print(f"  Auth   : Credentials provided for deep crawl login")
             print(f"  Target : {target_url}")
             print(f"  Budget : {max_time_minutes} minutes")
+            print(f"  Crawl  : Deep (shared session, multi-step tasks)")
             print(f"{'='*70}\n")
 
         all_forms:       List[Dict] = []
@@ -414,7 +427,7 @@ class WebScannerAgent:
             print(f"   Verified CVEs: {cve_count}\n")
 
         if verbose:
-            print("Browser Crawl...")
+            print("Deep Browser Crawl (Yura-style shared session)...")
 
         # Seed surface from the initial page capture BEFORE LLM crawl.
         # Classic SSR apps expose login/setup forms on the first HTML response;
@@ -431,34 +444,55 @@ class WebScannerAgent:
             elif el.get("type") == "link" and el.get("href"):
                 all_urls.append(el["href"])
 
-        filtered = [e for e in elements if e.get("type") in ("form", "link")]
-        tasks    = await self.browser.generate_tasks(
-            elements=filtered, page_description="",
-            openai_client=self.openai_client, llm_model=self.llm_model,
+        filtered = [
+            e for e in elements
+            if e.get("type") in ("form", "link", "clickable")
+        ]
+        tasks = await self.browser.generate_tasks(
+            elements=filtered,
+            page_description=(html or "")[:500],
+            openai_client=self.openai_client,
+            llm_model=self.llm_model,
             target_url=target_url,
+            deep=True,
         )
 
-        tasks_executed = 0
-        for idx, task in enumerate(tasks[:8], 1):
-            elapsed = (datetime.now() - start).total_seconds() / 60
-            if elapsed > max_time_minutes * 0.40:
-                if verbose:
-                    print(f"  Crawl budget reached ({elapsed:.1f}m)")
-                break
-            result = await self.browser.execute_task(task, target_url)
-            all_forms.extend(result.get("forms", []))
-            all_urls.extend(result.get("urls", []))
-            tasks_executed += 1
+        # Deep crawl gets most of the time budget — discovery already ran
+        elapsed_so_far = (datetime.now() - start).total_seconds()
+        crawl_budget_s = max(
+            60.0,
+            (max_time_minutes * 60.0) * 0.70 - elapsed_so_far,
+        )
+        crawl = await self.browser.deep_crawl(
+            tasks=tasks,
+            base_url=target_url,
+            max_tasks=15,
+            max_steps_per_task=15,
+            time_budget_seconds=crawl_budget_s,
+            verbose=verbose,
+        )
+        tasks_executed = int(crawl.get("tasks_executed") or 0)
+        all_forms.extend(crawl.get("forms") or [])
+        all_urls.extend(crawl.get("urls") or [])
+        if crawl.get("authenticated"):
+            authenticated = True
+        # Propagate session cookies from deep crawl into HTTP vuln probes
+        exported_cookie = crawl.get("auth_cookie") or ""
+        if exported_cookie:
+            self.vuln_tester.auth_cookie = exported_cookie
 
-        all_urls  = _dedup_urls(all_urls)[:50]
-        all_forms = _dedup_forms(all_forms)[:25]
+        all_urls  = _dedup_urls(all_urls)[:120]
+        all_forms = _dedup_forms(all_forms)[:50]
 
         all_params: Set[str] = set()
         for url in all_urls:
             all_params.update(urllib.parse.parse_qs(urllib.parse.urlparse(url).query).keys())
 
         if verbose:
-            print(f"   {tasks_executed}/{len(tasks)} tasks | {len(all_forms)} forms | {len(all_urls)} URLs\n")
+            print(
+                f"   Deep crawl: {tasks_executed}/{len(tasks)} tasks | "
+                f"{len(all_forms)} forms | {len(all_urls)} URLs\n"
+            )
 
    
         if verbose:
@@ -468,8 +502,8 @@ class WebScannerAgent:
             if spa_forms or spa_urls:
                 all_forms.extend(spa_forms)
                 all_urls.extend(spa_urls)
-                all_urls  = _dedup_urls(all_urls)[:50]
-                all_forms = _dedup_forms(all_forms)[:20]
+                all_urls  = _dedup_urls(all_urls)[:120]
+                all_forms = _dedup_forms(all_forms)[:50]
                 if verbose:
                     print(f"   SPA: {len(spa_forms)} forms, {len(spa_urls)} URLs\n")
             elif verbose:
@@ -631,7 +665,7 @@ class WebScannerAgent:
             "forms_discovered":       len(all_forms),
             "urls_discovered":        len(all_urls),
             "scan_duration":          round(duration, 1),
-            "authenticated_scan":     bool(auth_cookie),
+            "authenticated_scan":     bool(authenticated),
             "timestamp":              datetime.now().isoformat(),
             "is_ai_powered":          is_ai_powered,
             "ai_fingerprint":         ai_fingerprint,

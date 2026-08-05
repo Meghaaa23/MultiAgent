@@ -939,7 +939,9 @@ Answer:"""
                       use_cache: bool = True, filenames: List[str] = None,
                       enable_web_scan: bool = False,
                       target_url: str = None,
-                      auth_cookie: str = "") -> Dict:
+                      auth_cookie: str = "",
+                      auth_username: str = "",
+                      auth_password: str = "") -> Dict:
 
         if verbose:
             print("\n" + "=" * 80)
@@ -986,8 +988,10 @@ Answer:"""
             if verbose:
                 print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
             scan_results = await scanner.scan_application(
-                target_url=target_url, max_time_minutes=3, verbose=verbose,
+                target_url=target_url, max_time_minutes=15, verbose=verbose,
                 auth_cookie=auth_cookie,
+                auth_username=auth_username,
+                auth_password=auth_password,
             )
 
         if verbose:

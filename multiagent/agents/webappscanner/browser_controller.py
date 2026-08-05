@@ -11,12 +11,30 @@ logger = logging.getLogger(__name__)
 
 
 class BrowserController:
- 
+    """
+    Yura-style browser agent: task extraction → multi-step execution → surface collection.
+
+    Deep crawl keeps one Playwright context across tasks so login/session state
+    survives, harvests forms/links at every step, and can use auth_cookie or
+    username/password credentials.
+    """
 
     def __init__(self, openai_client, llm_model: str = "Qwen-2.5"):
         self.openai_client  = openai_client
         self.llm_model      = llm_model
         self.action_history: List[Dict] = []
+
+        # Auth for deep crawl (HTTP cookie string and/or login credentials)
+        self.auth_cookie: str = ""
+        self.credentials: Dict[str, str] = {}  # {"username": ..., "password": ...}
+
+        # Shared deep-crawl Playwright session (one browser across tasks)
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._session_base: str = ""
+        self._visited_urls: Set[str] = set()
 
         try:
             from playwright.async_api import async_playwright  # noqa: F401
@@ -26,6 +44,15 @@ class BrowserController:
             self._has_playwright = False
             logger.warning("Playwright not installed — using urllib fallback")
             print(" Browser Controller initialized (urllib fallback)")
+
+    def configure_auth(self, auth_cookie: str = "",
+                       username: str = "", password: str = "") -> None:
+        self.auth_cookie = auth_cookie or ""
+        self.credentials = {}
+        if username:
+            self.credentials["username"] = username
+        if password:
+            self.credentials["password"] = password
 
     # ==================================================================
     # SENSORS — page capture
@@ -261,21 +288,19 @@ class BrowserController:
                              page_description: str,
                              openai_client,
                              llm_model: str,
-                             target_url: str = "") -> List[Dict]:
-      
-       
+                             target_url: str = "",
+                             deep: bool = True) -> List[Dict]:
+        # Deep crawl needs clickables (menus/nav) as well as forms/links
         filtered = [
             e for e in elements
-            if e.get("type") in ("form", "link")
+            if e.get("type") in ("form", "link", "clickable")
         ]
 
         if not filtered:
-         
             filtered = [{"type": "link", "href": target_url}]
 
-        
         chunk_size  = 50
-        max_chunks  = 6
+        max_chunks  = 8 if deep else 6
         chunks      = [
             filtered[i:i + chunk_size]
             for i in range(0, len(filtered), chunk_size)
@@ -287,15 +312,16 @@ class BrowserController:
             prompt = f"""You are a web security tester analyzing a web application.
 
 URL: {target_url}
+Page: {page_description or "(no description)"}
 UI Elements (chunk {idx}/{len(chunks)}):
 {self._format_ui_elements(chunk)}
 
-Generate 3-5 realistic security testing tasks for this section of the UI.
+Generate 4-6 realistic deep-crawl security tasks that reach inner app states.
 Focus on:
-- CRUD operations (Create, Read, Update, Delete)
-- Authentication and session workflows
-- Form submission and input handling
-- Data manipulation and access control
+- Authentication / login workflows (do this first when a login form exists)
+- Multi-step navigation into authenticated or secondary pages
+- CRUD operations and form submission
+- Input handling on search, profile, admin, and data views
 
 Each task must include a specific URL to navigate to.
 
@@ -304,7 +330,7 @@ Respond with JSON only — no explanation:
     "tasks": [
         {{
             "name":        "Login to application",
-            "description": "Test login form for injection and auth bypass",
+            "description": "Authenticate then explore post-login pages",
             "url":         "{target_url}"
         }}
     ]
@@ -322,12 +348,11 @@ Respond with JSON only — no explanation:
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.3,
-                    max_tokens=800
+                    max_tokens=900
                 )
                 data        = json.loads(resp.choices[0].message.content)
                 chunk_tasks = data.get("tasks", [])
 
-               
                 for t in chunk_tasks:
                     if "task" in t and "name" not in t:
                         t["name"] = t.pop("task")
@@ -339,7 +364,6 @@ Respond with JSON only — no explanation:
             except Exception as e:
                 logger.warning(f"Task generation chunk {idx}/{len(chunks)} failed: {e}")
 
-       
         seen:   Set[str]   = set()
         unique: List[Dict] = []
         for task in all_tasks:
@@ -348,11 +372,27 @@ Respond with JSON only — no explanation:
                 seen.add(name)
                 unique.append(task)
 
-        # Deterministic fallback when LLM returns nothing — still crawl real surfaces
-        if not unique:
-            unique = self._deterministic_tasks(filtered, target_url)
+        # Always merge deterministic coverage tasks (links/forms) for depth
+        for t in self._deterministic_tasks(filtered, target_url):
+            name = (t.get("name") or "").strip().lower()
+            if name and name not in seen:
+                seen.add(name)
+                unique.append(t)
 
-        return unique[:15]
+        # Credentials → prepend explicit login task
+        if self.credentials.get("username") and self.credentials.get("password"):
+            login_task = {
+                "name": "Authenticate with provided credentials",
+                "description": "Log in using supplied credentials, then stop",
+                "url": target_url,
+                "priority": "login",
+            }
+            unique = [login_task] + [
+                t for t in unique
+                if "authenticate with provided" not in (t.get("name") or "").lower()
+            ]
+
+        return unique[:(20 if deep else 15)]
 
     def _deterministic_tasks(self, elements: List[Dict],
                               target_url: str) -> List[Dict]:
@@ -429,10 +469,16 @@ Respond with JSON only — no explanation:
             for a in history[-5:]
         ) or "None"
 
-        prompt = f"""You are Yura, an agent controlling a web browser.
+        cred_note = ""
+        if self.credentials.get("username"):
+            cred_note = (
+                "\nCredentials are available — FILL_FORM on login/auth forms "
+                "with the real username/password (browser fills them automatically).\n"
+            )
+        prompt = f"""You are Yura, an agent controlling a web browser for deep security crawling.
 
 Task: {task}
-
+{cred_note}
 Current Page:
 {state_text}
 
@@ -440,11 +486,12 @@ Previous Actions:
 {history_text}
 
 Commands available:
-  CLICK      {{id}} — click element
+  CLICK      {{id}} — click element / navigate
   FILL_FORM  {{id}} — fill and submit form
   STOP            — task complete or impossible
 
-Decide the next action.
+Prefer actions that reach new authenticated or secondary pages.
+Only STOP when the task is done or no useful action remains.
 
 Output JSON only:
 {{
@@ -527,38 +574,270 @@ Output JSON only:
         return False
 
     def _dummy_value(self, field_name: str, field_type: str) -> str:
-        """Generate benign dummy value for a form field."""
+        """Generate form value — prefer real credentials when configured."""
         n = field_name.lower()
-        if "email"    in n or field_type == "email":    return "test@example.com"
-        if "password" in n or field_type == "password": return "TestPassword123!"
-        if "user"     in n or "login"    in n:          return "testuser"
-        if "name"     in n:                             return "Test User"
-        if "phone"    in n or "tel"      in n:          return "555-0123"
-        if "url"      in n or "website"  in n:          return "https://example.com"
-        if field_type == "number":                      return "42"
-        if field_type == "date":                        return "2024-01-01"
+        creds = self.credentials or {}
+        if "password" in n or field_type == "password":
+            return creds.get("password") or "TestPassword123!"
+        if "email" in n or field_type == "email":
+            # Prefer username if it looks like email; else dummy
+            u = creds.get("username") or ""
+            return u if "@" in u else (u or "test@example.com")
+        if any(k in n for k in ("user", "login", "account", "name")):
+            return creds.get("username") or "testuser"
+        if "phone" in n or "tel" in n:
+            return "555-0123"
+        if "url" in n or "website" in n:
+            return "https://example.com"
+        if field_type == "number":
+            return "42"
+        if field_type == "date":
+            return "2024-01-01"
         return "test"
+
+    # ==================================================================
+    # Deep-crawl session (shared Playwright context across tasks)
+    # ==================================================================
+
+    def _parse_cookie_header(self, cookie_header: str, base_url: str) -> List[Dict]:
+        """Convert 'a=b; c=d' Cookie header into Playwright cookie dicts."""
+        if not cookie_header:
+            return []
+        parsed = urlparse(base_url)
+        domain = parsed.hostname or "localhost"
+        secure = parsed.scheme == "https"
+        out: List[Dict] = []
+        for part in cookie_header.split(";"):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            name, _, value = part.partition("=")
+            name, value = name.strip(), value.strip()
+            if not name:
+                continue
+            out.append({
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": "/",
+                "secure": secure,
+                "httpOnly": False,
+            })
+        return out
+
+    async def start_deep_session(self, base_url: str) -> bool:
+        """Open one Chromium context reused across deep-crawl tasks."""
+        if not self._has_playwright:
+            return False
+        if self._page is not None:
+            return True
+        try:
+            from playwright.async_api import async_playwright
+            self._pw = await async_playwright().start()
+            self._browser = await self._pw.chromium.launch(
+                headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+            self._context = await self._browser.new_context(
+                user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
+            )
+            cookies = self._parse_cookie_header(self.auth_cookie, base_url)
+            if cookies:
+                await self._context.add_cookies(cookies)
+            self._page = await self._context.new_page()
+            self._session_base = self._base_url(base_url)
+            self._visited_urls = set()
+            return True
+        except Exception as e:
+            logger.warning(f"start_deep_session failed: {e}")
+            await self.close_deep_session()
+            return False
+
+    async def close_deep_session(self) -> None:
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._pw:
+                await self._pw.stop()
+        except Exception:
+            pass
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._session_base = ""
+
+    def _normalize_form(self, form: Dict) -> Dict:
+        """Ensure forms have both fields and inputs for downstream testers."""
+        fields = form.get("fields") or form.get("inputs") or []
+        return {
+            "type":   "form",
+            "action": form.get("action") or "",
+            "method": (form.get("method") or "get"),
+            "fields": fields,
+            "inputs": fields,
+            "route":  form.get("action") or "",
+            "id":     form.get("id"),
+        }
+
+    def _heuristic_next_action(self, task: str, state: Dict,
+                                history: List[Dict]) -> Dict:
+        """
+        Deterministic fallback when the LLM stops early or fails.
+        Prefer login FILL_FORM, then unvisited same-host links.
+        """
+        forms = state.get("forms") or []
+        clickables = state.get("clickables") or []
+        task_l = (task or "").lower()
+        want_login = any(
+            k in task_l for k in ("login", "auth", "sign in", "signin", "credential")
+        ) or bool(self.credentials)
+
+        if want_login and forms:
+            for i, f in enumerate(forms):
+                types = {(fld.get("type") or "").lower() for fld in f.get("fields") or []}
+                names = {(fld.get("name") or "").lower() for fld in f.get("fields") or []}
+                if "password" in types or any("pass" in n for n in names):
+                    return {
+                        "command": "FILL_FORM",
+                        "target_id": i,
+                        "reasoning": "heuristic: submit login/auth form",
+                    }
+
+        tried_clicks = {
+            (a.get("action") or {}).get("target_id")
+            for a in history
+            if (a.get("action") or {}).get("command") == "CLICK"
+        }
+        base_host = urlsplit(self._session_base or state.get("url") or "").netloc
+        for i, c in enumerate(clickables):
+            if i in tried_clicks:
+                continue
+            href = c.get("href") or ""
+            if not href or href.startswith(("javascript:", "mailto:", "#")):
+                continue
+            host = urlsplit(href).netloc
+            if base_host and host and host != base_host:
+                continue
+            if href in self._visited_urls:
+                continue
+            text = (c.get("text") or "").lower()
+            # Prefer security-relevant nav
+            score = 0
+            for kw in ("vuln", "security", "admin", "user", "profile",
+                       "search", "product", "order", "account", "setup",
+                       "sqli", "xss", "csrf", "upload", "dashboard"):
+                if kw in text or kw in href.lower():
+                    score += 1
+            if score or True:
+                return {
+                    "command": "CLICK",
+                    "target_id": i,
+                    "reasoning": f"heuristic: explore link {text[:40] or href}",
+                }
+
+        if forms and not any(
+            (a.get("action") or {}).get("command") == "FILL_FORM" for a in history
+        ):
+            return {
+                "command": "FILL_FORM",
+                "target_id": 0,
+                "reasoning": "heuristic: exercise first form",
+            }
+        return {"command": "STOP", "reasoning": "heuristic: nothing left to explore"}
+
+    async def deep_crawl(self, tasks: List[Dict], base_url: str,
+                         max_tasks: int = 15,
+                         max_steps_per_task: int = 15,
+                         time_budget_seconds: float = 0,
+                         verbose: bool = False) -> Dict:
+        """
+        Yura-style deep crawl: one shared session, multi-step tasks,
+        collect forms/URLs from every visited state.
+        """
+        all_forms: List[Dict] = []
+        all_urls: List[str] = [base_url]
+        tasks_executed = 0
+        started = asyncio.get_event_loop().time()
+
+        session_ok = await self.start_deep_session(base_url)
+        session_cookie = self.auth_cookie or ""
+        try:
+            for task in tasks[:max_tasks]:
+                if time_budget_seconds and (
+                    asyncio.get_event_loop().time() - started
+                ) > time_budget_seconds:
+                    if verbose:
+                        print("  Deep-crawl time budget reached")
+                    break
+                result = await self.execute_task(
+                    task, base_url,
+                    max_steps=max_steps_per_task,
+                    reuse_session=session_ok,
+                )
+                all_forms.extend(result.get("forms") or [])
+                all_urls.extend(result.get("urls") or [])
+                tasks_executed += 1
+                if verbose:
+                    print(
+                        f"   Deep task {tasks_executed}: "
+                        f"{result.get('task')} → "
+                        f"{len(result.get('urls') or [])} urls, "
+                        f"{len(result.get('forms') or [])} forms"
+                    )
+            # Export cookies after login so HTTP vuln probes are authenticated
+            if self._context is not None:
+                try:
+                    cookies = await self._context.cookies()
+                    if cookies:
+                        session_cookie = "; ".join(
+                            f"{c['name']}={c['value']}" for c in cookies
+                            if c.get("name") and c.get("value") is not None
+                        )
+                        if session_cookie:
+                            self.auth_cookie = session_cookie
+                except Exception as e:
+                    logger.debug(f"cookie export failed: {e}")
+        finally:
+            await self.close_deep_session()
+
+        return {
+            "forms": all_forms,
+            "urls": all_urls,
+            "tasks_executed": tasks_executed,
+            "auth_cookie": session_cookie,
+            "authenticated": bool(
+                session_cookie or (
+                    self.credentials.get("username")
+                    and self.credentials.get("password")
+                )
+            ),
+        }
 
     # ==================================================================
     # Full task execution loop  (SENSORS → BRIDGE → ACTUATORS)
     # ==================================================================
 
-    async def execute_task(self, task: Dict, base_url: str) -> Dict:
+    async def execute_task(self, task: Dict, base_url: str,
+                           max_steps: int = 15,
+                           reuse_session: bool = False) -> Dict:
         """
-        Execute a task and collect discovered forms/URLs.
-
-        Compatible with both the original API (task["task"]) and the
-        new API (task["name"]).
+        Execute a task and collect discovered forms/URLs at every step.
+        When reuse_session=True, uses the shared deep-crawl context.
         """
         task_name = task.get("name") or task.get("task", "unknown")
         url       = task.get("url") or base_url
 
         if not self._has_playwright:
-            # urllib fallback: just capture the page
             page_data = await self._urllib_capture(url)
-            forms     = [e for e in page_data["elements"] if e["type"] == "form"]
+            forms     = [
+                self._normalize_form(e)
+                for e in page_data["elements"] if e.get("type") == "form"
+            ]
             links     = [e["href"] for e in page_data["elements"]
-                         if e["type"] == "link"]
+                         if e.get("type") == "link" and e.get("href")]
             return {
                 "task":  task_name,
                 "url":   url,
@@ -567,49 +846,87 @@ Output JSON only:
                 "html":  page_data["html"]
             }
 
-        from playwright.async_api import async_playwright
-
         discovered_forms: List[Dict] = []
         discovered_urls:  Set[str]   = {url}
+        owns_session = False
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
+            if reuse_session and self._page is not None:
+                page = self._page
+            else:
+                from playwright.async_api import async_playwright
+                self._pw = await async_playwright().start()
+                self._browser = await self._pw.chromium.launch(
                     headless=True, args=["--no-sandbox"]
                 )
-                page = await browser.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                self.action_history = []
+                self._context = await self._browser.new_context(
+                    user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
+                )
+                cookies = self._parse_cookie_header(self.auth_cookie, base_url)
+                if cookies:
+                    await self._context.add_cookies(cookies)
+                page = await self._context.new_page()
+                self._page = page
+                self._session_base = self._base_url(base_url)
+                owns_session = True
 
-                for step in range(10):  # max 10 steps per task
-                    state = await self._capture_page_state(page)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(800)
+            self.action_history = []
 
-                    if state.get("forms"):
-                        discovered_forms.extend(state["forms"])
-                    discovered_urls.add(page.url)
+            for step in range(max_steps):
+                state = await self._capture_page_state(page)
+                page_url = page.url
+                discovered_urls.add(page_url)
+                self._visited_urls.add(page_url)
 
-                    action = await self._decide_next_action(
+                for form in state.get("forms") or []:
+                    discovered_forms.append(self._normalize_form(form))
+                for link in state.get("links") or []:
+                    if link:
+                        discovered_urls.add(link)
+
+                action = await self._decide_next_action(
+                    task_name, state, self.action_history
+                )
+                # If LLM stops too early with unexplored surface, use heuristic
+                if action.get("command") == "STOP" and step < max(2, max_steps // 3):
+                    action = self._heuristic_next_action(
                         task_name, state, self.action_history
                     )
 
-                    if action.get("command") == "STOP":
+                if action.get("command") == "STOP":
+                    break
+
+                success = await self._execute_action(page, action, state)
+                self.action_history.append({
+                    "step":    step + 1,
+                    "action":  action,
+                    "success": success
+                })
+                await page.wait_for_timeout(900)
+
+                # Soft-fail: try heuristic next instead of aborting the task
+                if not success:
+                    alt = self._heuristic_next_action(
+                        task_name, state, self.action_history
+                    )
+                    if alt.get("command") == "STOP":
                         break
-
-                    success = await self._execute_action(page, action, state)
+                    success = await self._execute_action(page, alt, state)
                     self.action_history.append({
-                        "step":    step + 1,
-                        "action":  action,
-                        "success": success
+                        "step": step + 1,
+                        "action": alt,
+                        "success": success,
                     })
-                    await page.wait_for_timeout(1000)
-
                     if not success:
                         break
 
-                await browser.close()
-
         except Exception as e:
             logger.warning(f"execute_task failed for '{task_name}': {e}")
+        finally:
+            if owns_session:
+                await self.close_deep_session()
 
         return {
             "task":  task_name,
@@ -624,18 +941,19 @@ Output JSON only:
     # ==================================================================
 
     async def _capture_page_state(self, page) -> Dict:
-        """Capture simplified page state for BRIDGE."""
+        """Capture simplified page state for BRIDGE + link harvest."""
         try:
             url   = page.url
             title = await page.title()
 
             state = await page.evaluate("""
                 () => {
-                    const result = { clickables: [], forms: [] };
+                    const result = { clickables: [], forms: [], links: [] };
+                    const origin = location.origin;
 
                     const clickables = document.querySelectorAll('a, button, [onclick]');
                     clickables.forEach((elem, idx) => {
-                        if (elem.offsetParent !== null && idx < 20) {
+                        if (elem.offsetParent !== null && idx < 30) {
                             result.clickables.push({
                                 id:   idx,
                                 tag:  elem.tagName.toLowerCase(),
@@ -643,6 +961,13 @@ Output JSON only:
                                           .trim().substring(0, 100),
                                 href: elem.href || ''
                             });
+                        }
+                    });
+
+                    document.querySelectorAll('a[href]').forEach(a => {
+                        const href = a.href || '';
+                        if (href && (href.startsWith(origin) || href.startsWith('/'))) {
+                            result.links.push(href);
                         }
                     });
 
@@ -673,11 +998,12 @@ Output JSON only:
                 "url":        url,
                 "title":      title,
                 "clickables": state.get("clickables", []),
-                "forms":      state.get("forms", [])
+                "forms":      state.get("forms", []),
+                "links":      state.get("links", [])[:40],
             }
         except Exception as e:
             logger.debug(f"_capture_page_state failed: {e}")
-            return {"url": "", "title": "", "clickables": [], "forms": []}
+            return {"url": "", "title": "", "clickables": [], "forms": [], "links": []}
 
     # ==================================================================
     # Utility
