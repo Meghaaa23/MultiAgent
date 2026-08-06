@@ -124,6 +124,77 @@ def _from_data_attributes(html: str) -> Tuple[Optional[str], Optional[str], str]
     return None, None, ""
 
 
+def _from_wp_json(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    WordPress REST root + generator — definitive CMS identity when exposed.
+    Also notes /wp-json/wp/v2/users reachability for author enumeration surface.
+    """
+    base = base_url.rstrip("/")
+    name: Optional[str] = "WordPress"
+    version: Optional[str] = None
+    evidence_parts: List[str] = []
+
+    # Root index often includes site name; version may appear in namespaces/GMT
+    for path in ("/wp-json", "/wp-json/"):
+        try:
+            req = urllib.request.Request(
+                base + path,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (SecurityScanner)",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                if resp.status != 200:
+                    continue
+                ct = resp.headers.get("Content-Type", "")
+                body = resp.read(8192).decode("utf-8", errors="replace")
+                if "json" not in ct and not body.lstrip().startswith("{"):
+                    continue
+                data = json.loads(body)
+                evidence_parts.append(f"wp-json root HTTP 200")
+                # Some installs expose generator / version in extras
+                ver = _find_in_json(
+                    data,
+                    ("version", "wp_version", "wordpress_version", "generator"),
+                )
+                if ver and re.search(r"\d+\.\d+", str(ver)):
+                    version = _extract_version_from_string(str(ver)) or str(ver)
+                # Confirm it looks like WP REST
+                if isinstance(data, dict) and (
+                    "namespaces" in data or "routes" in data or "name" in data
+                ):
+                    break
+        except Exception:
+            continue
+
+    # Generator-style version from wp/v2 settings or types is rare; try users
+    # only as surface evidence (enumeration), not for version.
+    try:
+        req = urllib.request.Request(
+            base + "/wp-json/wp/v2/users",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (SecurityScanner)",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            if resp.status == 200:
+                body = resp.read(4096).decode("utf-8", errors="replace")
+                if body.lstrip().startswith("["):
+                    users = json.loads(body)
+                    if isinstance(users, list) and users:
+                        evidence_parts.append(
+                            f"wp/v2/users enumerates {len(users)} author(s)"
+                        )
+    except Exception:
+        pass
+
+    if not evidence_parts:
+        return None, None, ""
+    return name, version, "; ".join(evidence_parts)
+
+
 def _from_version_api(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
     version_paths = [
         "/version",
@@ -144,6 +215,7 @@ def _from_version_api(base_url: str) -> Tuple[Optional[str], Optional[str], str]
         "/api/about",
         "/_about",
         "/api/v1/settings/about",
+        "/wp-json",
         "/wp-json/wp/v2/",
         "/ocs/v1.php/config",
         "/api/index.php/v1/config",
@@ -195,16 +267,53 @@ def _from_robots_txt(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
     return None, None, ""
 
 
-async def detect_app_identity(base_url: str,
-                               html: str,
-                               response_headers: Dict,
-                               wappalyzer_cms: Optional[str] = None,
-                               verbose: bool = False) -> AppIdentity:
-    
+def _pick_preferred_wappalyzer_app(
+    wappalyzer_technologies: List,
+) -> Optional[Dict]:
+    """
+    Choose the strongest app-level tech from Wappalyzer output.
+    Prefer CMS; never wipe an existing best signal via for/else.
+    """
+    preferred: Optional[Dict] = None
+    for tech in wappalyzer_technologies or []:
+        if not isinstance(tech, dict):
+            continue
+        name = (tech.get("name") or "").strip()
+        if not name:
+            continue
+        category = tech.get("category") or ""
+        if category == "CMS":
+            return tech  # CMS is authoritative
+        if category == "Other" and name not in (
+            "Ubuntu", "Debian", "HTTP/2", "HTTP/3", "HSTS", "OpenSSL",
+        ):
+            # Prefer versioned app-like names over bare platform hints
+            if preferred is None or (
+                tech.get("version") and not preferred.get("version")
+            ):
+                preferred = tech
+    return preferred
 
+
+async def detect_app_identity(
+    base_url: str,
+    html: str,
+    response_headers: Dict,
+    wappalyzer_technologies: Optional[List] = None,
+    wappalyzer_cms: Optional[str] = None,
+    verbose: bool = False,
+) -> AppIdentity:
+    """
+    Derive authoritative app name/version for CVE targeting.
+
+    ``wappalyzer_technologies`` is the fingerprint stack list (dicts with
+    name/version/category). ``wappalyzer_cms`` is an optional CMS name hint
+    kept for backward compatibility.
+    """
     if not isinstance(response_headers, dict):
         response_headers = dict(response_headers)
     response_headers = {k.lower(): v for k, v in response_headers.items()}
+    wappalyzer_technologies = list(wappalyzer_technologies or [])
 
     signals: List[Tuple[str, Optional[str], str, int]] = []
 
@@ -241,10 +350,24 @@ async def detect_app_identity(base_url: str,
         name, version, evidence = await loop.run_in_executor(
             None, lambda: _from_version_api(base_url)
         )
-        if name:
-            signals.append((name, version, evidence, 90))
+        if name or version:
+            # WordPress REST often returns version without a product name
+            if not name and version:
+                name = "WordPress"
+            signals.append((name, version, evidence, 95 if version else 90))
             if verbose:
                 print(f"      [version_api] {name!r} v{version} — {evidence}")
+    except Exception:
+        pass
+
+    try:
+        name, version, evidence = await loop.run_in_executor(
+            None, lambda: _from_wp_json(base_url)
+        )
+        if name:
+            signals.append((name, version, evidence, 100 if version else 90))
+            if verbose:
+                print(f"      [wp_json] {name!r} v{version} — {evidence}")
     except Exception:
         pass
 
@@ -260,15 +383,15 @@ async def detect_app_identity(base_url: str,
         pass
 
     technologies = _extract_technologies_from_headers(response_headers)
-    if wappalyzer_technologies:
-        for tech in wappalyzer_technologies:
-            if isinstance(tech, dict):
-                name = tech.get("name")
-                version = tech.get("version")
-
-                if name:
-                    entry = f"{name}/{version}" if version else name
-                    technologies.append(entry)
+    for tech in wappalyzer_technologies:
+        if isinstance(tech, dict):
+            name = tech.get("name")
+            version = tech.get("version")
+            if name:
+                entry = f"{name}/{version}" if version else name
+                technologies.append(entry)
+        elif isinstance(tech, str) and tech.strip():
+            technologies.append(tech.strip())
 
     for sig_name, sig_version, _, _ in signals:
         if sig_name:
@@ -283,7 +406,7 @@ async def detect_app_identity(base_url: str,
             technologies_deduped.append(t)
     technologies = technologies_deduped
 
-    if not signals:
+    if not signals and not wappalyzer_technologies and not wappalyzer_cms:
         identity = AppIdentity(
             name         = None,
             technologies = technologies,
@@ -291,35 +414,52 @@ async def detect_app_identity(base_url: str,
             evidence     = "no app identity signals found"
         )
         _build_cve_queries(identity, technologies)
-        print("\nRAW TECHNOLOGIES")
-        print(technologies)
         return identity
 
     signals.sort(key=lambda s: s[3], reverse=True)
 
     best = next(
         (s for s in signals if s[3] >= _APP_IDENTITY_MIN_CONFIDENCE),
-        None
+        signals[0] if signals else None,
     )
 
+    best_name: Optional[str] = None
+    best_version: Optional[str] = None
+    best_evidence: str = ""
+    best_score: int = 0
     if best:
         best_name, best_version, best_evidence, best_score = best
-        
-        preferred_app = None
-        if wappalyzer_technologies:
-            for tech in wappalyzer_technologies:
-                if not isinstance(tech, dict):
-                    continue
 
-                category = tech.get("category")
-                if category == "CMS":
-                    preferred_app = tech
-                elif category == "Other" and not tech.get("version") and tech.get("name") not in (
-                    "Ubuntu", "HTTP/2", "HTTP/3", "HSTS"
-                ):
-                    preferred_app = tech
-            else:
-                best_name, best_version, best_evidence, best_score = None, None, "", 0
+    # Wappalyzer CMS / preferred app can override or fill gaps — never wipe.
+    preferred_app = _pick_preferred_wappalyzer_app(wappalyzer_technologies)
+    if preferred_app and preferred_app.get("name"):
+        pref_name = preferred_app["name"]
+        pref_ver = preferred_app.get("version")
+        pref_cat = preferred_app.get("category") or ""
+        if pref_cat == "CMS":
+            # Authoritative CMS identity
+            if not best_name or best_score < 100:
+                best_name = pref_name
+                best_score = max(best_score, 85)
+            if pref_ver and (
+                not best_version
+                or (best_name or "").lower() == pref_name.lower()
+            ):
+                best_version = pref_ver
+            best_evidence = (
+                f"{best_evidence}; wappalyzer CMS: {pref_name}"
+                if best_evidence else f"wappalyzer CMS: {pref_name}"
+            )
+        elif not best_name:
+            best_name = pref_name
+            best_version = pref_ver or best_version
+            best_score = max(best_score, 60)
+            best_evidence = f"wappalyzer: {pref_name}"
+
+    if wappalyzer_cms and not best_name:
+        best_name = wappalyzer_cms
+        best_score = max(best_score, 70)
+        best_evidence = best_evidence or f"wappalyzer_cms hint: {wappalyzer_cms}"
 
     version_api_signal = next(
         (s for s in signals if "API" in s[2] and s[1]),
@@ -340,6 +480,10 @@ async def detect_app_identity(base_url: str,
     )
 
     all_evidence = "; ".join(s[2] for s in signals[:3] if s[2])
+    if best_evidence and best_evidence not in all_evidence:
+        all_evidence = (
+            f"{all_evidence}; {best_evidence}" if all_evidence else best_evidence
+        )
 
     identity = AppIdentity(
         name         = best_name,

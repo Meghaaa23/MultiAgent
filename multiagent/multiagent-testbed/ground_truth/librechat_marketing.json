@@ -1,0 +1,47 @@
+{
+  "target": "librechat_marketing",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "https://www.librechat.ai",
+    "https://www.librechat.ai/"
+  ],
+  "endpoints_true": [
+    "/docs"
+  ],
+  "endpoints_auth_gated": [],
+  "endpoints_noise": [
+    "/_next/static/",
+    ".js",
+    ".css",
+    ".woff2",
+    ".png",
+    "favicon"
+  ],
+  "ai_surface": null,
+  "notes": "Marketing/docs site on Vercel — not a LibreChat app instance. Clean report is expected.",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "prompt-injection",
+    "model-theft"
+  ],
+  "must_not_report": [
+    {
+      "type": "sql injection (time-based blind)",
+      "reason": "No DB surface on marketing site",
+      "category": "logic_bug"
+    },
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    },
+    {
+      "type": "cors",
+      "match": "high_without_acac",
+      "reason": "CORS High requires Allow-Credentials: true",
+      "category": "logic_bug"
+    }
+  ]
+}

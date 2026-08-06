@@ -11,70 +11,69 @@ import urllib.error
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+from .ai_evidence_scoring import (
+    classify_evidence,
+    evidence_weight,
+    has_live_surface_evidence,
+    score_evidence,
+)
+
 logger = logging.getLogger(__name__)
 
 
+# Legacy numeric table kept for reference / older report readers only.
+# Primary decisioning uses ai_evidence_scoring (behavioral / live_surface /
+# passive_structural / passive_hint / brand). Do not gate is_ai on these.
 EVIDENCE_WEIGHTS: Dict[str, int] = {
     "openapi_schema":           18,
     "openapi_ai_endpoint":      14,
     "graphql_schema":           14,
     "graphql_ai_field":         12,
-
     "framework_identified":     30,
     "framework_header":         15,
     "framework_cookie":         10,
-
     "behavior_llm_response":    22,
     "behavior_model_reported":  20,
     "behavior_streaming":       14,
-
     "chat_endpoint_200":        14,
     "embedding_endpoint_200":   10,
     "tool_endpoint_200":        10,
     "ml_endpoint_200":           8,
     "ml_endpoint_401_403":       6,
     "ml_endpoint_405":           5,
-
     "error_openai_format":      12,
     "error_missing_messages":   10,
     "error_missing_model":       8,
     "error_triton_format":       8,
     "error_huggingface_format":  7,
     "error_generic_validation":  4,
-
     "sse_streaming_header":     10,
-    "sse_chunked_transfer":      8,
+    "sse_chunked_transfer":      2,
     "sse_in_js":                 6,
     "websocket_ai_path":         6,
-
     "ai_response_header":        7,
-
     "js_ai_sdk":                 7,
     "js_api_path_extracted":     5,
-
     "robots_ai_path":            5,
     "sitemap_ai_path":           4,
     "csp_ai_domain":             6,
     "meta_ai_tag":               4,
     "favicon_known_framework":   5,
-
     "dom_assistant_role":        3,
     "html_ai_form":              3,
 }
 
-CONFIDENCE_BANDS = [
-    (100, "very_high"),
-    ( 65, "high"),
-    ( 40, "medium"),
-    ( 20, "low"),
-    (  0, "none"),
-]
-
 
 def score_to_confidence(score: int) -> str:
-    for threshold, label in CONFIDENCE_BANDS:
-        if score >= threshold:
-            return label
+    """Deprecated: prefer taxonomy confidence from score_evidence()."""
+    if score >= 100:
+        return "very_high"
+    if score >= 65:
+        return "high"
+    if score >= 40:
+        return "medium"
+    if score >= 20:
+        return "low"
     return "none"
 
 
@@ -111,8 +110,13 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
         "capabilities": ["chat", "rag", "memory"],
     },
     "LibreChat": {
-        "paths":       ["/api/messages", "/api/ask", "/api/convos"],
-        "js_strings":  ["librechat", "LibreChat"],
+        # /api/config and /api/user are reachable unauth (200/401); ask/messages
+        # are often auth-gated — still valid LibreChat identity signals.
+        "paths":       [
+            "/api/messages", "/api/ask", "/api/convos",
+            "/api/config", "/api/user", "/api/search", "/api/agents",
+        ],
+        "js_strings":  ["librechat", "LibreChat", "LibreChatConfig"],
         "cookie_names":["refreshToken"],
         "capabilities": ["chat", "tool_calling", "image_generation", "web_search"],
     },
@@ -287,6 +291,10 @@ SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
     ("/api/chat/completions", "chat"),
     ("/api/chat",             "chat"),
     ("/v1/completions",       "chat"),
+    # Common auth-gated chat surfaces (LibreChat, Open WebUI family)
+    ("/api/messages",         "chat"),
+    ("/api/ask",              "chat"),
+    ("/api/convos",           "chat"),
     ("/v1/embeddings",        "embedding"),
     ("/api/embeddings",       "embedding"),
     ("/api/v1/prediction",    "chat"),
@@ -303,6 +311,35 @@ SEED_ENDPOINT_RANKING: List[Tuple[str, str]] = [
     ("/runs",                 "chat"),
     ("/threads",              "chat"),
 ]
+
+
+# Exact path *segments* that look like inference handlers.
+_INFERENCE_SEGMENTS = frozenset({
+    "chat", "completion", "completions",
+    "generate", "predict", "prediction",
+    "ask", "message", "messages",
+    "run", "invoke", "llm", "inference",
+    "embedding", "embeddings",
+})
+
+
+def _looks_non_api_document(path: str) -> bool:
+    pl = (path or "").lower().split("?")[0].split("#")[0]
+    if not pl:
+        return True
+    return pl.endswith((
+        ".txt", ".xml", ".html", ".htm", ".md", ".pdf", ".csv",
+        ".css", ".js", ".map", ".ico", ".png", ".jpg", ".jpeg", ".svg", ".webp",
+    ))
+
+
+def _is_inference_path(path: str) -> bool:
+    """True when a path's segments look like an inference handler."""
+    p = (path or "").lower().split("?")[0].split("#")[0]
+    if not p or _looks_non_api_document(p):
+        return False
+    segments = [s for s in p.strip("/").split("/") if s]
+    return any(seg in _INFERENCE_SEGMENTS for seg in segments)
 
 OPENAPI_SPEC_PATHS = [
     "/openapi.json", "/openapi.yaml",
@@ -339,14 +376,17 @@ class EvidenceItem:
     source:    str
     endpoint:  str = ""
     framework: str = ""
+    evidence_class: str = ""
 
     @staticmethod
     def make(key: str, detail: str, source: str,
              endpoint: str = "", framework: str = "") -> "EvidenceItem":
+        cls = classify_evidence(key)
         return EvidenceItem(
             key=key, detail=detail,
-            weight=EVIDENCE_WEIGHTS.get(key, 0),
+            weight=evidence_weight(key),
             source=source, endpoint=endpoint, framework=framework,
+            evidence_class=cls.value,
         )
 
 
@@ -414,7 +454,7 @@ def classify_endpoint(url: str, auth_signals: List[AuthSignal] = None) -> Endpoi
 class FingerprintReport:
     is_ai_powered:    bool
     confidence:       str
-    evidence_score:   int
+    evidence_score:   int = 0
 
     framework:            str   = ""
     framework_confidence: float = 0.0
@@ -442,11 +482,20 @@ class FingerprintReport:
     evidence_items:   List[EvidenceItem] = field(default_factory=list)
     atlas_techniques: List[str]          = field(default_factory=list)
 
+    has_live_surface: bool = False
+    ai_brand_only:    bool = False
+    detection:        str  = "not_detected"
+    evidence_classes: Dict = field(default_factory=dict)
+
     def to_dict(self) -> Dict:
         return {
             "is_ai_powered":          self.is_ai_powered,
             "confidence":             self.confidence,
             "evidence_score":         self.evidence_score,
+            "has_live_surface":       self.has_live_surface,
+            "ai_brand_only":          self.ai_brand_only,
+            "detection":              self.detection,
+            "evidence_classes":       self.evidence_classes,
             "framework":              self.framework,
             "framework_confidence":   round(self.framework_confidence * 100, 1),
             "framework_signals":      self.framework_signals,
@@ -482,7 +531,8 @@ class FingerprintReport:
             "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
-                 "source": e.source, "endpoint": e.endpoint, "framework": e.framework}
+                 "source": e.source, "endpoint": e.endpoint,
+                 "framework": e.framework, "evidence_class": e.evidence_class}
                 for e in sorted(self.evidence_items, key=lambda x: x.weight, reverse=True)
             ],
         }
@@ -492,7 +542,10 @@ class FingerprintReport:
         print(f"\n{'='*w}")
         print(f"  AI Fingerprint Report")
         print(f"{'='*w}")
-        print(f"  Confidence       : {self.confidence.upper()} (score={self.evidence_score})")
+        print(f"  Detection        : {self.detection}  (confidence={self.confidence})")
+        print(f"  Live surface     : {self.has_live_surface}")
+        if self.ai_brand_only:
+            print(f"  Brand only       : True (no live inference surface)")
         if self.framework:
             pct = f"{self.framework_confidence*100:.0f}%"
             print(f"  Framework        : {self.framework}  (confidence {pct})")
@@ -634,6 +687,7 @@ class AIFingerprintAgent:
             if isinstance(disc_r, dict):
                 all_evidence.extend(disc_r.get("evidence", []))
                 ml_endpoints.extend(disc_r.get("endpoints", []))
+                auth_signals.extend(disc_r.get("auth_signals", []))
 
         ml_endpoints     = list(dict.fromkeys(ml_endpoints))
         discovered_paths = list(dict.fromkeys(discovered_paths))
@@ -655,14 +709,52 @@ class AIFingerprintAgent:
             detected_framework, all_frameworks, openapi_schema,
             ml_endpoints, graphql_types)
 
+        # Deduplicate evidence
+        seen_ev: Set[Tuple[str, str]] = set()
+        deduped_evidence: List[EvidenceItem] = []
+        for ev in all_evidence:
+            k = (ev.key, ev.detail)
+            if k in seen_ev:
+                continue
+            seen_ev.add(k)
+            deduped_evidence.append(ev)
+        all_evidence = deduped_evidence
+
+        # Taxonomy decision: is_ai iff live surface (behavioral OR live_surface).
+        # Product names / FRAMEWORK_SIGNATURES are brand labels only.
+        evidence_keys = [ev.key for ev in all_evidence]
+
+        def _ep_path(ep: str) -> str:
+            return urllib.parse.urlparse(ep).path if "://" in (ep or "") else (ep or "")
+
+        live_from_keys = has_live_surface_evidence(evidence_keys)
+        live_from_ml = any(_is_inference_path(_ep_path(ep)) for ep in ml_endpoints)
+        live_from_auth = any(
+            _is_inference_path(_ep_path(sig.endpoint)) for sig in auth_signals
+        )
+        has_live_surface = live_from_keys or live_from_ml or live_from_auth
+
+        detection = score_evidence(evidence_keys)
+        confidence = detection.confidence
+        classes = detection.classes or {}
+        ai_brand_only = (
+            not has_live_surface
+            and bool(classes.get("brand"))
+            and not classes.get("behavioral")
+            and not classes.get("live_surface")
+            and not classes.get("passive_structural")
+            and not classes.get("passive_hint")
+        )
+        is_ai = has_live_surface
+        # Legacy score kept for report readers; not used for is_ai.
         total_score = sum(ev.weight for ev in all_evidence)
-        confidence  = score_to_confidence(total_score)
-        is_ai       = total_score >= 26
 
         atlas: List[str] = []
         for ep in ml_endpoints:
             path = urllib.parse.urlparse(ep).path.lower()
-            if any(x in path for x in ["/chat", "/completions", "/generate", "/messages"]):
+            if any(x in path for x in [
+                "/chat", "/completions", "/generate", "/messages", "/ask",
+            ]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["chat"])
             elif any(x in path for x in ["/embed", "/embedding"]):
                 atlas.append(ATLAS_TECHNIQUE_MAP["embedding"])
@@ -723,6 +815,10 @@ class AIFingerprintAgent:
             deployment_signals    = deployment,
             evidence_items        = all_evidence,
             atlas_techniques      = atlas,
+            has_live_surface      = has_live_surface,
+            ai_brand_only         = ai_brand_only,
+            detection             = detection.detection.value,
+            evidence_classes      = detection.classes,
         )
 
     def _analyse_html(
@@ -1188,10 +1284,20 @@ class AIFingerprintAgent:
                     f"SSE at {path}", "probe", endpoint=url))
                 endpoints.append(url)
 
+            # Chunked alone is not an AI signal; require SSE or AI-shaped body
             if "chunked" in headers_low.get("transfer-encoding", ""):
-                evidence.append(EvidenceItem.make(
-                    "sse_chunked_transfer",
-                    f"Chunked transfer at {path}", "probe", endpoint=url))
+                ai_shaped = (
+                    "text/event-stream" in ct
+                    or any(
+                        re.search(p, body or "", re.I)
+                        for p in AI_RESPONSE_BODY_PATTERNS
+                    )
+                )
+                if ai_shaped:
+                    evidence.append(EvidenceItem.make(
+                        "sse_chunked_transfer",
+                        f"Chunked transfer with AI/SSE body at {path}",
+                        "probe", endpoint=url))
 
         if status in (401, 403):
             auth_type = self._detect_auth_type(headers_low, body_l)
@@ -1199,17 +1305,21 @@ class AIFingerprintAgent:
                 endpoint=url, auth_type=auth_type,
                 status_code=status,
                 detail=f"Auth required ({auth_type}) at {path}"))
-            if category in ("chat", "embedding", "ml", "graphql"):
+            # Live-surface only for inference-shaped paths — /admin 401 must not
+            # flip is_ai. Category alone is not enough (schema/models noise).
+            if _is_inference_path(path):
                 evidence.append(EvidenceItem.make(
                     "ml_endpoint_401_403",
-                    f"Auth-gated {path} (HTTP {status}, {auth_type})",
+                    f"Auth-gated inference path {path} (HTTP {status}, {auth_type})",
                     "probe", endpoint=url))
+                endpoints.append(url)
 
-        if status == 405 and category in ("chat", "embedding", "ml"):
+        if status == 405 and _is_inference_path(path):
             evidence.append(EvidenceItem.make(
                 "ml_endpoint_405",
-                f"Endpoint exists {path} (HTTP 405)",
+                f"Inference endpoint exists {path} (HTTP 405)",
                 "probe", endpoint=url))
+            endpoints.append(url)
 
         if status in (400, 422) and body:
             fw = self._fingerprint_error_body(body, url, evidence)
@@ -1582,11 +1692,27 @@ class AIFingerprintAgent:
     ) -> Dict:
         evidence:    List[EvidenceItem] = []
         ml_endpoints: List[str]         = []
+        auth_signals: List[AuthSignal]  = []
         loop = asyncio.get_event_loop()
 
         for ep in (endpoints or []):
             url    = ep.get("url", "")
             status = ep.get("status", 0)
+            path   = urllib.parse.urlparse(url).path if url else ""
+            # Auth-gated inference paths discovered by the scanner are live surface
+            # even when chat bodies are unreachable unauthenticated.
+            if status in (401, 403) and _is_inference_path(path):
+                auth_type = "unknown"
+                auth_signals.append(AuthSignal(
+                    endpoint=url, auth_type=auth_type,
+                    status_code=int(status),
+                    detail=f"Auth required at discovered {path}"))
+                evidence.append(EvidenceItem.make(
+                    "ml_endpoint_401_403",
+                    f"Auth-gated inference path {path} (HTTP {status})",
+                    "probe", endpoint=url))
+                ml_endpoints.append(url)
+                continue
             if status == 200:
                 try:
                     _, hdrs, body = await loop.run_in_executor(
@@ -1595,7 +1721,6 @@ class AIFingerprintAgent:
                         if any(re.search(p, body, re.I)
                                for p in AI_RESPONSE_BODY_PATTERNS):
                             ml_endpoints.append(url)
-                            path = urllib.parse.urlparse(url).path
                             evidence.append(EvidenceItem.make(
                                 "ml_endpoint_200",
                                 f"AI body at discovered endpoint {path}",
@@ -1603,7 +1728,11 @@ class AIFingerprintAgent:
                 except Exception:
                     pass
 
-        return {"evidence": evidence, "endpoints": list(dict.fromkeys(ml_endpoints))}
+        return {
+            "evidence": evidence,
+            "endpoints": list(dict.fromkeys(ml_endpoints)),
+            "auth_signals": auth_signals,
+        }
 
     def _fetch(
         self,

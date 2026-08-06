@@ -88,14 +88,12 @@ export class ApiService {
 
   queryDocument(
     question: string,
-    sessionId?: string,
-    authCookie: string = ''
+    sessionId?: string
   ): Promise<any> {
     const payload: any = {
       question,
       session_id: sessionId || this.getSessionId()
     };
-    if (authCookie) payload.auth_cookie = authCookie;
     return firstValueFrom(
       this.http.post<any>('/api/query/', payload, {
         headers: { 'Content-Type': 'application/json' }
@@ -105,15 +103,13 @@ export class ApiService {
 
   queryDocumentStream(
     question: string,
-    sessionId?: string,
-    authCookie: string = ''
+    sessionId?: string
   ): Observable<StreamEvent> {
     const subject = new Subject<StreamEvent>();
     const payload: any = {
       question,
       session_id: sessionId || this.getSessionId()
     };
-    if (authCookie) payload.auth_cookie = authCookie;
     this.consumeSSE('/api/query/stream', payload, subject);
     return subject.asObservable();
   }
@@ -363,20 +359,6 @@ export class ApiService {
                   [disabled]="isLoading()"
                   class="w-full px-4 py-3 rounded-lg bg-gray-900 border border-gray-600 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none resize-none text-sm disabled:opacity-60"></textarea>
 
-        <div class="flex items-center gap-3">
-          <button type="button" (click)="showAuthInput = !showAuthInput"
-                  class="text-xs text-yellow-400 hover:text-yellow-300">
-            {{ showAuthInput || authCookie ? 'Session cookie' : 'Add session cookie (optional)' }}
-          </button>
-          <button *ngIf="authCookie" (click)="authCookie = ''; showAuthInput = false"
-                  class="text-xs text-red-400 hover:text-red-300">clear</button>
-        </div>
-        <input *ngIf="showAuthInput"
-               type="password"
-               placeholder="Paste session cookie (e.g. sessionid=abc123; csrftoken=xyz)"
-               [(ngModel)]="authCookie"
-               class="w-full px-3 py-2 text-xs border border-yellow-600 rounded bg-gray-900 text-yellow-200 placeholder-gray-600 focus:border-yellow-400 font-mono">
-
         <button (click)="handleQuery(promptInput.value); promptInput.value = ''"
                 [disabled]="isLoading() || !promptInput.value.trim()"
                 class="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-lg disabled:from-gray-600 disabled:to-gray-600 disabled:cursor-not-allowed transition-all font-medium">
@@ -414,9 +396,6 @@ export class AppComponent {
   analysisMessage = signal<string>('');
   analysisPercent = signal<number>(0);
   analysisSteps = signal<string[]>([]);
-
-  authCookie = '';
-  showAuthInput = false;
 
   activeSections = signal<Map<number, string | null>>(new Map());
 
@@ -491,8 +470,7 @@ export class AppComponent {
     try {
       this.apiService.queryDocumentStream(
         question,
-        undefined,
-        this.authCookie
+        undefined
       ).subscribe({
         next: (event: StreamEvent) => {
           switch (event.type) {
@@ -555,7 +533,7 @@ export class AppComponent {
       this.analysisPercent.set(60);
 
       const queryResponse = await this.apiService.queryDocument(
-        question, undefined, this.authCookie
+        question, undefined
       );
 
       const answer = queryResponse?.answer ?? 'No answer received';

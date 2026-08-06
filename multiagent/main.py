@@ -444,8 +444,6 @@ async def query_with_full_autogen(request: Request):
         body        = await request.json()
         question    = body.get("question")
         session_id  = body.get("session_id", "default")
-        auth_cookie = body.get("auth_cookie", "")
-
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
 
@@ -478,7 +476,6 @@ async def query_with_full_autogen(request: Request):
                         use_cache=False,
                         enable_web_scan=True,
                         target_url=target_url,
-                        auth_cookie=auth_cookie,
                     )
                     scan_data = (
                         result.get("reasoning_chain", {}).get("scan_results") or {}
@@ -580,9 +577,8 @@ async def query_with_full_autogen(request: Request):
 # ============================================================================
 
 class StreamQueryRequest(BaseModel):
-    question:    str
-    session_id:  Optional[str] = None
-    auth_cookie: Optional[str] = None
+    question:   str
+    session_id: Optional[str] = None
 
 
 @app.post("/query/stream")
@@ -590,9 +586,8 @@ async def query_stream(request: StreamQueryRequest):
 
     async def event_generator():
         try:
-            question    = request.question
-            session_id  = request.session_id or "default"
-            auth_cookie = request.auth_cookie or ""
+            question   = request.question
+            session_id = request.session_id or "default"
 
             yield _format_sse("progress", {
                 "phase": "classification", "step": 1, "total_steps": 6,
@@ -705,8 +700,7 @@ async def query_stream(request: StreamQueryRequest):
 
                     scan_task = asyncio.create_task(
                         scanner.scan_application(
-                            target_url=target_url, max_time_minutes=3, verbose=True,
-                            auth_cookie=auth_cookie,
+                            target_url=target_url, max_time_minutes=15, verbose=True,
                         )
                     )
 
@@ -829,21 +823,32 @@ async def scan_web_application(request: Request):
         return JSONResponse({
             "target_url":    target_url,
             "scan_complete": True,
+            "scan_scope":    scan_data.get("scan_scope", "blackbox_unauth"),
             "report":        result["report"],
             "scan_summary":  {
                 "tasks_generated":    scan_data.get("tasks_generated", 0),
                 "tasks_executed":     scan_data.get("tasks_executed", 0),
                 "forms_discovered":   scan_data.get("forms_discovered", 0),
                 "urls_discovered":    scan_data.get("urls_discovered", 0),
-                "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
+                "vulnerabilities_found": (
+                    scan_data.get("confirmed_count", 0)
+                    + scan_data.get("potential_count", 0)
+                ),
+                "not_assessed_count": len(scan_data.get("not_assessed_endpoints") or []),
                 "scan_duration":      scan_data.get("scan_duration", 0),
+                "coverage_assessment": scan_data.get("coverage_assessment") or {},
                 # AI backdoor fields
                 "is_ai_powered":      scan_data.get("is_ai_powered", False),
                 "avid_findings":      scan_data.get("avid_findings", 0),
                 "strategic_recs":     scan_data.get("strategic_recommendations", 0),
             },
-            "vulnerabilities": scan_data.get("vulnerabilities", []),
-            "session_id":      session_id,
+            "vulnerabilities":        scan_data.get("vulnerabilities", []),
+            "endpoints_discovered":   scan_data.get("endpoints_discovered", []),
+            "not_assessed_endpoints": scan_data.get("not_assessed_endpoints", []),
+            "coverage_assessment":    scan_data.get("coverage_assessment") or {},
+            "stride_threats":         scan_data.get("stride_threats", []),
+            "verified_cves":          scan_data.get("verified_cves") or [],
+            "session_id":             session_id,
         })
 
     except HTTPException:

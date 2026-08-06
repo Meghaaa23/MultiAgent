@@ -40,6 +40,13 @@ class Evidence:
         return asdict(self)
 
 
+def _enum_value(v):
+    """Serialize str/Enum fields to plain strings (Py3.12 str(Enum)='Enum.MEMBER')."""
+    if isinstance(v, Enum):
+        return v.value if hasattr(v, "value") else str(v)
+    return v
+
+
 @dataclass
 class Finding:
     vuln_type:   str
@@ -57,7 +64,15 @@ class Finding:
     owasp:       str      = ""
 
     def to_dict(self) -> Dict:
-        return asdict(self)
+        # Plain strings so publisher gates match "High"/"Confirmed", not
+        # "Confidence.HIGH" (Python 3.11+ str(Enum) representation).
+        def _factory(pairs):
+            return {k: _enum_value(v) for k, v in pairs}
+
+        d = asdict(self, dict_factory=_factory)
+        if isinstance(d.get("evidence"), dict):
+            d["evidence"] = {k: _enum_value(v) for k, v in d["evidence"].items()}
+        return d
 
 
 XSS_PAYLOADS = [
@@ -215,6 +230,8 @@ class AttackVerificationAgent:
             "Clickjacking" in f.vuln_type and f.status == VulnStatus.CONFIRMED
             for f in findings
         )
+        # Dedup: XFO header absence is the clickjacking finding's evidence.
+        # STRIDE cites that Section 3 finding rather than re-deriving XFO alone.
         if has_clickjacking:
             findings = [
                 f for f in findings
@@ -265,10 +282,16 @@ class AttackVerificationAgent:
             if not headers:
                 return findings
 
+            # Keep latest publisher header logic from remove-mongodb-doc-ui branch
             headers_lower = {k.lower(): v for k, v in headers.items()}
             csp_value = headers_lower.get("content-security-policy", "")
-            is_https = str(url).lower().startswith("https://")
-            # Align with vulnerability_tester publisher header set
+            try:
+                from .vulnerability_tester import _should_report_missing_header
+            except Exception:
+                def _should_report_missing_header(header: str, u: str) -> bool:  # type: ignore
+                    if header == "Strict-Transport-Security":
+                        return str(u).lower().startswith("https://")
+                    return header not in ("X-XSS-Protection", "Referrer-Policy")
             publishable = [
                 "X-Frame-Options",
                 "X-Content-Type-Options",
@@ -280,7 +303,7 @@ class AttackVerificationAgent:
                     continue
                 if h == "X-Frame-Options" and "frame-ancestors" in csp_value.lower():
                     continue
-                if h == "Strict-Transport-Security" and not is_https:
+                if not _should_report_missing_header(h, url):
                     continue
                 findings.append(Finding(
                     vuln_type   = f"Missing Security Header: {h}",
@@ -463,7 +486,7 @@ class AttackVerificationAgent:
                     findings.append(xss_finding)
 
                 if any(kw in param_name.lower() for kw in
-                       ("redirect", "url", "next", "return", "goto", "dest")):
+                       ("redirect", "url", "next", "return", "goto", "dest", "to")):
                     redir_finding = await self._test_open_redirect(url, param_name, parsed)
                     if redir_finding:
                         findings.append(redir_finding)
@@ -472,35 +495,67 @@ class AttackVerificationAgent:
 
     async def _test_reflected_xss(self, url: str, param: str,
                                    parsed) -> Optional[Finding]:
+        # Redirect params commonly echo into error pages (Juice Shop 406) — not XSS
+        if any(kw in param.lower() for kw in
+               ("redirect", "url", "next", "return", "goto", "dest", "to")):
+            return None
+
         for payload in XSS_PAYLOADS[:3]:
             try:
                 test_url             = self._inject_param(parsed, param, payload)
                 status, headers, body = await self._get_full_response(test_url)
 
-                if body and payload in body:
-                    return Finding(
-                        vuln_type   = "Reflected XSS",
-                        severity    = "High",
-                        status      = VulnStatus.CONFIRMED,
-                        location    = url,
-                        parameter   = param,
-                        payload     = payload,
-                        description = f"The '{param}' parameter reflects user input without sanitization.",
-                        impact      = "Attacker can execute arbitrary JavaScript in the victim's browser.",
-                        remediation = "Apply output encoding to all user-supplied input. Implement a strict Content-Security-Policy.",
-                        confidence  = Confidence.HIGH,
-                        evidence    = Evidence(
-                            request               = f"GET {test_url}",
-                            response_status       = status,
-                            response_body_snippet = self._extract_context(body, payload),
-                            payload_reflected     = True,
-                            verified              = True,
-                            confidence            = Confidence.HIGH,
-                            confirmation_method   = "http_body"
-                        ),
-                        cwe   = "CWE-79",
-                        owasp = "A03:2021"
-                    )
+                if not body or payload not in body:
+                    continue
+                if status < 200 or status >= 300:
+                    continue
+
+                ctype = ""
+                for k, v in (headers or {}).items():
+                    if k.lower() == "content-type":
+                        ctype = str(v).lower()
+                        break
+                lower = body.lower()
+                # Reject error-page / allowlist echoes
+                if any(m in lower for m in (
+                    "unrecognized target url", "invalid redirect",
+                    "bad request", "internal server error",
+                )):
+                    continue
+                # Require unescaped payload (not &lt;script&gt;)
+                idx = body.find(payload)
+                window = body[max(0, idx - 40):idx + len(payload) + 40]
+                if "&lt;" in window and "<script" not in window.lower() \
+                        and "onerror" not in window.lower():
+                    continue
+                if ctype and "json" in ctype and "<" not in payload:
+                    # Plain string reflection inside JSON is not browser XSS by itself
+                    continue
+
+                return Finding(
+                    vuln_type   = "Reflected XSS",
+                    severity    = "High",
+                    status      = VulnStatus.CONFIRMED,
+                    location    = url,
+                    parameter   = param,
+                    payload     = payload,
+                    description = f"The '{param}' parameter reflects user input without sanitization.",
+                    impact      = "Attacker can execute arbitrary JavaScript in the victim's browser.",
+                    remediation = "Apply output encoding to all user-supplied input. Implement a strict Content-Security-Policy.",
+                    confidence  = Confidence.HIGH,
+                    evidence    = Evidence(
+                        request               = f"GET {test_url}",
+                        response_status       = status,
+                        response_body_snippet = self._extract_context(body, payload),
+                        response_headers      = {"Content-Type": ctype} if ctype else {},
+                        payload_reflected     = True,
+                        verified              = True,
+                        confidence            = Confidence.HIGH,
+                        confirmation_method   = "http_body"
+                    ),
+                    cwe   = "CWE-79",
+                    owasp = "A03:2021"
+                )
             except Exception:
                 continue
         return None
@@ -557,6 +612,22 @@ class AttackVerificationAgent:
                 return name == "token" or any(kw in name for kw in csrf_keywords)
 
             if not any(_has_csrf(inp) for inp in inputs) and form.get("method", "get").lower() == "post":
+                # Align with VulnerabilityTester CSRF honesty gates
+                try:
+                    from .vulnerability_tester import (
+                        _csrf_finding_should_skip, _form_inputs,
+                    )
+                    norm_inputs = _form_inputs(form) if inputs else []
+                    if _csrf_finding_should_skip(form, norm_inputs or [
+                        i if isinstance(i, dict) else {"name": str(i)}
+                        for i in inputs
+                    ]):
+                        continue
+                except Exception:
+                    # Fallback: skip obvious login forms
+                    action_l = (action or "").lower()
+                    if any(k in action_l for k in ("/login", "/signin", "/register")):
+                        continue
                 findings.append(Finding(
                     vuln_type   = "Missing CSRF Protection",
                     severity    = "Medium",
@@ -565,12 +636,12 @@ class AttackVerificationAgent:
                     description = "POST form does not appear to include a CSRF token.",
                     impact      = "Attacker can forge requests on behalf of authenticated users.",
                     remediation = "Implement synchronizer token pattern or SameSite cookie attribute.",
-                    confidence  = Confidence.LOW,
+                    confidence  = Confidence.MEDIUM,
                     evidence    = Evidence(
                         request             = f"Analyzed form at {action}",
                         response_status     = 0,
                         verified            = False,
-                        confidence          = Confidence.LOW,
+                        confidence          = Confidence.MEDIUM,
                         confirmation_method = "code analysis"
                     ),
                     cwe   = "CWE-352",
@@ -619,18 +690,24 @@ class AttackVerificationAgent:
             except Exception:
                 return {"acao": "", "acac": "", "acam": "", "acah": "", "status": 0, "url": probe_url}
 
-        def _reflects_evil(acao: str) -> bool:
-            return bool(acao) and (evil_orig in acao or acao.strip() == "*")
+        def _is_wildcard(acao: str) -> bool:
+            return (acao or "").strip() == "*"
+
+        def _reflects_origin(acao: str) -> bool:
+            return bool(acao) and evil_orig in acao
 
         def _credentials_true(acac: str) -> bool:
-            return acac.strip().lower() == "true"
+            return (acac or "").strip().lower() == "true"
 
         try:
             base_result        = await loop.run_in_executor(None, lambda: _probe(base))
             acao               = base_result["acao"]
             acac               = base_result["acac"]
             preflight_result   = await loop.run_in_executor(None, lambda: _probe(base, method="OPTIONS"))
-            preflight_reflects = _reflects_evil(preflight_result["acao"])
+            preflight_reflects = (
+                _reflects_origin(preflight_result["acao"])
+                or _is_wildcard(preflight_result["acao"])
+            )
 
             api_probes = await asyncio.gather(
                 *[loop.run_in_executor(None, lambda p=path: _probe(base + p)) for path in api_paths],
@@ -639,17 +716,22 @@ class AttackVerificationAgent:
             api_hits = [
                 r for r in api_probes
                 if isinstance(r, dict) and r.get("status", 0) not in (0, 404)
-                and _reflects_evil(r.get("acao", ""))
+                and (
+                    _reflects_origin(r.get("acao", ""))
+                    or _is_wildcard(r.get("acao", ""))
+                )
+            ]
+            # Prefer reflected-origin API hits over bare * for severity
+            api_reflected = [
+                r for r in api_hits if _reflects_origin(r.get("acao", ""))
             ]
 
-            reflects_base = _reflects_evil(acao)
+            reflects_base = _reflects_origin(acao)
+            star_base     = _is_wildcard(acao)
             creds_true    = _credentials_true(acac)
             api_creds     = any(_credentials_true(r.get("acac", "")) for r in api_hits)
 
-            if not reflects_base and not api_hits:
-                return findings
-
-            if acao.strip() == "*" and not creds_true and not api_hits and not preflight_reflects:
+            if not reflects_base and not star_base and not api_hits:
                 return findings
 
             if creds_true or api_creds:
@@ -658,22 +740,26 @@ class AttackVerificationAgent:
                               "An attacker can make authenticated cross-origin requests from any domain.")
                 status     = VulnStatus.CONFIRMED
                 confidence = Confidence.HIGH
-            elif api_hits:
+            elif api_reflected or reflects_base:
                 severity   = "Medium"
-                impact     = (f"Server reflects attacker origin on {len(api_hits)} API endpoint(s). "
-                              "Enables cross-origin API probing.")
+                impact     = (
+                    "Attacker-controlled origin reflected"
+                    + (f" on {len(api_reflected)} API endpoint(s)" if api_reflected else "")
+                    + ". Anonymous cross-origin reads possible (no credentials)."
+                )
                 status     = VulnStatus.CONFIRMED
                 confidence = Confidence.HIGH
-            elif reflects_base and preflight_reflects:
-                severity   = "Medium"
-                impact     = "Server reflects attacker-controlled origin on main page and preflight requests."
-                status     = VulnStatus.CONFIRMED
-                confidence = Confidence.MEDIUM
-            else:
+            elif star_base or any(_is_wildcard(r.get("acao", "")) for r in api_hits):
+                # Bare ACAO=* without credentials — Potential Low (not STRIDE)
                 severity   = "Low"
-                impact     = "Server reflects attacker-controlled origin on homepage only. Low exploitability."
+                impact     = (
+                    "Wildcard ACAO (*) without credentials — public responses "
+                    "readable cross-origin; cookie theft not enabled."
+                )
                 status     = VulnStatus.POTENTIAL
                 confidence = Confidence.MEDIUM
+            else:
+                return findings
 
             evidence_lines = [f"GET {base} (Origin: {evil_orig})"]
             for r in api_hits[:3]:
@@ -690,9 +776,9 @@ class AttackVerificationAgent:
                 status      = status,
                 location    = base,
                 description = (
-                    f"Server reflects attacker-controlled Origin (ACAO: {acao})"
+                    f"Server CORS ACAO={acao or '(empty)'}"
                     + (" with credentials=true" if creds_true else "")
-                    + (f". Also reflected on {len(api_hits)} API endpoint(s)." if api_hits else ".")
+                    + (f". Also on {len(api_hits)} API endpoint(s)." if api_hits else ".")
                 ),
                 impact      = impact,
                 remediation = ("Restrict Access-Control-Allow-Origin to an explicit allowlist of trusted origins. "
@@ -809,7 +895,12 @@ class AttackVerificationAgent:
                 body = resp.read(8192).decode("utf-8", errors="replace")
                 return resp.status, dict(resp.headers), body
         except urllib.error.HTTPError as e:
-            return e.code, dict(e.headers) if e.headers else {}, ""
+            body = ""
+            try:
+                body = e.read(8192).decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            return e.code, dict(e.headers) if e.headers else {}, body
         except Exception:
             return 0, {}, ""
 

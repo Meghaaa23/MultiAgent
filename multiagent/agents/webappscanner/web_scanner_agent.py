@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set
 from datetime import datetime
 from pprint import pprint
 
-from .fingerprint_agent         import TechFingerprintAgent
+from .fingerprint_agent         import TechFingerprintAgent, merge_url_stack_signals
 from .pipeline_agent            import CVEVerificationPipeline
 from .endpoint_discovery_agent  import EndpointDiscoveryAgent
 from .browser_controller        import BrowserController
@@ -64,10 +64,15 @@ def _validate_stack(stack, response_headers, body):
 
 def _build_evidence_gated_stride(target_url, response_headers,
                                   discovered_params, discovered_forms,
-                                  cors_misconfigured, stack,
+                                  cors_mode, stack,
                                   headers_capture_failed: bool = False) -> List[Dict]:
+    """
+    cors_mode: None | "wildcard" | "reflected" | "credentialed"
+    Only reflected/credentialed CORS enter publisher STRIDE; bare ACAO=*
+    without credentials is Low and omitted (honesty — not cookie theft).
+    """
     threats = []
-    hdrs    = {k.lower(): v for k, v in response_headers.items()}
+    hdrs    = {k.lower(): v for k, v in (response_headers or {}).items()}
     xfo     = hdrs.get("x-frame-options", "")
     csp     = hdrs.get("content-security-policy", "")
 
@@ -75,7 +80,10 @@ def _build_evidence_gated_stride(target_url, response_headers,
         threats.append({
             "category":   "Spoofing",
             "threat":     "Clickjacking",
-            "evidence":   "X-Frame-Options and CSP frame-ancestors absent",
+            "evidence":   (
+                "Missing Clickjacking Protection "
+                "(X-Frame-Options and CSP frame-ancestors absent)"
+            ),
             "likelihood": "Medium",
             "impact":     "Medium",
             "mitigation": "Add X-Frame-Options: DENY or CSP frame-ancestors 'none'",
@@ -95,16 +103,27 @@ def _build_evidence_gated_stride(target_url, response_headers,
             "confirmed":  False,
         })
 
-    if cors_misconfigured:
+    if cors_mode == "credentialed":
         threats.append({
             "category":   "Information Disclosure",
             "threat":     "CORS Misconfiguration",
-            "evidence":   "ACAO reflects attacker-controlled origin (confirmed)",
+            "evidence":   "ACAO reflects attacker origin with Allow-Credentials: true",
             "likelihood": "High",
             "impact":     "High",
-            "mitigation": "Restrict ACAO to trusted origins; remove wildcard",
+            "mitigation": "Restrict ACAO to trusted origins; never pair * with credentials",
             "confirmed":  True,
         })
+    elif cors_mode == "reflected":
+        threats.append({
+            "category":   "Information Disclosure",
+            "threat":     "CORS Misconfiguration",
+            "evidence":   "ACAO reflects attacker-controlled origin (no credentials)",
+            "likelihood": "Medium",
+            "impact":     "Medium",
+            "mitigation": "Restrict ACAO to trusted origins; remove origin reflection",
+            "confirmed":  True,
+        })
+    # cors_mode == "wildcard" (ACAO=* without ACAC): omit from STRIDE — Low only
 
     def _inputs(form):
         return form.get("inputs") or form.get("fields") or []
@@ -123,7 +142,7 @@ class WebScannerAgent:
 
         self.fingerprinter  = TechFingerprintAgent(openai_client, llm_model)
         self.cve_pipeline   = CVEVerificationPipeline(nvd_api_key=os.environ.get("NVD_API_KEY", ""))
-        self.endpoint_disco = EndpointDiscoveryAgent(timeout=5, max_probe_paths=30)
+        self.endpoint_disco = EndpointDiscoveryAgent(timeout=5, max_probe_paths=90)
         self.browser        = BrowserController(openai_client, llm_model)
         self.vuln_tester    = VulnerabilityTester(timeout=10)
         self.verifier       = AttackVerificationAgent(openai_client, llm_model)
@@ -142,24 +161,22 @@ class WebScannerAgent:
         print(" WebScannerAgent initialized ")
 
     async def scan_application(self, target_url: str,
-                               max_time_minutes: int = 10,
-                               verbose: bool = False,
-                               auth_cookie: str = "") -> Dict:
+                               max_time_minutes: int = 15,
+                               verbose: bool = False) -> Dict:
         start = datetime.now()
 
         if "#" in target_url:
             target_url = target_url.split("#")[0].rstrip("/")
 
         target_url = _resolve_docker_url(target_url, verbose=verbose)
-        self.vuln_tester.auth_cookie = auth_cookie or ""
 
         if verbose:
             print(f"\n{'='*70}")
             print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
-            if auth_cookie:
-                print(f"  Auth   : Session cookie provided (authenticated scan)")
+            print(f"  Mode   : Black-box unauthenticated")
             print(f"  Target : {target_url}")
             print(f"  Budget : {max_time_minutes} minutes")
+            print(f"  Crawl  : Deep (shared anonymous session)")
             print(f"{'='*70}\n")
 
         all_forms:       List[Dict] = []
@@ -257,6 +274,29 @@ class WebScannerAgent:
                    
                     if ep.get("category") != "discovered_protected":
                         all_urls.append(ep["url"])
+            # Promote bare paths into parametrized URLs for active testing
+            from .vulnerability_tester import synthesize_injectable_urls
+            all_urls.extend(synthesize_injectable_urls(
+                target_url,
+                [ep.get("url", "") for ep in discovered_endpoints if ep.get("url")],
+                page_html=html or "",
+            ))
+            # Re-merge URL stack signals from discovered paths (e.g. start.mvc)
+            # so Spring/Java/Tomcat are not left as unverified hints.
+            disco_urls = [
+                ep.get("url", "") for ep in discovered_endpoints if ep.get("url")
+            ]
+            disco_urls.append(target_url)
+            stack = merge_url_stack_signals(stack, disco_urls)
+            if verbose:
+                promoted = [
+                    t.get("name") for t in (stack.get("technologies") or [])
+                    if isinstance(t, dict) and t.get("category") in (
+                        "Server", "Language", "Framework"
+                    )
+                ]
+                if promoted:
+                    print(f"   Stack after discovery merge: {', '.join(promoted)}")
         except Exception as e:
             logger.warning(f"Endpoint discovery failed: {e}")
 
@@ -275,7 +315,9 @@ class WebScannerAgent:
         ai_fingerprint  = None
         avid_results    = None
         ai_vuln_results = None
+        ai_infra_result = None
         is_ai_powered   = False
+        brand_only_ai   = False
 
         try:
             ai_fingerprint = await self.ai_fingerprinter.fingerprint(
@@ -286,16 +328,38 @@ class WebScannerAgent:
                 verbose              = verbose,
             )
 
-            raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
-            confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers"))
-            is_ai_powered = raw_is_ai and (confidence == "high" or has_concrete)
+            # Taxonomy gate: escalate only on live inference surface.
+            # Brand / product-name / stack identity alone must not escalate.
+            has_live_surface = bool(
+                ai_fingerprint.get("has_live_surface")
+                or ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("auth_required_paths")
+            )
+            brand_only_ai = (
+                bool(ai_fingerprint.get("ai_brand_only")) and not has_live_surface
+            )
+            is_ai_powered = bool(
+                ai_fingerprint.get("is_ai_powered") and has_live_surface
+            )
 
             if is_ai_powered:
                 if verbose:
-                    print(f"  AI-powered app detected [{confidence} confidence]")
+                    conf = ai_fingerprint.get("confidence", "low")
+                    det = ai_fingerprint.get("detection", "not_detected")
+                    print(f"  AI-powered app detected [{det}, confidence={conf}]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
+
+                if verbose:
+                    print("  AI Infrastructure Build Attack Analysis...")
+                try:
+                    ai_infra_result = await self.ai_infra_agent.scan(
+                        target_url=target_url, ai_stack=ai_fingerprint,
+                    )
+                    if verbose and ai_infra_result is not None:
+                        print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
+                except Exception as e:
+                    logging.warning(f"AIInfraAgent failed: {e}")
 
                 if verbose:
                     print("  Querying AVID database for AI vulnerabilities...")
@@ -321,122 +385,100 @@ class WebScannerAgent:
                     s = len(ai_vuln_results.get("strategic_recommendations", []))
                     print(f"   AI vulns: {c} confirmed, {p} potential")
                     print(f"   Strategic recommendations: {s} ATLAS-based\n")
+            elif brand_only_ai:
+                if verbose:
+                    fw = ai_fingerprint.get("framework") or (
+                        (ai_fingerprint.get("frameworks_detected") or ["unknown"])[0]
+                    )
+                    det = ai_fingerprint.get("detection", "possible")
+                    print(f"  AI product brand detected ({fw}) but no live inference surface")
+                    print(f"     detection={det} — skipping AI escalation\n")
             else:
                 if verbose:
-                    if raw_is_ai and not has_concrete:
-                        print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
-                    else:
-                        print(f"  No AI/ML components detected — AI-specific tests skipped\n")
+                    print("  No AI/ML components detected — AI-specific tests skipped\n")
 
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
 
-        ai_infra_result = None
-        try:
-            if ai_fingerprint and ai_fingerprint.get("is_ai_powered"):
-                if verbose:
-                    print("  AI Infrastructure Build Attack Analysis...")
-                ai_infra_result = await self.ai_infra_agent.scan(
-                    target_url=target_url, ai_stack=ai_fingerprint,
-                )
-                if verbose:
-                    print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
-        except Exception as e:
-            logging.warning(f"AIInfraAgent failed: {e}")
+        # CVE mapping disabled for now — fingerprint / stack only.
+        # Orphan NVD rows were drowning Section 2 (e.g. LibreChat CVE dumps).
+        verified_cves = []
+        if verbose:
+            print(" CVE Lookup — skipped (fingerprint-only mode)\n")
 
         if verbose:
-            print(" CVE Lookup ")
-        try:
-            app_name    = stack.get("app_identity_name", "")
-            app_version = stack.get("app_identity_version", "")
+            print("Deep Browser Crawl (Yura-style shared session)...")
 
-            if not app_name and app_identity and app_identity.name:
-                app_name    = app_identity.name
-                app_version = app_identity.version or ""
+        # Seed surface from the initial page capture BEFORE LLM crawl.
+        # Classic SSR apps expose login/setup forms on the first HTML response;
+        # waiting for task execution alone was starving the tester.
+        for el in elements or []:
+            if el.get("type") == "form":
+                action = el.get("action") or target_url
+                all_forms.append({
+                    "action": action,
+                    "method": el.get("method") or "get",
+                    "inputs": el.get("inputs") or el.get("fields") or [],
+                    "route":  action,
+                })
+            elif el.get("type") == "link" and el.get("href"):
+                all_urls.append(el["href"])
 
-            if is_ai_powered and app_name:
-                cve_queries = []
-                if app_version:
-                    cve_queries.append(f"{app_name} {app_version}")
-                cve_queries.append(app_name)
-                ml_libs = (ai_fingerprint or {}).get("ml_libraries", [])
-                for lib in ml_libs[:2]:
-                    if lib and lib not in cve_queries:
-                        cve_queries.append(lib)
-                cve_stack = {
-                    "technologies":  cve_queries,
-                    "stack_summary": app_name,
-                    "app_name":      app_name,
-                    "app_version":   app_version,
-                }
-                verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
-                
-
-            elif not is_ai_powered:
-                
-                cve_stack = {
-                    "technologies": stack.get("technologies", []),
-                    "stack_summary": stack.get("stack_summary", ""),
-                    "server": stack.get("server"),
-                    "framework": stack.get("framework"),
-                    "cms": stack.get("cms"),
-                    "language": stack.get("language"),
-                }
-                print("\n===== STACK SENT TO CVE LOOKUP =====")
-                pprint(cve_stack)
-                print("====================================")
-                verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
-                verified_cves = verified_cves or []
-                
-                print("\n===== TECHNOLOGIES =====")
-                pprint(stack["technologies"])
-                print("========================")
-                print("\n========== VERIFIED CVES ==========")
-                
-                pprint(verified_cves)
-                print("===================================\n")
-
-            else:
-                verified_cves = []
-
-        except Exception as e:
-            logger.warning(f"CVE lookup error: {e}")
-
-        if verbose:
-            cve_count = len(verified_cves) if verified_cves is not None else "lookup failed"
-            print(f"   Verified CVEs: {cve_count}\n")
-
-        if verbose:
-            print("Browser Crawl...")
-
-        filtered = [e for e in elements if e.get("type") in ("form", "link")]
-        tasks    = await self.browser.generate_tasks(
-            elements=filtered, page_description="",
-            openai_client=self.openai_client, llm_model=self.llm_model,
+        filtered = [
+            e for e in elements
+            if e.get("type") in ("form", "link", "clickable")
+        ]
+        tasks = await self.browser.generate_tasks(
+            elements=filtered,
+            page_description=(html or "")[:500],
+            openai_client=self.openai_client,
+            llm_model=self.llm_model,
             target_url=target_url,
+            deep=True,
         )
 
-        tasks_executed = 0
-        for idx, task in enumerate(tasks[:8], 1):
-            elapsed = (datetime.now() - start).total_seconds() / 60
-            if elapsed > max_time_minutes * 0.40:
-                if verbose:
-                    print(f"  Crawl budget reached ({elapsed:.1f}m)")
-                break
-            result = await self.browser.execute_task(task, target_url)
-            all_forms.extend(result.get("forms", []))
-            all_urls.extend(result.get("urls", []))
-            tasks_executed += 1
+        # Deep crawl gets most of the time budget — discovery already ran
+        elapsed_so_far = (datetime.now() - start).total_seconds()
+        crawl_budget_s = max(
+            60.0,
+            (max_time_minutes * 60.0) * 0.70 - elapsed_so_far,
+        )
+        crawl = await self.browser.deep_crawl(
+            tasks=tasks,
+            base_url=target_url,
+            max_tasks=15,
+            max_steps_per_task=18,
+            time_budget_seconds=crawl_budget_s,
+            verbose=verbose,
+        )
+        tasks_executed = int(crawl.get("tasks_executed") or 0)
+        tasks_progressed = int(crawl.get("tasks_with_progress") or 0)
+        all_forms.extend(crawl.get("forms") or [])
+        all_urls.extend(crawl.get("urls") or [])
+        crawl_apis = list(crawl.get("api_urls") or [])
+        all_urls.extend(crawl_apis)
 
-        all_urls  = _dedup_urls(all_urls)[:30]
-        all_forms = _dedup_forms(all_forms)[:15]
+        # Promote network-harvested APIs into injectable seeds immediately
+        if crawl_apis:
+            from .vulnerability_tester import synthesize_injectable_urls
+            all_urls.extend(synthesize_injectable_urls(
+                target_url, crawl_apis, page_html=html or "",
+            ))
+
+        all_urls  = _dedup_urls(all_urls)[:180]
+        all_forms = _dedup_forms(all_forms)[:50]
 
         all_params: Set[str] = set()
         for url in all_urls:
             all_params.update(urllib.parse.parse_qs(urllib.parse.urlparse(url).query).keys())
 
         if verbose:
-            print(f"   {tasks_executed}/{len(tasks)} tasks | {len(all_forms)} forms | {len(all_urls)} URLs\n")
+            print(
+                f"   Deep crawl: {tasks_executed}/{len(tasks)} tasks "
+                f"({tasks_progressed} with new surface) | "
+                f"{len(all_forms)} forms | {len(all_urls)} URLs | "
+                f"{len(crawl_apis)} network APIs\n"
+            )
 
    
         if verbose:
@@ -446,8 +488,21 @@ class WebScannerAgent:
             if spa_forms or spa_urls:
                 all_forms.extend(spa_forms)
                 all_urls.extend(spa_urls)
-                all_urls  = _dedup_urls(all_urls)[:50]
-                all_forms = _dedup_forms(all_forms)[:20]
+                # Re-seed injectables from SPA/JS API surfaces (fixes thin SPA FN)
+                from .vulnerability_tester import synthesize_injectable_urls
+                all_urls.extend(synthesize_injectable_urls(
+                    target_url,
+                    list(spa_urls) + [
+                        ep.get("url", "") for ep in discovered_endpoints
+                        if ep.get("url") and (
+                            ep.get("interesting")
+                            or ep.get("source") in ("js_bundle", "spa")
+                        )
+                    ],
+                    page_html=html or "",
+                ))
+                all_urls  = _dedup_urls(all_urls)[:160]
+                all_forms = _dedup_forms(all_forms)[:50]
                 if verbose:
                     print(f"   SPA: {len(spa_forms)} forms, {len(spa_urls)} URLs\n")
             elif verbose:
@@ -460,13 +515,23 @@ class WebScannerAgent:
             print("Vulnerability Testing...")
         raw_findings: List[Dict] = []
         try:
+            disco_paths = [
+                ep.get("url", "") for ep in discovered_endpoints
+                if ep.get("url") and (
+                    ep.get("interesting")
+                    or ep.get("source") in ("js_bundle", "spa", "manifest")
+                    or ep.get("api_endpoint")
+                )
+            ]
+            disco_paths.extend(crawl_apis)
+            disco_paths.extend(
+                u for u in all_urls
+                if "/api/" in u or "/rest/" in u or "/graphql" in u
+            )
             raw_findings = await self.vuln_tester.test_all(
                 forms=all_forms, urls=all_urls, page_html=html,
                 target_url=target_url,
-                discovered_paths=[
-                    ep.get("url", "") for ep in discovered_endpoints
-                    if ep.get("interesting")
-                ],
+                discovered_paths=disco_paths,
                 shared_headers=initial_headers,
                 verbose=verbose,
             )
@@ -482,7 +547,40 @@ class WebScannerAgent:
         if verbose:
             print(" Attack Verification...")
         verified_findings: List[Dict] = []
-        cors_misconfigured = False
+        cors_mode = None  # None | wildcard | reflected | credentialed
+
+        def _cors_mode_from_finding(f: Dict) -> Optional[str]:
+            # Only Confirmed CORS with a concrete ACAO drives STRIDE.
+            # Never infer "reflected" from severity alone — that produced
+            # High STRIDE while Section 4 showed wildcard Low/Potential.
+            if "CORS" not in (f.get("type") or "") or f.get("status") != "Confirmed":
+                return None
+            ev = f.get("evidence") or {}
+            headers = ev.get("response_headers") or {}
+            if not isinstance(headers, dict):
+                headers = {}
+            headers_l = {str(k).lower(): str(v or "") for k, v in headers.items()}
+            acao = (
+                str(ev.get("access_control_allow_origin") or "")
+                or headers_l.get("access-control-allow-origin", "")
+            ).strip()
+            acac = (
+                str(ev.get("access_control_allow_credentials") or "")
+                or headers_l.get("access-control-allow-credentials", "")
+            ).strip().lower()
+            creds = acac == "true"
+            if not acao:
+                return None
+            if creds and (acao == "*" or "evil" in acao.lower() or acao.startswith("http")):
+                return "credentialed"
+            if acao == "*":
+                return "wildcard"
+            if "evil" in acao.lower() or acao.startswith("http"):
+                return "reflected"
+            return None
+
+        _CORS_RANK = {"wildcard": 1, "reflected": 2, "credentialed": 3}
+
         try:
             av_findings = await self.verifier.verify_all(
                 target_url=target_url, candidate_urls=all_urls,
@@ -503,17 +601,24 @@ class WebScannerAgent:
                         d["category"] = "security_header"
                         if d.get("severity") in ("Critical", "High"):
                             d["severity"] = "Medium"
-                    if "CORS" in d.get("type", "") and d.get("status") == "Confirmed":
-                        cors_misconfigured = True
+                    mode = _cors_mode_from_finding(d)
+                    if mode and _CORS_RANK.get(mode, 0) > _CORS_RANK.get(cors_mode or "", 0):
+                        cors_mode = mode
                     verified_findings.append(d)
         except Exception as e:
             logger.error(f"Attack verification failed: {e}")
 
+        # Also consider CORS from active vuln tester (may run before AV)
+        for f in raw_findings:
+            mode = _cors_mode_from_finding(f if isinstance(f, dict) else {})
+            if mode and _CORS_RANK.get(mode, 0) > _CORS_RANK.get(cors_mode or "", 0):
+                cors_mode = mode
+
         stride_threats = []
-        if all_forms or all_params or cors_misconfigured or initial_headers:
+        if all_forms or all_params or cors_mode or initial_headers:
             stride_threats = _build_evidence_gated_stride(
                 target_url, initial_headers, all_params,
-                all_forms, cors_misconfigured, stack,
+                all_forms, cors_mode, stack,
                 headers_capture_failed=headers_capture_failed,
             )
 
@@ -528,6 +633,8 @@ class WebScannerAgent:
         for f in raw_findings + verified_findings:
             ftype    = f.get("type", "")
             location = f.get("location", "").rstrip("/")
+            # XFO absence folds into clickjacking; STRIDE cites that finding
+            # (Section 3 ↔ Section 5 corroboration via shared finding name).
             if has_clickjacking and "X-Frame-Options" in ftype and "Missing Security Header" in ftype:
                 continue
             key = (ftype.lower(), location)
@@ -579,18 +686,84 @@ class WebScannerAgent:
             print(f"{'='*70}\n")
 
         report_endpoints = []
+        not_assessed_endpoints: List[Dict] = []
+        try:
+            from .endpoint_discovery_agent import is_static_asset as _is_static
+        except Exception:
+            def _is_static(url="", content_type=""):  # type: ignore
+                return False
         for ep in discovered_endpoints:
-            if ep.get("access_controlled"):
-          
+            if ep.get("static_asset") or _is_static(
+                ep.get("url", ""), ep.get("content_type", "")
+            ):
+                continue  # CSS/fonts/images never enter the endpoint table
+            if ep.get("spa_catch_all") or ep.get("excluded"):
+                # Keep for Section 2 exclusion list, not as attack surface
+                report_endpoints.append(dict(ep, interesting=False))
+                continue
+            if ep.get("access_controlled") or ep.get("auth_required") or ep.get(
+                "redirects_to_auth"
+            ):
                 report_ep = dict(ep)
-                report_ep["category"]   = "discovered_protected"
-                report_ep["note"]       = (
+                report_ep["category"] = "discovered_protected"
+                report_ep["note"] = (
                     f"HTTP {ep.get('status')} — path exists but is access-controlled. "
                     "Recon only, not an exposure."
                 )
                 report_endpoints.append(report_ep)
+                not_assessed_endpoints.append({
+                    "url": ep.get("url") or "",
+                    "reason": "auth_required",
+                    "status": ep.get("status"),
+                    "assessment": "not_assessed",
+                })
             elif ep.get("interesting"):
                 report_endpoints.append(ep)
+
+        # Coverage honesty: how much surface was actually assessed pre-auth
+        assessed_count = sum(
+            1 for ep in report_endpoints
+            if ep.get("interesting")
+            and not ep.get("static_asset")
+            and ep.get("category") != "discovered_protected"
+            and not ep.get("auth_required")
+            and not ep.get("redirects_to_auth")
+            and not ep.get("access_controlled")
+        )
+        auth_gated_count = len(not_assessed_endpoints)
+        auth_wall_dominated = auth_gated_count > 0 and (
+            auth_gated_count >= max(assessed_count, 1) or assessed_count <= 1
+        )
+        coverage_assessment = {
+            "scope": "blackbox_unauth",
+            "assessed_count": assessed_count,
+            "auth_gated_count": auth_gated_count,
+            "auth_wall_dominated": auth_wall_dominated,
+            "note": (
+                f"Assessed surface limited to pre-authentication endpoints; "
+                f"{auth_gated_count} functional surface(s) were auth-gated "
+                f"and not tested."
+                if auth_gated_count > 0 else
+                "Full discovered pre-auth surface assessed."
+            ),
+        }
+
+        # Align STRIDE clickjacking evidence with Section 3 finding name
+        clickjacking_type = next(
+            (
+                f.get("type") for f in all_findings
+                if "Clickjacking" in (f.get("type") or "")
+                and f.get("status") == "Confirmed"
+            ),
+            None,
+        )
+        if clickjacking_type:
+            for t in stride_threats:
+                if t.get("threat") == "Clickjacking" and t.get("confirmed"):
+                    t["evidence"] = (
+                        f"See Section 3: {clickjacking_type} "
+                        "(X-Frame-Options and CSP frame-ancestors absent)"
+                    )
 
         return {
             "target_url":             target_url,
@@ -600,6 +773,8 @@ class WebScannerAgent:
             "verified_cves":          verified_cves,
             "nvd_section_visible":    not is_ai_powered,
             "endpoints_discovered":   report_endpoints,
+            "not_assessed_endpoints": not_assessed_endpoints,
+            "coverage_assessment":    coverage_assessment,
             "vulnerabilities":        all_findings,
             "stride_threats":         stride_threats,
             "confirmed_count":        sum(1 for f in all_findings if f.get("status") == "Confirmed"),
@@ -609,9 +784,15 @@ class WebScannerAgent:
             "forms_discovered":       len(all_forms),
             "urls_discovered":        len(all_urls),
             "scan_duration":          round(duration, 1),
-            "authenticated_scan":     bool(auth_cookie),
+            "scan_scope":             "blackbox_unauth",
             "timestamp":              datetime.now().isoformat(),
-            "is_ai_powered":          is_ai_powered,
+            # Report may note brand-only AI product identity; escalation above
+            # already required live surface.
+            "is_ai_powered":          is_ai_powered or brand_only_ai,
+            "ai_brand_only":          brand_only_ai,
+            "has_live_surface":       bool(
+                (ai_fingerprint or {}).get("has_live_surface")
+            ) if ai_fingerprint else False,
             "ai_fingerprint":         ai_fingerprint,
             "avid_findings":          (avid_results or {}).get("avid_findings", []),
             "avid_backdoor_relevant": (avid_results or {}).get("backdoor_relevant", []),

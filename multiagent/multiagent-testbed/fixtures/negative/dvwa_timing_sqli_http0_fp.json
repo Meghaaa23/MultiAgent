@@ -1,0 +1,59 @@
+{
+  "target_url": "http://localhost:3142",
+  "scan_complete": true,
+  "authenticated_scan": false,
+  "verified_cves": [],
+  "vulnerabilities": [
+    {
+      "type": "Missing Security Header: Content-Security-Policy",
+      "severity": "Medium",
+      "status": "Confirmed",
+      "location": "http://localhost:3142",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "confidence": "High",
+        "verified": true
+      }
+    },
+    {
+      "type": "Missing Security Header: X-Content-Type-Options",
+      "severity": "Low",
+      "status": "Confirmed",
+      "location": "http://localhost:3142",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "confidence": "High",
+        "verified": true
+      }
+    },
+    {
+      "type": "Information Disclosure: server header",
+      "severity": "Low",
+      "status": "Confirmed",
+      "location": "http://localhost:3142",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "confidence": "High",
+        "verified": true
+      }
+    },
+    {
+      "type": "SQL Injection (Time-Based Blind)",
+      "severity": "Critical",
+      "status": "Confirmed",
+      "location": "http://localhost:3142/template/search-template",
+      "confidence": "High",
+      "evidence": {
+        "confirmation_method": "timing",
+        "response_status": 0,
+        "timing_delta_seconds": 3.1,
+        "confidence": "High",
+        "verified": true,
+        "request": "GET http://localhost:3142/template/search-template"
+      }
+    }
+  ]
+}

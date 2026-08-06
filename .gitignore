@@ -1,17 +1,55 @@
-
-multiagent/multiagent-testbed/snapshots/
+# macOS
+.DS_Store
+**/.DS_Store
+._*
+**/._*
 
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Virtual environments
 venv/
 .venv/
 env/
 
-# VS Code
+# IDE
 .vscode/
+.idea/
 
-# Environment variables
+# Environment / secrets
 multiagent/.env
+.env
+.env.*
+
+# Uploads & local media (not source)
+uploads/*
+!uploads/.gitkeep
+*.wav
+*.mp3
+
+# Testbed runtime artifacts
+multiagent/multiagent-testbed/snapshots/
+multiagent/multiagent-testbed/results/
+**/multiagent-testbed/results/
+**/multiagent-testbed/snapshots/
+
+# Node (frontend)
+node_modules/
+multi-agent-llm/dist/
+multi-agent-llm/.angular/
+
+# Misc
+*.log
+.cache/

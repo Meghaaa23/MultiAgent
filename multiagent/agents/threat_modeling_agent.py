@@ -5,6 +5,7 @@ import openai
 import hashlib
 import logging
 import traceback
+import urllib.parse
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -103,21 +104,83 @@ def _format_confirmed_stack(stack: Dict) -> str:
 
 
 
+def _evidence_has_substance(ev: Dict) -> bool:
+    """
+    True only when the evidence blob contains something a reviewer can verify.
+    Empty / placeholder evidence must never ship as Confirmed/HIGH.
+    """
+    if not isinstance(ev, dict) or not ev:
+        return False
+    method = str(ev.get("confirmation_method") or "").lower()
+    body = (
+        ev.get("response_body_snippet")
+        or ev.get("body_snippet")
+        or ev.get("response_snippet")
+        or ev.get("db_error_snippet")
+        or ""
+    )
+    headers = ev.get("response_headers") or ev.get("headers") or {}
+    if not isinstance(headers, dict):
+        headers = {}
+    header_vals = [str(v).strip() for v in headers.values() if str(v).strip()]
+
+    if method in ("header",):
+        # Header findings need at least one concrete header value OR an
+        # explicit missing-header probe recorded in the request line.
+        if header_vals:
+            return True
+        req = str(ev.get("request") or ev.get("request_line") or "")
+        return bool(req) and ev.get("response_status") not in (None, 0, "")
+
+    if method in ("timing",):
+        # Time-based SQLi needs a real HTTP status + measured delta.
+        # HTTP 0 / client timeout must never count as SLEEP confirmation.
+        status = ev.get("response_status")
+        if status in (None, 0, ""):
+            return False
+        return ev.get("timing_delta_seconds") is not None
+
+    if method in ("pattern", "http_body", "dom_reflection", "js_execution"):
+        return bool(str(body).strip())
+
+    # Unknown method: require body or headers
+    return bool(str(body).strip()) or bool(header_vals)
+
+
+def _norm_conf_label(val) -> str:
+    """Normalize confidence/status labels; tolerate Enum reprs like Confidence.HIGH."""
+    if val is None:
+        return ""
+    if hasattr(val, "value"):
+        val = val.value
+    s = str(val).strip().lower()
+    if "." in s:
+        s = s.rsplit(".", 1)[-1]
+    return s
+
+
 def _is_publishable_confirmed(v: Dict) -> bool:
     """
     Publisher gate: only report Confirmed findings with High confidence
-    and verified evidence. No site/app hardcoding — evidence-driven only.
+    and verified, non-empty evidence. No site/app hardcoding — evidence-driven only.
+
+    XSS Confirmed requires js_execution proof; HTTP/DOM reflection alone is
+    demoted to the Potential queue (general rule — not app-specific).
     """
     if not isinstance(v, dict):
         return False
-    if v.get("status") != "Confirmed":
+    if _norm_conf_label(v.get("status")) != "confirmed":
         return False
-    conf = str(v.get("confidence") or "").strip().lower()
+    conf = _norm_conf_label(v.get("confidence"))
     ev = v.get("evidence") or {}
-    ev_conf = str(ev.get("confidence") or "").strip().lower()
+    if not isinstance(ev, dict):
+        ev = {}
+    ev_conf = _norm_conf_label(ev.get("confidence"))
     if conf not in ("high",) and ev_conf not in ("high",):
         return False
     if ev.get("verified") is False:
+        return False
+    if not _evidence_has_substance(ev):
         return False
     loc = str(v.get("location") or "")
     details = str(v.get("details") or v.get("description") or "")
@@ -125,7 +188,32 @@ def _is_publishable_confirmed(v: Dict) -> bool:
         return False
     if loc.strip().lower() in ("", "unknown"):
         return False
+
+    ftype = str(v.get("type") or "")
+    method = str(ev.get("confirmation_method") or "").lower()
+    if "XSS" in ftype and method not in ("js_execution",):
+        return False
     return True
+
+
+def _is_private_or_local_host(url: str) -> bool:
+    """True for localhost / RFC1918 / link-local targets — no CDN/WAF excuse."""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if host.endswith(".local") or host.endswith(".internal"):
+        return True
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host)
+        return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+    except ValueError:
+        return False
 
 
 def _is_manual_queue_finding(v: Dict) -> bool:
@@ -140,10 +228,51 @@ def _is_manual_queue_finding(v: Dict) -> bool:
     return conf in ("medium", "high")
 
 
+def _coverage_from_scan(scan_results) -> Dict:
+    """
+    Black-box unauth coverage signal: how much of the discovered surface
+    was actually assessed vs auth-gated / not tested.
+    """
+    sr = scan_results or {}
+    not_assessed = list(sr.get("not_assessed_endpoints") or [])
+    endpoints = list(sr.get("endpoints_discovered") or [])
+    n_auth_gated = len(not_assessed)
+
+    assessed = []
+    for ep in endpoints:
+        if not isinstance(ep, dict):
+            continue
+        if ep.get("static_asset"):
+            continue
+        if (
+            ep.get("access_controlled")
+            or ep.get("auth_required")
+            or ep.get("redirects_to_auth")
+            or ep.get("category") == "discovered_protected"
+        ):
+            continue
+        if ep.get("interesting") or ep.get("auth_endpoint"):
+            assessed.append(ep)
+
+    n_assessed = len(assessed)
+    # Dominated = auth wall owns the functional surface (WebGoat/DVWA pattern)
+    dominated = n_auth_gated > 0 and (
+        n_auth_gated >= max(n_assessed, 1) or n_assessed <= 1
+    )
+    return {
+        "auth_gated_count": n_auth_gated,
+        "assessed_count": n_assessed,
+        "auth_wall_dominated": dominated,
+    }
+
+
 def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results):
     n_confirmed = len(confirmed_vulns)
     n_potential = len(set(v.get("type", "") for v in potential_vulns))
     duration    = (scan_results or {}).get("scan_duration", 0)
+    coverage    = _coverage_from_scan(scan_results)
+    n_auth      = coverage["auth_gated_count"]
+    dominated   = coverage["auth_wall_dominated"]
 
     _sev_base = {"Critical": 40, "High": 20, "Medium": 10, "Low": 5, "Info": 1}
     _method_mult = {
@@ -169,7 +298,6 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
         "Low-Medium" if exploit_score >  0  else "Low"
     )
 
-    authenticated = (scan_results or {}).get("authenticated_scan", False)
     actions = [
         v.get("remediation", "")[:200]
         for v in confirmed_vulns[:3]
@@ -177,23 +305,42 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     ] or ["No immediate action required — continue monitoring."]
 
     actions_text = " ".join(f"({i+1}) {a}" for i, a in enumerate(actions[:3]))
-    auth_note    = (
-        " [Authenticated scan]" if authenticated
-        else " [Unauthenticated — post-login surfaces not tested]"
-    )
-    summary = (
-        f"Active scan of `{target_url}` completed in {duration:.0f}s{auth_note}. "
-        f"Identified {n_confirmed} confirmed and {n_potential} potential "
-        f"vulnerability type(s). Overall risk level: {risk} "
-        f"(score: {exploit_score:.0f})"
-    )
-    if n_confirmed == 0 and n_potential == 0:
-        summary += (
-            " — no exploitable surfaces found. "
-            "Consider providing a session cookie for authenticated scanning."
+
+    # Never present a clean-ish bill of health for an app we never entered.
+    if dominated:
+        risk_clause = (
+            f"Overall risk level on assessed pre-authentication surface: {risk} "
+            f"(score: {exploit_score:.0f}). "
+            f"Assessed surface limited to pre-authentication endpoints; "
+            f"{n_auth} functional surface(s) were auth-gated and not tested."
+        )
+    elif n_auth > 0:
+        risk_clause = (
+            f"Overall risk level on assessed (pre-auth) surface: {risk} "
+            f"(score: {exploit_score:.0f}). "
+            f"{n_auth} functional surface(s) were auth-gated and not tested."
         )
     else:
-        summary += f". Top actions: {actions_text}"
+        risk_clause = (
+            f"Overall risk level: {risk} (score: {exploit_score:.0f})"
+        )
+
+    summary = (
+        f"Active scan of `{target_url}` completed in {duration:.0f}s "
+        f"[Black-box unauthenticated]. "
+        f"Identified {n_confirmed} confirmed and {n_potential} potential "
+        f"vulnerability type(s). {risk_clause}"
+    )
+    if n_confirmed == 0 and n_potential == 0:
+        if n_auth > 0:
+            summary += (
+                " No exploitable issues on the reachable pre-auth surface; "
+                "this is not an app-wide clean result."
+            )
+        else:
+            summary += " — no exploitable surfaces found on unauthenticated surfaces."
+    else:
+        summary += f" Top actions: {actions_text}"
 
     return f" 1. EXECUTIVE SUMMARY\n{summary}"
 
@@ -225,18 +372,33 @@ def _cves_for_tech(tech_name: str, cves: Optional[List[Dict]]) -> List[Dict]:
     return deduped
 
 
-def _build_section_2(stack, endpoints, cves):
-    lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack & Known CVEs"]
+def _build_section_2(stack, endpoints, cves, target_url: str = "",
+                     forms_discovered: int = 0):
+    # CVE mapping disabled for now — fingerprint / stack only.
+    lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack"]
 
     technologies = stack.get("technologies") or []
     noise_words  = {"content", "unknown", "none", "null", "n/a",
                     "signals", "content signals", "true", "false"}
+    # Header leftovers that are not technologies
+    noise_tech = {
+        "x-robots-tag", "x-robots-tag: noindex", "noindex",
+        "nosniff", "sameorigin",
+    }
 
-    matched_cve_ids: set = set()
+    def _is_noise_tech(name: str) -> bool:
+        n = (name or "").strip().lower()
+        if not n or n in noise_words or n in noise_tech:
+            return True
+        if n.startswith("x-") and ":" in n:
+            return True
+        return False
 
     if technologies and isinstance(technologies[0], dict):
         by_cat: Dict[str, list] = {}
         for dt in technologies:
+            if _is_noise_tech(dt.get("name", "")):
+                continue
             by_cat.setdefault(dt.get("category", "Other"), []).append(dt)
 
         cat_order     = ["CMS", "Server", "Language", "Framework", "CDN",
@@ -255,17 +417,14 @@ def _build_section_2(stack, endpoints, cves):
                 ver     = dt.get("version", "")
                 conf    = dt.get("confidence", 0)
                 display = f"{name} {ver}".strip() if ver else name
-                lines.append(f"- {display}  [{cat}, {conf:.0%} confidence]")
+                try:
+                    conf_s = f"{float(conf):.0%}"
+                except (TypeError, ValueError):
+                    conf_s = str(conf)
+                lines.append(f"- {display}  [{cat}, {conf_s} confidence]")
 
-                tech_cves = _cves_for_tech(name, cves)
-                if tech_cves:
-                    for c in tech_cves:
-                        cid = c.get("cve_id", "") or c.get("title", "Unknown")
-                        if c.get("cve_id"):
-                            matched_cve_ids.add(c["cve_id"])
-                        lines.append(f"      - {cid}")
-                else:
-                    lines.append("      None found")
+        if not by_cat:
+            technologies = []
 
     elif technologies:
         confirmed = [
@@ -274,69 +433,101 @@ def _build_section_2(stack, endpoints, cves):
             and len(str(t).strip()) > 2
             and "signal" not in str(t).lower()
             and str(t).strip().lower() not in noise_words
+            and not _is_noise_tech(str(t))
         ]
         if confirmed:
             lines.extend(f"- {t}" for t in confirmed)
         else:
             technologies = []
 
-    if not technologies:
+    if not technologies or (
+        isinstance(technologies[0], dict)
+        and not any(
+            not _is_noise_tech(dt.get("name", ""))
+            for dt in technologies if isinstance(dt, dict)
+        )
+    ):
+        # Prefer app identity / named stack fields over empty tech list
+        app_name = stack.get("app_identity_name") or ""
+        if app_name:
+            lines.append(f"- {app_name}")
         summary      = stack.get("stack_summary", "")
         noise_summary = {"unknown", "unknown (no technology confirmed from http evidence)", ""}
         if summary and summary.strip().lower() not in noise_summary:
-            lines.append(f"- {summary}")
+            if not app_name or app_name.lower() not in summary.lower():
+                lines.append(f"- {summary}")
         else:
-            added = False
+            added = bool(app_name)
             for field in ("server", "language", "framework", "frontend", "cms", "cdn"):
                 val = stack.get(field)
                 if val and str(val).strip().lower() not in noise_words:
                     lines.append(f"- {val}")
                     added = True
             if not added:
-                lines.append(
-                    "Unknown — target is behind a CDN/WAF that strips "
-                    "identifying headers. See Section 3 for detected headers."
-                )
-
-    if cves:
-        orphaned = [
-            c for c in cves
-            if c.get("cve_id") and c["cve_id"] not in matched_cve_ids
-        ]
-        seen_orphan_ids: set = set()
-        orphaned_deduped = []
-        for c in orphaned:
-            if c["cve_id"] in seen_orphan_ids:
-                continue
-            seen_orphan_ids.add(c["cve_id"])
-            orphaned_deduped.append(c)
-        if orphaned_deduped:
-            lines.append("- Other detected components")
-            for c in orphaned_deduped:
-                lines.append(f"      - {c.get('cve_id','Unknown')}")
+                if _is_private_or_local_host(target_url or ""):
+                    lines.append(
+                        "Unidentified — no Server/X-Powered-By (or equivalent) "
+                        "headers confirmed on this local/private target. "
+                        "See Section 3 for detected headers and route evidence."
+                    )
+                else:
+                    lines.append(
+                        "Unidentified — no confirming Server/X-Powered-By (or "
+                        "equivalent) headers observed. See Section 3 for "
+                        "detected headers."
+                    )
 
     unverified = stack.get("unverified_hints", [])
     if unverified:
         lines.append(f"\nUnconfirmed hints (excluded): {', '.join(unverified[:5])}")
 
     lines.append("\n Attack Surface")
-    interesting = [e for e in (endpoints or []) if e.get("interesting")]
+    try:
+        from .webappscanner.endpoint_discovery_agent import is_static_asset
+    except Exception:
+        def is_static_asset(url="", content_type=""):  # type: ignore
+            return False
+
+    interesting = [
+        e for e in (endpoints or [])
+        if e.get("interesting") and not e.get("static_asset")
+        and not e.get("spa_catch_all") and not e.get("excluded")
+        and not is_static_asset(e.get("url", ""), e.get("content_type", ""))
+        and "SPA" not in str(e.get("verification") or "")
+        and "soft-404" not in str(e.get("verification") or "").lower()
+    ]
     verified_eps = [
         e for e in interesting
         if e.get("status") not in (None, "", "?")
     ]
+    excluded_eps = [
+        e for e in (endpoints or [])
+        if (e.get("spa_catch_all") or e.get("excluded"))
+        and e.get("status") not in (None, "", "?")
+    ]
     if verified_eps:
         functional, admin, discovery = [], [], []
         for ep in verified_eps:
-            url_lower = ep.get("url", "").lower()
+            url_lower = (ep.get("url") or "").lower()
+            path_lower = ""
+            try:
+                path_lower = (urllib.parse.urlsplit(url_lower).path or "").lower()
+            except Exception:
+                path_lower = url_lower
             status = ep.get("status")
+            # /plugins/ inside a static asset path is NOT administrative
+            static_path = is_static_asset(url_lower, ep.get("content_type", ""))
+            if static_path:
+                continue
             if any(x in url_lower for x in ["sitemap", "robots.txt"]):
                 discovery.append(ep)
             elif ep.get("admin_panel") or (
                 status in (401, 403)
-                and any(x in url_lower for x in [
-                    "admin", "dashboard", "manage", "wp-admin", "console"
-                ])
+                and any(x in path_lower for x in (
+                    "/admin", "/dashboard", "/manage", "/wp-admin", "/console",
+                ))
+                # Do not match "plugin" / "plugins" as admin
+                and "/plugin" not in path_lower
             ):
                 admin.append(ep)
             else:
@@ -350,16 +541,35 @@ def _build_section_2(stack, endpoints, cves):
             if group:
                 lines.append(group_label)
                 for ep in group[:15]:
-                    auth = " [AUTH REQUIRED]" if ep.get("auth_required") else ""
+                    # Auth redirect: do not print landing [200] — that is the
+                    # hop after redirect, not the status of the requested URL.
+                    if ep.get("redirects_to_auth"):
+                        status_disp = "REDIR→AUTH"
+                        auth_tag = " [REDIRECTS TO AUTH]"
+                    elif ep.get("auth_required"):
+                        status_disp = ep.get("status", "?")
+                        auth_tag = " [AUTH REQUIRED]"
+                    else:
+                        status_disp = ep.get("status", "?")
+                        auth_tag = ""
                     lines.append(
-                        f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
-                        f"{ep.get('url','')} [{ep.get('source','')}]{auth}"
+                        f"- [{status_disp}] {ep.get('method','GET')} "
+                        f"{ep.get('url','')} [{ep.get('source','')}]{auth_tag}"
                     )
     else:
         lines.append("None discovered with verified HTTP responses.")
 
+    if excluded_eps:
+        lines.append("\n Excluded endpoints (SPA/soft-404 — not attack surface)")
+        for ep in excluded_eps[:10]:
+            reason = ep.get("exclude_reason") or ep.get("verification") or "SPA catch-all"
+            lines.append(
+                f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
+                f"{ep.get('url','')} — {reason}"
+            )
 
-
+    if forms_discovered:
+        lines.append(f"\n Forms discovered: {forms_discovered} (included in active testing)")
 
     return "\n".join(lines)
 
@@ -368,8 +578,8 @@ _CONFIDENCE_LABEL = {
     "js_execution":   "HIGH  (JavaScript executed)",
     "timing":         "HIGH  (timing-confirmed)",
     "dom_reflection": "HIGH  (DOM reflection confirmed)",
-    "http_body":      "MEDIUM (HTTP body reflection)",
-    "pattern":        "MEDIUM (error pattern match)",
+    "http_body":      "HIGH  (HTTP body evidence)",
+    "pattern":        "HIGH  (error pattern in response body)",
     "header":         "HIGH  (direct header inspection)",
 }
 
@@ -385,16 +595,30 @@ def _build_section_3(confirmed_vulns):
         if key in seen:
             continue
         seen.add(key)
-        ev     = v.get("evidence", {})
+        ev     = v.get("evidence", {}) or {}
         method = ev.get("confirmation_method", "http_body")
-        conf   = _CONFIDENCE_LABEL.get(method, "MEDIUM (code confirmed)")
+        # Only emit HIGH labels when evidence blob is substantive
+        if _evidence_has_substance(ev):
+            conf = _CONFIDENCE_LABEL.get(method, "HIGH  (verified evidence)")
+        else:
+            conf = "LOW   (insufficient evidence — should not publish)"
+        body_snip = (
+            ev.get("response_body_snippet")
+            or ev.get("db_error_snippet")
+            or ""
+        )
+        evid_line = (
+            f"`{ev.get('request','?')}` "
+            f"(HTTP {ev.get('response_status','?')}, confirmed by {method})"
+        )
+        if body_snip:
+            evid_line += f"\n- Body evidence: `{str(body_snip)[:180]}`"
         lines += [
             "",
             f"Severity: {v.get('severity','?')} | {v.get('type','?')}",
             f"- Confidence: {conf}",
             f"- Location: `{v.get('location','?')}`",
-            f"- Evidence: `{ev.get('request','?')}` "
-            f"(HTTP {ev.get('response_status','?')}, confirmed by {method})",
+            f"- Evidence: {evid_line}",
             f"- Impact: {v.get('impact','')}",
             f"- Fix: {v.get('remediation','')}",
             f"- CWE: {v.get('cwe','')}",
@@ -442,14 +666,26 @@ def _build_section_4(potential_vulns):
         if key in seen:
             continue
         seen.add(key)
-        ev      = v.get("evidence", {})
-        method  = ev.get("confirmation_method", "code analysis")
+        ev = v.get("evidence") or {}
+        if not isinstance(ev, dict):
+            ev = {}
+        method = ev.get("confirmation_method", "code analysis")
         snippet = ev.get("response_body_snippet", "")
+        # Potentials stay unconfirmed; still report stored confidence honestly
+        # (do not hardcode LOW — that hid Medium CSRF/etc.).
+        raw_conf = str(
+            v.get("confidence") or ev.get("confidence") or "Medium"
+        ).strip().lower()
+        conf_label = {
+            "high":   "MEDIUM-HIGH (strong indicators — manual verification required)",
+            "medium": "MEDIUM (unconfirmed — manual verification required)",
+            "low":    "LOW (weak indicators — manual verification required)",
+        }.get(raw_conf, "MEDIUM (unconfirmed — manual verification required)")
         lines += [
             "",
             f" [{i}] {v.get('type','?')}",
             f"- Severity: {v.get('severity','Low')} | "
-            f"Confidence: LOW (unconfirmed — manual verification required)",
+            f"Confidence: {conf_label}",
             f"- Location: {v.get('location','?')}",
             f"- Why Potential: Requires manual confirmation — {v.get('details','')}",
             f"- Detection Method: {method}",
@@ -461,7 +697,7 @@ def _build_section_4(potential_vulns):
     return "\n".join(l for l in lines if l is not None)
 
 
-def _build_section_5(stride_threats):
+def _build_section_5(stride_threats, confirmed_vulns=None):
     # Publisher STRIDE: evidence-confirmed architectural risks only.
     threats = [
         t for t in (stride_threats or [])
@@ -475,12 +711,33 @@ def _build_section_5(stride_threats):
         lines.append("No evidence-confirmed STRIDE risks from active scanning.")
         return "\n".join(lines)
 
+    # Prefer citing Section 3 findings over re-deriving from raw headers
+    # (avoids "XFO missing" in STRIDE when Section 3 only lists clickjacking).
+    clickjacking_finding = None
+    for v in (confirmed_vulns or []):
+        if not isinstance(v, dict):
+            continue
+        if "Clickjacking" in (v.get("type") or "") and v.get("status") == "Confirmed":
+            clickjacking_finding = v
+            break
+
     for t in threats:
+        evidence = t.get("evidence", "") or ""
+        if (
+            clickjacking_finding
+            and "Clickjacking" in (t.get("threat") or "")
+        ):
+            # Scanner may already set "See Section 3: …" — do not double-prefix.
+            if "see section 3" not in evidence.lower():
+                evidence = (
+                    f"See Section 3: {clickjacking_finding.get('type')} — "
+                    f"{evidence}"
+                )
         lines += [
             "",
             f" {t.get('category','?')}: {t.get('threat','?')}",
             f"- Status: Evidence-confirmed",
-            f"- Evidence: {t.get('evidence','')}",
+            f"- Evidence: {evidence}",
             f"- Likelihood: {t.get('likelihood','?')}",
             f"- Impact: {t.get('impact','?')}",
             f"- Mitigation: {t.get('mitigation','')}",
@@ -848,7 +1105,7 @@ Answer:"""
                       use_cache: bool = True, filenames: List[str] = None,
                       enable_web_scan: bool = False,
                       target_url: str = None,
-                      auth_cookie: str = "") -> Dict:
+                      ) -> Dict:
 
         if verbose:
             print("\n" + "=" * 80)
@@ -895,8 +1152,7 @@ Answer:"""
             if verbose:
                 print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
             scan_results = await scanner.scan_application(
-                target_url=target_url, max_time_minutes=3, verbose=verbose,
-                auth_cookie=auth_cookie,
+                target_url=target_url, max_time_minutes=15, verbose=verbose,
             )
 
         if verbose:
@@ -1257,7 +1513,30 @@ Answer:"""
                 seen.add(key)
                 if _is_publishable_confirmed(v):
                     confirmed_vulns.append(v)
-                elif _is_manual_queue_finding(v):
+                    continue
+                # Demote Confirmed XSS that lacks js_execution → Potential
+                ftype = str(v.get("type") or "")
+                ev = v.get("evidence") or {}
+                method = str(
+                    (ev.get("confirmation_method") if isinstance(ev, dict) else "")
+                    or ""
+                ).lower()
+                if (
+                    v.get("status") == "Confirmed"
+                    and "XSS" in ftype
+                    and method not in ("js_execution",)
+                ):
+                    demoted = dict(v)
+                    demoted["status"] = "Potential"
+                    demoted["confidence"] = "Medium"
+                    if isinstance(demoted.get("evidence"), dict):
+                        demoted["evidence"] = dict(demoted["evidence"])
+                        demoted["evidence"]["confidence"] = "Medium"
+                        demoted["evidence"]["verified"] = False
+                    if _is_manual_queue_finding(demoted):
+                        potential_vulns.append(demoted)
+                    continue
+                if _is_manual_queue_finding(v):
                     potential_vulns.append(v)
 
             seen_types: set = set()
@@ -1365,11 +1644,17 @@ Answer:"""
         action_results = action_agent.process_all(confirmed_vulns, target_url, stack)
 
         section_1   = _build_section_1(confirmed_vulns, potential_vulns, target_url or "", scan_results) or ""
-        section_2   = _build_section_2(stack, (scan_results or {}).get("endpoints_discovered", []), cves) or ""
+        section_2   = _build_section_2(
+            stack,
+            (scan_results or {}).get("endpoints_discovered", []),
+            cves,
+            target_url=target_url or "",
+            forms_discovered=int((scan_results or {}).get("forms_discovered") or 0),
+        ) or ""
         section_3   = _build_section_3(confirmed_vulns)                  or ""
         section_3b  = render_section_3b(action_results)                  or ""
         section_4   = _build_section_4(potential_vulns)                  or ""
-        section_5   = _build_section_5(stride_threats)                   or ""
+        section_5   = _build_section_5(stride_threats, confirmed_vulns)  or ""
         section_6   = _build_section_6(confirmed_vulns, potential_vulns) or ""
 
         final = "\n\n".join([
