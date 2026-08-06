@@ -68,6 +68,24 @@
         "verified": true,
         "request": "GET http://localhost:3142"
       }
+    },
+    {
+      "type": "Missing Clickjacking Protection",
+      "severity": "Medium",
+      "status": "Confirmed",
+      "location": "http://localhost:3142",
+      "confidence": "High",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "response_headers": {
+          "X-Frame-Options": "(missing)",
+          "Content-Security-Policy": "(missing)"
+        },
+        "confidence": "High",
+        "verified": true,
+        "request": "GET http://localhost:3142"
+      }
     }
   ],
   "stride_threats": [

@@ -15,12 +15,23 @@ sys.path.insert(0, os.path.join(ROOT, "multiagent"))
 from multiagent.agents.webappscanner.endpoint_discovery_agent import (
     is_static_asset,
 )
-from multiagent.agents.webappscanner.fingerprint_agent import _rule_detect
+from multiagent.agents.webappscanner.fingerprint_agent import (
+    _rule_detect,
+    merge_url_stack_signals,
+)
+from multiagent.agents.webappscanner.attack_verification_agent import (
+    Finding,
+    Evidence,
+    VulnStatus,
+    Confidence,
+)
 from multiagent.agents.threat_modeling_agent import (
     _build_section_1,
     _build_section_2,
+    _build_section_3,
     _build_section_5,
     _coverage_from_scan,
+    _is_publishable_confirmed,
 )
 from multiagent.agents.webappscanner.web_scanner_agent import (
     _build_evidence_gated_stride,
@@ -182,6 +193,53 @@ class TestStrideClickjackingCorroboration:
         )
         assert "See Section 3: Missing Clickjacking Protection" in section5
 
+    def test_av_clickjacking_is_publishable_after_enum_fix(self):
+        f = Finding(
+            vuln_type="Missing Clickjacking Protection",
+            severity="Medium",
+            status=VulnStatus.CONFIRMED,
+            location="http://localhost:3143/WebGoat",
+            confidence=Confidence.HIGH,
+            evidence=Evidence(
+                request="GET http://localhost:3143/WebGoat",
+                response_status=200,
+                response_headers={
+                    "X-Frame-Options": "(missing)",
+                    "Content-Security-Policy": "(missing)",
+                },
+                verified=True,
+                confidence=Confidence.HIGH,
+                confirmation_method="header",
+            ),
+        )
+        d = f.to_dict()
+        d.setdefault("type", d.pop("vuln_type", "Unknown"))
+        assert d["confidence"] == "High"
+        assert d["status"] == "Confirmed"
+        assert _is_publishable_confirmed(d) is True
+        section3 = _build_section_3([d])
+        assert "Missing Clickjacking Protection" in section3
+
+
+class TestDiscoveryStackMerge:
+    def test_mvc_url_promotes_java_out_of_hints(self):
+        stack = {
+            "technologies": [
+                {"name": "Bootstrap", "category": "Other", "confidence": 0.6},
+            ],
+            "unverified_hints": ["Java", "Tomcat"],
+            "stack_summary": "Bootstrap",
+        }
+        out = merge_url_stack_signals(
+            stack,
+            ["http://localhost:3143/WebGoat/start.mvc"],
+        )
+        names = {t["name"] for t in out["technologies"]}
+        assert "Spring" in names and "Java" in names and "Tomcat" in names
+        assert "Java" not in out["unverified_hints"]
+        assert "Tomcat" not in out["unverified_hints"]
+        assert "Tomcat" in out.get("stack_summary", "")
+
 
 if __name__ == "__main__":
     fails = 0
@@ -192,6 +250,7 @@ if __name__ == "__main__":
         TestAuthWallCoverageDisclosure,
         TestMvcFingerprint,
         TestStrideClickjackingCorroboration,
+        TestDiscoveryStackMerge,
     ]:
         o = cls()
         for name in sorted(n for n in dir(o) if n.startswith("test_")):

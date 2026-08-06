@@ -1,0 +1,82 @@
+{
+  "target": "webgoat",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3143/WebGoat",
+    "http://localhost:3143/WebGoat/",
+    "http://localhost:8080/WebGoat",
+    "http://localhost:8080/WebGoat/"
+  ],
+  "endpoints_true": [
+    "/WebGoat/login",
+    "/WebGoat/start.mvc"
+  ],
+  "endpoints_auth_gated": [
+    "/WebGoat/start.mvc"
+  ],
+  "ai_surface": null,
+  "expected_findings": [
+    {
+      "id": "webgoat-csp",
+      "type": "missing_header",
+      "name": "Content-Security-Policy",
+      "severity": "Medium",
+      "required": true,
+      "category": "missing_check"
+    },
+    {
+      "id": "webgoat-xcto",
+      "type": "missing_header",
+      "name": "X-Content-Type-Options",
+      "severity": "Low",
+      "required": true,
+      "category": "missing_check"
+    },
+    {
+      "id": "webgoat-clickjacking",
+      "type": "clickjacking",
+      "name": "Missing Clickjacking Protection",
+      "severity": "Medium",
+      "required": true,
+      "category": "missing_check",
+      "notes": "Must appear in Section 3 so STRIDE can cite it; not header-only ghost"
+    }
+  ],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf",
+    "fileupload",
+    "cmdi",
+    "broken-auth",
+    "xxe",
+    "ssrf",
+    "path-traversal"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "Scanner is black-box unauthenticated only — no WebGoat lesson credentials",
+      "category": "logic_bug"
+    },
+    {
+      "type": "sql injection (time-based blind)",
+      "match": "evidence_status_0",
+      "reason": "Client timeout (HTTP 0) must never confirm SLEEP",
+      "category": "logic_bug"
+    },
+    {
+      "type": "cross-site scripting",
+      "match": "confirmed_without_js_execution",
+      "reason": "Confirmed XSS requires js_execution proof",
+      "category": "logic_bug"
+    },
+    {
+      "type": "static_asset_as_endpoint",
+      "match": "bootstrap.min.css",
+      "reason": "CSS under /plugin(s)/ must not appear as administrative/functional endpoints",
+      "category": "logic_bug"
+    }
+  ],
+  "notes": "Auth-walled lesson vulns are not_assessed, not FN. Coverage disclosure required when auth_wall_dominated."
+}

@@ -497,6 +497,92 @@ def _rule_vuln_hints(detected: List[Dict]) -> List[str]:
     return hints[:5]
 
 
+def merge_url_stack_signals(stack: Dict, urls: List[str]) -> Dict:
+    """
+    Promote URL-path stack signals (e.g. .mvc → Spring/Java/Tomcat) from
+    discovered endpoints into an already-built fingerprint stack.
+
+    Fingerprinting runs on the seed URL before discovery; WebGoat's seed
+    `/WebGoat` has no `.mvc`, so Java/Tomcat were buried as LLM hints while
+    Bootstrap from Wappalyzer was surfaced. Merge after discovery.
+    """
+    if not isinstance(stack, dict):
+        return stack or {}
+    stack = dict(stack)
+    techs = list(stack.get("technologies") or [])
+    if techs and not isinstance(techs[0], dict):
+        # Legacy string list — leave alone
+        return stack
+
+    seen = {str(t.get("name", "")).lower() for t in techs if isinstance(t, dict)}
+    added: List[Dict] = []
+    for u in urls or []:
+        if not u:
+            continue
+        for hit in _rule_detect({}, [], url=str(u)):
+            name = hit.get("name", "")
+            key = name.lower()
+            if not key or key in seen:
+                continue
+            techs.append(hit)
+            added.append(hit)
+            seen.add(key)
+
+    if not added:
+        return stack
+
+    stack["technologies"] = techs
+    # Drop hints that are now confirmed
+    hints = [
+        h for h in (stack.get("unverified_hints") or [])
+        if str(h).lower() not in seen
+    ]
+    stack["unverified_hints"] = hints
+
+    # Refresh summary to prefer Server/Language/Framework over CSS libs
+    by_cat: Dict[str, List[Dict]] = {}
+    for dt in techs:
+        if isinstance(dt, dict):
+            by_cat.setdefault(dt.get("category", "Other"), []).append(dt)
+
+    def _top(cat: str) -> Optional[str]:
+        items = by_cat.get(cat, [])
+        if not items:
+            return None
+        dt = items[0]
+        return f"{dt['name']} {dt['version']}".strip() if dt.get("version") else dt["name"]
+
+    server = _top("Server") or stack.get("server")
+    language = _top("Language") or stack.get("language")
+    framework = _top("Framework") or stack.get("framework")
+    if server:
+        stack["server"] = server
+    if language:
+        stack["language"] = language
+    if framework:
+        stack["framework"] = framework
+
+    summary_parts = [p for p in [server, language, framework] if p]
+    if summary_parts:
+        # Keep prior summary bits (e.g. Bootstrap) after the stack core
+        prior = stack.get("stack_summary") or ""
+        core = " · ".join(summary_parts)
+        extras = []
+        for dt in techs:
+            if not isinstance(dt, dict):
+                continue
+            if dt.get("category") in ("Server", "Language", "Framework", "CMS"):
+                continue
+            n = dt.get("name", "")
+            if n and n.lower() not in core.lower():
+                extras.append(n)
+        if extras:
+            core = core + " · " + " · ".join(extras[:2])
+        stack["stack_summary"] = core or prior
+
+    return stack
+
+
 def _parse_cookies(headers: Dict) -> Dict[str, str]:
     cookies: Dict[str, str] = {}
     raw_vals = headers.get("set-cookie", "")

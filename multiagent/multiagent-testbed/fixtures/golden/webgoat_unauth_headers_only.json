@@ -1,0 +1,87 @@
+{
+  "target_url": "http://localhost:3143/WebGoat",
+  "scan_complete": true,
+  "authenticated_scan": false,
+  "scan_scope": "blackbox_unauth",
+  "report": "Active scan of `http://localhost:3143/WebGoat` completed in 447s [Black-box unauthenticated]. Identified 3 confirmed and 0 potential vulnerability type(s). Overall risk level on assessed pre-authentication surface: Low-Medium (score: 5). Assessed surface limited to pre-authentication endpoints; 1 functional surface(s) were auth-gated and not tested.",
+  "verified_cves": [],
+  "coverage_assessment": {
+    "scope": "blackbox_unauth",
+    "assessed_count": 1,
+    "auth_gated_count": 1,
+    "auth_wall_dominated": true,
+    "note": "Assessed surface limited to pre-authentication endpoints; 1 functional surface(s) were auth-gated and not tested."
+  },
+  "stack": {
+    "technologies": [
+      {"name": "Tomcat", "category": "Server", "confidence": 0.5},
+      {"name": "Java", "category": "Language", "confidence": 0.55},
+      {"name": "Spring", "category": "Framework", "confidence": 0.55},
+      {"name": "Bootstrap", "category": "Other", "confidence": 0.6}
+    ],
+    "unverified_hints": [],
+    "stack_summary": "Tomcat · Java · Spring · Bootstrap"
+  },
+  "endpoints_discovered": [
+    {"url": "http://localhost:3143/WebGoat/login", "status": 200, "interesting": true, "source": "probe"},
+    {"url": "http://localhost:3143/WebGoat/start.mvc", "status": 200, "redirects_to_auth": true, "interesting": true, "redirect_status": "REDIR", "category": "discovered_protected", "source": "probe"}
+  ],
+  "not_assessed_endpoints": [
+    {"url": "http://localhost:3143/WebGoat/start.mvc", "reason": "auth_required", "status": 200, "assessment": "not_assessed"}
+  ],
+  "vulnerabilities": [
+    {
+      "type": "Missing Security Header: X-Content-Type-Options",
+      "severity": "Low",
+      "status": "Confirmed",
+      "location": "http://localhost:3143/WebGoat",
+      "confidence": "High",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "confidence": "High",
+        "verified": true,
+        "request": "GET http://localhost:3143/WebGoat"
+      }
+    },
+    {
+      "type": "Missing Security Header: Content-Security-Policy",
+      "severity": "Medium",
+      "status": "Confirmed",
+      "location": "http://localhost:3143/WebGoat",
+      "confidence": "High",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "confidence": "High",
+        "verified": true,
+        "request": "GET http://localhost:3143/WebGoat"
+      }
+    },
+    {
+      "type": "Missing Clickjacking Protection",
+      "severity": "Medium",
+      "status": "Confirmed",
+      "location": "http://localhost:3143/WebGoat",
+      "confidence": "High",
+      "evidence": {
+        "confirmation_method": "header",
+        "response_status": 200,
+        "response_headers": {
+          "X-Frame-Options": "(missing)",
+          "Content-Security-Policy": "(missing)"
+        },
+        "confidence": "High",
+        "verified": true,
+        "request": "GET http://localhost:3143/WebGoat"
+      }
+    }
+  ],
+  "stride_threats": [
+    {
+      "threat": "Clickjacking",
+      "confirmed": true,
+      "evidence": "See Section 3: Missing Clickjacking Protection (X-Frame-Options and CSP frame-ancestors absent)"
+    }
+  ]
+}

@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set
 from datetime import datetime
 from pprint import pprint
 
-from .fingerprint_agent         import TechFingerprintAgent
+from .fingerprint_agent         import TechFingerprintAgent, merge_url_stack_signals
 from .pipeline_agent            import CVEVerificationPipeline
 from .endpoint_discovery_agent  import EndpointDiscoveryAgent
 from .browser_controller        import BrowserController
@@ -281,6 +281,22 @@ class WebScannerAgent:
                 [ep.get("url", "") for ep in discovered_endpoints if ep.get("url")],
                 page_html=html or "",
             ))
+            # Re-merge URL stack signals from discovered paths (e.g. start.mvc)
+            # so Spring/Java/Tomcat are not left as unverified hints.
+            disco_urls = [
+                ep.get("url", "") for ep in discovered_endpoints if ep.get("url")
+            ]
+            disco_urls.append(target_url)
+            stack = merge_url_stack_signals(stack, disco_urls)
+            if verbose:
+                promoted = [
+                    t.get("name") for t in (stack.get("technologies") or [])
+                    if isinstance(t, dict) and t.get("category") in (
+                        "Server", "Language", "Framework"
+                    )
+                ]
+                if promoted:
+                    print(f"   Stack after discovery merge: {', '.join(promoted)}")
         except Exception as e:
             logger.warning(f"Endpoint discovery failed: {e}")
 

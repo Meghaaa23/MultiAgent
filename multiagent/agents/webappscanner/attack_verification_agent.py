@@ -40,6 +40,13 @@ class Evidence:
         return asdict(self)
 
 
+def _enum_value(v):
+    """Serialize str/Enum fields to plain strings (Py3.12 str(Enum)='Enum.MEMBER')."""
+    if isinstance(v, Enum):
+        return v.value if hasattr(v, "value") else str(v)
+    return v
+
+
 @dataclass
 class Finding:
     vuln_type:   str
@@ -57,7 +64,15 @@ class Finding:
     owasp:       str      = ""
 
     def to_dict(self) -> Dict:
-        return asdict(self)
+        # Plain strings so publisher gates match "High"/"Confirmed", not
+        # "Confidence.HIGH" (Python 3.11+ str(Enum) representation).
+        def _factory(pairs):
+            return {k: _enum_value(v) for k, v in pairs}
+
+        d = asdict(self, dict_factory=_factory)
+        if isinstance(d.get("evidence"), dict):
+            d["evidence"] = {k: _enum_value(v) for k, v in d["evidence"].items()}
+        return d
 
 
 XSS_PAYLOADS = [

@@ -30,8 +30,27 @@ def _load_fixture(name: str) -> dict:
 
 class TestGroundTruthFilesExist:
     def test_core_labels_present(self):
-        for name in ("dvwa.json", "juice_shop.json", "librechat_marketing.json"):
+        for name in (
+            "dvwa.json",
+            "juice_shop.json",
+            "librechat_marketing.json",
+            "webgoat.json",
+        ):
             assert (TRUTH_DIR / name).exists()
+
+
+class TestWebgoatUnauthHeadersPass:
+    def test_webgoat_golden_passes(self):
+        truth = load_truth("webgoat")
+        scan = _load_fixture("webgoat_unauth_headers_only.json")
+        score = score_scan(truth, scan)
+        assert score["must_not_violations"] == []
+        assert score["fn"] == 0
+        assert score["tp"] >= 3  # CSP, XCTO, clickjacking
+        assert score["not_assessed_count"] >= 1
+        assert score["pass"] is True
+        tp_types = " ".join(t.get("type", "") for t in score.get("tp_detail") or []).lower()
+        assert "clickjacking" in tp_types
 
 
 class TestDvwaUnauthHeadersPass:

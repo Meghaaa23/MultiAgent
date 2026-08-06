@@ -47,6 +47,15 @@
       "category": "missing_check"
     },
     {
+      "id": "dvwa-clickjacking",
+      "type": "clickjacking",
+      "name": "Missing Clickjacking Protection",
+      "severity": "Medium",
+      "required": false,
+      "category": "missing_check",
+      "notes": "Required for Section 3↔STRIDE corroboration when XFO/CSP frame-ancestors absent; optional until live DVWA fixture refreshed"
+    },
+    {
       "id": "dvwa-setup-unauth",
       "type": "unauthenticated-access",
       "path": "/setup.php",

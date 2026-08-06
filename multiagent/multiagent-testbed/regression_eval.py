@@ -67,6 +67,7 @@ _NORM_MAP = [
     ("x-content-type-options", "missing_header"),
     ("information disclosure: server", "server_header"),
     ("server header", "server_header"),
+    ("missing clickjacking", "clickjacking"),
     ("clickjacking", "clickjacking"),
     ("unauthenticated admin", "unauthenticated-access"),
     ("unauthenticated", "unauthenticated-access"),
@@ -75,6 +76,7 @@ _NORM_MAP = [
     ("open redirect", "open-redirect"),
     ("authenticated_scan", "authenticated_scan"),
     ("authenticated scan", "authenticated_scan"),
+    ("static_asset_as_endpoint", "static_asset_as_endpoint"),
 ]
 
 
@@ -171,6 +173,31 @@ def finding_hits_must_not(finding: Dict, rule: Dict, scan: Dict) -> bool:
             return True
         return False
 
+    # Scan-level: static CSS/JS/fonts must not appear as attack-surface endpoints
+    if rtype == "static_asset_as_endpoint" or (
+        rule.get("type") or ""
+    ).lower() == "static_asset_as_endpoint":
+        needle = (rule.get("match") or ".css").lower()
+        for ep in scan.get("endpoints_discovered") or []:
+            url = (ep.get("url") or "").lower()
+            if needle in url and (
+                ep.get("interesting")
+                or ep.get("admin_panel")
+                or "admin" in (ep.get("category") or "").lower()
+            ):
+                return True
+        # Also fail if the report text lists the static asset as an endpoint
+        report = (scan.get("report") or "").lower()
+        if needle in report and (
+            "administrative endpoints" in report or "functional endpoints" in report
+        ):
+            # Only when the asset appears near endpoint listing context
+            return needle in report and any(
+                needle in (ep.get("url") or "").lower()
+                for ep in (scan.get("endpoints_discovered") or [])
+            )
+        return False
+
     if not finding:
         return False
 
@@ -249,17 +276,17 @@ def score_scan(truth: Dict, scan: Dict) -> Dict[str, Any]:
     # --- must_not violations ---
     violations: List[Dict] = []
     for rule in must_not:
-        # Scan-level rules (no finding)
-        if finding_hits_must_not({}, rule, scan) and normalise_type(
-            rule.get("type", "")
-        ) in ("cve", "authenticated_scan"):
-            # CVE: only count once at scan level
-            if normalise_type(rule.get("type", "")) == "cve":
-                if finding_hits_must_not({}, rule, scan):
-                    violations.append({"rule": rule, "finding": None})
-            elif finding_hits_must_not({}, rule, scan):
+        # Scan-level rules (no finding required)
+        rtype = normalise_type(rule.get("type", ""))
+        if rtype in ("authenticated_scan", "static_asset_as_endpoint"):
+            if finding_hits_must_not({}, rule, scan):
                 violations.append({"rule": rule, "finding": None})
             continue
+        if rtype == "cve":
+            if finding_hits_must_not({}, rule, scan):
+                violations.append({"rule": rule, "finding": None})
+                continue
+            # Fall through — CVE may also appear only on a finding row
         for f in findings:
             if finding_hits_must_not(f, rule, scan):
                 violations.append({"rule": rule, "finding": f})

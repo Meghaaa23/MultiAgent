@@ -147,6 +147,18 @@ def _evidence_has_substance(ev: Dict) -> bool:
     return bool(str(body).strip()) or bool(header_vals)
 
 
+def _norm_conf_label(val) -> str:
+    """Normalize confidence/status labels; tolerate Enum reprs like Confidence.HIGH."""
+    if val is None:
+        return ""
+    if hasattr(val, "value"):
+        val = val.value
+    s = str(val).strip().lower()
+    if "." in s:
+        s = s.rsplit(".", 1)[-1]
+    return s
+
+
 def _is_publishable_confirmed(v: Dict) -> bool:
     """
     Publisher gate: only report Confirmed findings with High confidence
@@ -157,13 +169,13 @@ def _is_publishable_confirmed(v: Dict) -> bool:
     """
     if not isinstance(v, dict):
         return False
-    if v.get("status") != "Confirmed":
+    if _norm_conf_label(v.get("status")) != "confirmed":
         return False
-    conf = str(v.get("confidence") or "").strip().lower()
+    conf = _norm_conf_label(v.get("confidence"))
     ev = v.get("evidence") or {}
     if not isinstance(ev, dict):
         ev = {}
-    ev_conf = str(ev.get("confidence") or "").strip().lower()
+    ev_conf = _norm_conf_label(ev.get("confidence"))
     if conf not in ("high",) and ev_conf not in ("high",):
         return False
     if ev.get("verified") is False:
