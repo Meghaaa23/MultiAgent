@@ -77,6 +77,9 @@ _NORM_MAP = [
     ("authenticated_scan", "authenticated_scan"),
     ("authenticated scan", "authenticated_scan"),
     ("static_asset_as_endpoint", "static_asset_as_endpoint"),
+    ("spa_admin_soft404", "spa_admin_soft404"),
+    ("missing security header: strict-transport-security", "missing_header"),
+    ("missing security header: x-xss-protection", "missing_header"),
 ]
 
 
@@ -186,16 +189,19 @@ def finding_hits_must_not(finding: Dict, rule: Dict, scan: Dict) -> bool:
                 or "admin" in (ep.get("category") or "").lower()
             ):
                 return True
-        # Also fail if the report text lists the static asset as an endpoint
-        report = (scan.get("report") or "").lower()
-        if needle in report and (
-            "administrative endpoints" in report or "functional endpoints" in report
-        ):
-            # Only when the asset appears near endpoint listing context
-            return needle in report and any(
-                needle in (ep.get("url") or "").lower()
-                for ep in (scan.get("endpoints_discovered") or [])
-            )
+        return False
+
+    # Scan-level: SPA soft-404 /admin etc. must not be interesting attack surface
+    if rtype == "spa_admin_soft404":
+        needle = (rule.get("match") or "/admin").lower()
+        for ep in scan.get("endpoints_discovered") or []:
+            url = (ep.get("url") or "").lower()
+            if needle not in url:
+                continue
+            if ep.get("spa_catch_all") or ep.get("excluded"):
+                continue  # correctly excluded
+            if ep.get("interesting") or ep.get("admin_panel"):
+                return True
         return False
 
     if not finding:
@@ -207,6 +213,13 @@ def finding_hits_must_not(finding: Dict, rule: Dict, scan: Dict) -> bool:
             rtype in ("xss", "sqli", "sqli-timing", "cors", "csrf")
             and fcanon == rtype
         ):
+            return False
+
+    # Specific missing-header rules must match the header name, not every header
+    rule_type_raw = (rule.get("type") or "").lower()
+    if "missing security header:" in rule_type_raw:
+        header_name = rule_type_raw.split("missing security header:", 1)[-1].strip()
+        if header_name and header_name not in (ftype or "").lower():
             return False
 
     path = rule.get("path") or ""
@@ -278,7 +291,9 @@ def score_scan(truth: Dict, scan: Dict) -> Dict[str, Any]:
     for rule in must_not:
         # Scan-level rules (no finding required)
         rtype = normalise_type(rule.get("type", ""))
-        if rtype in ("authenticated_scan", "static_asset_as_endpoint"):
+        if rtype in (
+            "authenticated_scan", "static_asset_as_endpoint", "spa_admin_soft404"
+        ):
             if finding_hits_must_not({}, rule, scan):
                 violations.append({"rule": rule, "finding": None})
             continue

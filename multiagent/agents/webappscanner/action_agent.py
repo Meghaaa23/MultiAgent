@@ -475,12 +475,34 @@ class ActionAgent:
                               stack_keywords: List[str],
                               evidence: Optional[Dict] = None) -> Dict:
         evidence = evidence or {}
-        xfo_present = evidence.get("checked_headers") is not None
-        evidence_note = (
-            "Captured response had no X-Frame-Options / frame-ancestors CSP directive."
-            if xfo_present else
-            "[NO EVIDENCE CAPTURED — frame-blocking headers were not verified against a live response]"
+        hdrs = evidence.get("response_headers") or evidence.get("headers") or {}
+        if not isinstance(hdrs, dict):
+            hdrs = {}
+        hdrs_lower = {str(k).lower(): str(v) for k, v in hdrs.items()}
+        # Scanners write response_headers with "(missing)" — that IS captured evidence.
+        headers_were_checked = (
+            evidence.get("checked_headers") is not None
+            or bool(hdrs)
+            or evidence.get("confirmation_method") == "header"
         )
+        xfo = hdrs_lower.get("x-frame-options", "")
+        csp = hdrs_lower.get("content-security-policy", "")
+        missing_xfo = (not xfo) or xfo.strip().lower() in ("(missing)", "missing", "")
+        missing_fa = "frame-ancestors" not in (csp or "").lower()
+
+        if headers_were_checked and missing_xfo and missing_fa:
+            evidence_note = (
+                "Captured response had no X-Frame-Options / frame-ancestors CSP directive."
+            )
+        elif headers_were_checked:
+            evidence_note = (
+                "Captured response headers inspected for frame-blocking directives."
+            )
+        else:
+            evidence_note = (
+                "[NO EVIDENCE CAPTURED — frame-blocking headers were not verified "
+                "against a live response]"
+            )
 
         poc = (
             '<!DOCTYPE html>\n'
@@ -515,7 +537,7 @@ class ActionAgent:
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "html",
-            "evidence_captured": xfo_present,
+            "evidence_captured": headers_were_checked,
             "fix_snippet":    fix_snippet,
             "fix_language":   self._fix_language(stack_key),
             "fix_context":    self._fix_context(stack_key, "X-Frame-Options"),

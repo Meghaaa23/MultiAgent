@@ -590,6 +590,9 @@ class WebScannerAgent:
         cors_mode = None  # None | wildcard | reflected | credentialed
 
         def _cors_mode_from_finding(f: Dict) -> Optional[str]:
+            # Only Confirmed CORS with a concrete ACAO drives STRIDE.
+            # Never infer "reflected" from severity alone — that produced
+            # High STRIDE while Section 4 showed wildcard Low/Potential.
             if "CORS" not in (f.get("type") or "") or f.get("status") != "Confirmed":
                 return None
             ev = f.get("evidence") or {}
@@ -606,21 +609,15 @@ class WebScannerAgent:
                 or headers_l.get("access-control-allow-credentials", "")
             ).strip().lower()
             creds = acac == "true"
-            if creds and (acao == "*" or "evil" in acao.lower()):
+            if not acao:
+                return None
+            if creds and (acao == "*" or "evil" in acao.lower() or acao.startswith("http")):
                 return "credentialed"
             if acao == "*":
                 return "wildcard"
-            if acao and ("evil" in acao.lower() or acao.startswith("http")):
+            if "evil" in acao.lower() or acao.startswith("http"):
                 return "reflected"
-            # Fall back to severity from finding
-            sev = (f.get("severity") or "").lower()
-            if sev == "high":
-                return "credentialed"
-            if sev == "medium":
-                return "reflected"
-            if sev == "low":
-                return "wildcard"
-            return "reflected"
+            return None
 
         _CORS_RANK = {"wildcard": 1, "reflected": 2, "credentialed": 3}
 
@@ -740,6 +737,10 @@ class WebScannerAgent:
                 ep.get("url", ""), ep.get("content_type", "")
             ):
                 continue  # CSS/fonts/images never enter the endpoint table
+            if ep.get("spa_catch_all") or ep.get("excluded"):
+                # Keep for Section 2 exclusion list, not as attack surface
+                report_endpoints.append(dict(ep, interesting=False))
+                continue
             if ep.get("access_controlled") or ep.get("auth_required") or ep.get(
                 "redirects_to_auth"
             ):

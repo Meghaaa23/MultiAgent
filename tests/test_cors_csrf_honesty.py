@@ -33,6 +33,7 @@ class TestCorsSeverityTiers:
         findings = asyncio.run(vt.test_cors("http://localhost:3141"))
         assert findings
         assert findings[0]["severity"] == "Low"
+        assert findings[0]["status"] == "Potential"
         assert "credentials" not in findings[0]["impact"].lower() or \
             "not enabled" in findings[0]["impact"].lower()
 

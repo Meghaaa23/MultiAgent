@@ -285,7 +285,13 @@ class AttackVerificationAgent:
             # Keep latest publisher header logic from remove-mongodb-doc-ui branch
             headers_lower = {k.lower(): v for k, v in headers.items()}
             csp_value = headers_lower.get("content-security-policy", "")
-            is_https = str(url).lower().startswith("https://")
+            try:
+                from .vulnerability_tester import _should_report_missing_header
+            except Exception:
+                def _should_report_missing_header(header: str, u: str) -> bool:  # type: ignore
+                    if header == "Strict-Transport-Security":
+                        return str(u).lower().startswith("https://")
+                    return header not in ("X-XSS-Protection", "Referrer-Policy")
             publishable = [
                 "X-Frame-Options",
                 "X-Content-Type-Options",
@@ -297,7 +303,7 @@ class AttackVerificationAgent:
                     continue
                 if h == "X-Frame-Options" and "frame-ancestors" in csp_value.lower():
                     continue
-                if h == "Strict-Transport-Security" and not is_https:
+                if not _should_report_missing_header(h, url):
                     continue
                 findings.append(Finding(
                     vuln_type   = f"Missing Security Header: {h}",
@@ -744,14 +750,14 @@ class AttackVerificationAgent:
                 status     = VulnStatus.CONFIRMED
                 confidence = Confidence.HIGH
             elif star_base or any(_is_wildcard(r.get("acao", "")) for r in api_hits):
-                # Bare ACAO=* without credentials — Low, still Confirmed as header fact
+                # Bare ACAO=* without credentials — Potential Low (not STRIDE)
                 severity   = "Low"
                 impact     = (
                     "Wildcard ACAO (*) without credentials — public responses "
                     "readable cross-origin; cookie theft not enabled."
                 )
-                status     = VulnStatus.CONFIRMED
-                confidence = Confidence.HIGH
+                status     = VulnStatus.POTENTIAL
+                confidence = Confidence.MEDIUM
             else:
                 return findings
 

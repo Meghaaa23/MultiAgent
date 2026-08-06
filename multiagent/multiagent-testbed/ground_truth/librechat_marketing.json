@@ -36,6 +36,12 @@
       "type": "authenticated_scan",
       "reason": "black-box unauthenticated only",
       "category": "logic_bug"
+    },
+    {
+      "type": "cors",
+      "match": "high_without_acac",
+      "reason": "CORS High requires Allow-Credentials: true",
+      "category": "logic_bug"
     }
   ]
 }

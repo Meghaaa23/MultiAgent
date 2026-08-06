@@ -485,11 +485,19 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
     interesting = [
         e for e in (endpoints or [])
         if e.get("interesting") and not e.get("static_asset")
+        and not e.get("spa_catch_all") and not e.get("excluded")
         and not is_static_asset(e.get("url", ""), e.get("content_type", ""))
+        and "SPA" not in str(e.get("verification") or "")
+        and "soft-404" not in str(e.get("verification") or "").lower()
     ]
     verified_eps = [
         e for e in interesting
         if e.get("status") not in (None, "", "?")
+    ]
+    excluded_eps = [
+        e for e in (endpoints or [])
+        if (e.get("spa_catch_all") or e.get("excluded"))
+        and e.get("status") not in (None, "", "?")
     ]
     if verified_eps:
         functional, admin, discovery = [], [], []
@@ -544,6 +552,15 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
                     )
     else:
         lines.append("None discovered with verified HTTP responses.")
+
+    if excluded_eps:
+        lines.append("\n Excluded endpoints (SPA/soft-404 — not attack surface)")
+        for ep in excluded_eps[:10]:
+            reason = ep.get("exclude_reason") or ep.get("verification") or "SPA catch-all"
+            lines.append(
+                f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
+                f"{ep.get('url','')} — {reason}"
+            )
 
     if forms_discovered:
         lines.append(f"\n Forms discovered: {forms_discovered} (included in active testing)")

@@ -16,6 +16,50 @@ from urllib.parse import urlparse, urljoin, urlsplit, urlunparse
 logger = logging.getLogger(__name__)
 
 
+# Strong SPA shell signals — bare "admin"/"dashboard" appear in most shells.
+_SPA_STRONG_SIGNALS = (
+    "<app-root", "ng-version", "router-outlet",
+    "React.createElement", "__NEXT_DATA__", "__vue_app__",
+    'id="root"', "id='root'", 'id="app"', "id='app'",
+    "data-reactroot",
+)
+_SPA_WEAK_SIGNALS = (
+    "<!DOCTYPE html>", "<script src=", "window.__",
+    "webpackJsonp", "vite/client",
+)
+
+# Bare "admin"/"dashboard" in SPA HTML are false positives on catch-alls.
+_ADMIN_STRONG_MARKERS = (
+    "admin panel", "administration", "wp-admin",
+    "django administration", "control panel",
+    "management console", "admin dashboard",
+    "administrator login", "site administration",
+)
+
+
+def looks_like_spa_shell(body: str) -> bool:
+    if not body:
+        return False
+    has_strong = any(s in body for s in _SPA_STRONG_SIGNALS)
+    weak_count = sum(1 for s in _SPA_WEAK_SIGNALS if s in body)
+    return has_strong or weak_count >= 2
+
+
+def has_strong_admin_content(body: str) -> bool:
+    low = (body or "").lower()
+    return any(m in low for m in _ADMIN_STRONG_MARKERS)
+
+
+def _is_api_surface_path(url_or_path: str) -> bool:
+    path = (url_or_path or "").lower()
+    try:
+        path = (urlsplit(url_or_path).path or path).lower()
+    except Exception:
+        pass
+    return any(
+        p in path for p in ("/api/", "/rest/", "/graphql", "/v1/", "/v2/", "/v3/")
+    ) or path.rstrip("/").endswith(("/api", "/rest", "/graphql"))
+
 
 # Classic server-rendered / PHP / CMS entrypoints (product-agnostic)
 SSR_COMMON_PATHS = [
@@ -522,21 +566,42 @@ class EndpointDiscoveryAgent:
                 'type="password"', "type='password'",
                 "login", "sign in", "signin", "authenticate"
             )):
+                # SPA catch-all login chrome still counts as auth surface
                 ep["interesting"]   = True
                 ep["auth_endpoint"] = True
                 ep["verification"]  = "Login form detected"
                 return ep
 
-            # Admin panel indicators — HTML body only.
-            # Never match on /plugins/ inside a static path (CSS frameworks).
-            if is_html and any(kw in body_lower for kw in (
-                "admin", "dashboard", "control panel",
-                "management console", "administrator"
-            )):
+            # Admin panel — require strong markers; bare "admin"/"dashboard"
+            # in SPA shells are false positives on catch-all routers.
+            if is_html and has_strong_admin_content(body):
+                if looks_like_spa_shell(body) and (
+                    self._soft_mode or self._matches_spa_shell(body, ctype)
+                ):
+                    ep["interesting"]   = False
+                    ep["spa_catch_all"] = True
+                    ep["admin_panel"]   = False
+                    ep["excluded"]      = True
+                    ep["exclude_reason"] = "SPA catch-all — not a real admin endpoint"
+                    ep["verification"]  = "SPA catch-all shell — not a confirmed admin panel"
+                    return ep
                 ep["interesting"]  = True
                 ep["admin_panel"]  = True
                 ep["verification"] = "Admin panel indicators detected"
                 return ep
+
+            # Soft-404 / SPA catch-all HTML (admin/dashboard/graphql shells)
+            if is_html and (
+                self._matches_spa_shell(body, ctype) or looks_like_spa_shell(body)
+            ):
+                if self._soft_mode or self._matches_spa_shell(body, ctype):
+                    ep["interesting"]    = False
+                    ep["spa_catch_all"]  = True
+                    ep["admin_panel"]    = False
+                    ep["excluded"]       = True
+                    ep["exclude_reason"] = "SPA/soft-404 shell — not a real endpoint"
+                    ep["verification"]   = "SPA/soft-404 shell — not a real endpoint"
+                    return ep
 
             # Directory listing
             if "index of /" in body_lower or "<title>directory listing" in body_lower:
@@ -545,14 +610,6 @@ class EndpointDiscoveryAgent:
                 ep["verification"]      = "Directory listing enabled"
                 ep["severity"]          = "Medium"
                 return ep
-
-            # Only drop unclassified HTML when it truly matches the SPA shell.
-            # Classic SSR apps often return unique HTML 200s that must stay.
-            if self._soft_mode and ("html" in ctype or "<html" in body_lower):
-                if self._matches_spa_shell(body, ctype):
-                    ep["interesting"]  = False
-                    ep["verification"] = "SPA/soft-404 shell — not a real endpoint"
-                    return ep
 
             # SSR signal: HTML page with a form is an injectable surface
             if "<form" in body_lower and ("html" in ctype or "<html" in body_lower):
@@ -1042,6 +1099,42 @@ class EndpointDiscoveryAgent:
                 ))
                 if not looks_like_endpoint:
                     return None
+
+                # SPA catch-all: /admin,/dashboard,/manage,/graphql HTML shells
+                # that match soft-404 / SPA markers are not real surfaces.
+                adminish = any(kw in path_lower for kw in (
+                    "admin", "dashboard", "manage", "console", "panel",
+                ))
+                graphql_ish = "graphql" in path_lower
+                if adminish or graphql_ish:
+                    body = await self._fetch_text(url) or ""
+                    spa_html = body and (
+                        looks_like_spa_shell(body)
+                        or self._matches_spa_shell(body, content_type)
+                    )
+                    if spa_html and adminish and not has_strong_admin_content(body):
+                        logger.debug(
+                            "probe: drop %s — SPA/soft-404 catch-all", url
+                        )
+                        return {
+                            "url": url, "method": "GET", "source": "probe",
+                            "status": status, "final_url": final_url or url,
+                            "interesting": False, "auth_required": False,
+                            "spa_catch_all": True, "excluded": True,
+                            "exclude_reason": "SPA catch-all — not a real admin endpoint",
+                            "params": [], "content_type": content_type,
+                            "verification": "SPA catch-all — not a real admin endpoint",
+                        }
+                    if spa_html and graphql_ish and body.lstrip()[:1] not in "{[":
+                        return {
+                            "url": url, "method": "GET", "source": "probe",
+                            "status": status, "final_url": final_url or url,
+                            "interesting": False, "auth_required": False,
+                            "spa_catch_all": True, "excluded": True,
+                            "exclude_reason": "SPA catch-all — not a GraphQL API",
+                            "params": [], "content_type": content_type,
+                            "verification": "SPA catch-all — not a GraphQL API",
+                        }
 
             return {
                 "url":          url,

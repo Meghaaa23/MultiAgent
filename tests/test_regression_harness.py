@@ -34,9 +34,20 @@ class TestGroundTruthFilesExist:
             "dvwa.json",
             "juice_shop.json",
             "librechat_marketing.json",
+            "librechat_local.json",
             "webgoat.json",
         ):
             assert (TRUTH_DIR / name).exists()
+
+
+class TestLibrechatLocalGoldenPass:
+    def test_librechat_local_passes(self):
+        truth = load_truth("librechat_local")
+        scan = _load_fixture("librechat_local_unauth.json")
+        score = score_scan(truth, scan)
+        assert score["must_not_violations"] == []
+        assert score["pass"] is True
+        assert score["fp"] == 0
 
 
 class TestWebgoatUnauthHeadersPass:
