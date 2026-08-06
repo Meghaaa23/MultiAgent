@@ -1,4 +1,4 @@
-"""AI fingerprint honesty + CVE mapping off (fingerprint-only stack)."""
+"""CVE mapping off (fingerprint-only stack) + taxonomy AI gate helpers."""
 import sys
 import os
 
@@ -7,27 +7,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "multiagent"))
 
 from multiagent.agents.threat_modeling_agent import _build_section_2, _build_section_5
-from multiagent.agents.ai_agents.ai_fingerprint import (
-    FRAMEWORK_SIGNATURES,
-    score_to_confidence,
-    EVIDENCE_WEIGHTS,
-)
-
-
-class TestLibreChatAiGateReason:
-    """Document why LibreChat was missed and the score/confidence math."""
-
-    def test_framework_alone_is_low_confidence_band(self):
-        # framework_identified weight=30 → score>=26 (is_ai) but confidence "low"
-        score = EVIDENCE_WEIGHTS["framework_identified"]
-        assert score >= 26
-        assert score_to_confidence(score) == "low"
-
-    def test_librechat_in_framework_signatures(self):
-        assert "LibreChat" in FRAMEWORK_SIGNATURES
-        paths = FRAMEWORK_SIGNATURES["LibreChat"]["paths"]
-        assert "/api/config" in paths
-        assert "/api/user" in paths
+from multiagent.agents.ai_agents.ai_evidence_scoring import score_evidence
 
 
 class TestSection2FingerprintOnly:
@@ -86,70 +66,58 @@ class TestStrideNoDoubleSeeSection3:
         assert text.count("See Section 3") == 1
 
 
-class TestKnownAiAppEscalationLogic:
-    """Mirror the web_scanner gate without spinning up the full agent."""
+class TestLiveSurfaceGateNoNameHardcoding:
+    """Scanner must escalate on live surface, not product-name lists."""
 
-    def _gate(self, ai_fingerprint, app_identity_name=""):
-        raw_is_ai = ai_fingerprint.get("is_ai_powered", False)
-        confidence = ai_fingerprint.get("confidence", "low")
-        has_concrete = bool(
-            ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers")
+    def _gate(self, ai_fingerprint):
+        has_live_surface = bool(
+            ai_fingerprint.get("has_live_surface")
+            or ai_fingerprint.get("ml_endpoints")
+            or ai_fingerprint.get("auth_required_paths")
         )
-        known = (
-            "librechat", "open webui", "open-webui", "flowise", "dify",
-            "anythingllm", "lobechat", "lobe-chat", "langflow", "openhands",
-        )
-        fw = (
-            (ai_fingerprint.get("framework") or "")
-            + " "
-            + (ai_fingerprint.get("app_layer") or "")
-            + " "
-            + (app_identity_name or "")
-        ).lower()
-        known_ai_app = any(k in fw for k in known)
-        named_framework = bool(ai_fingerprint.get("framework"))
-        return (
-            (raw_is_ai and (
-                confidence in ("high", "very_high", "medium")
-                or has_concrete
-                or named_framework
-            ))
-            or known_ai_app
-        )
+        brand_only = bool(ai_fingerprint.get("ai_brand_only")) and not has_live_surface
+        is_ai = bool(ai_fingerprint.get("is_ai_powered") and has_live_surface)
+        return is_ai, brand_only
 
-    def test_old_gate_would_miss_librechat_low_conf(self):
-        # Previous gate: raw_is_ai and (confidence == "high" or has_concrete)
-        fp = {
-            "is_ai_powered": True,
-            "confidence": "low",
-            "framework": "LibreChat",
-            "ml_endpoints": [],
-            "ai_headers": [],
-        }
-        old = fp["is_ai_powered"] and (
-            fp["confidence"] == "high" or bool(fp["ml_endpoints"] or fp["ai_headers"])
-        )
-        assert old is False
-        assert self._gate(fp) is True
-
-    def test_stack_identity_alone(self):
+    def test_brand_only_librechat_name_does_not_escalate(self):
         fp = {
             "is_ai_powered": False,
-            "confidence": "none",
-            "framework": "",
+            "has_live_surface": False,
+            "ai_brand_only": True,
+            "framework": "LibreChat",
             "ml_endpoints": [],
-            "ai_headers": [],
+            "auth_required_paths": [],
         }
-        assert self._gate(fp, app_identity_name="LibreChat") is True
+        is_ai, brand_only = self._gate(fp)
+        assert is_ai is False
+        assert brand_only is True
+
+    def test_auth_gated_messages_escalates(self):
+        fp = {
+            "is_ai_powered": True,
+            "has_live_surface": True,
+            "ai_brand_only": False,
+            "framework": "",
+            "ml_endpoints": ["http://localhost:3080/api/messages"],
+            "auth_required_paths": [
+                {"endpoint": "http://localhost:3080/api/messages", "status_code": 401},
+            ],
+        }
+        is_ai, brand_only = self._gate(fp)
+        assert is_ai is True
+        assert brand_only is False
+
+    def test_taxonomy_brand_vs_live(self):
+        assert score_evidence(["framework_identified"]).is_ai is False
+        assert score_evidence(["ml_endpoint_401_403"]).is_ai is True
 
 
 if __name__ == "__main__":
     fails = 0
     for cls in [
-        TestLibreChatAiGateReason,
         TestSection2FingerprintOnly,
         TestStrideNoDoubleSeeSection3,
-        TestKnownAiAppEscalationLogic,
+        TestLiveSurfaceGateNoNameHardcoding,
     ]:
         o = cls()
         for name in sorted(n for n in dir(o) if n.startswith("test_")):

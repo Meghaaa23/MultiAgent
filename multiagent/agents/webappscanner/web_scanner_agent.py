@@ -315,7 +315,9 @@ class WebScannerAgent:
         ai_fingerprint  = None
         avid_results    = None
         ai_vuln_results = None
+        ai_infra_result = None
         is_ai_powered   = False
+        brand_only_ai   = False
 
         try:
             ai_fingerprint = await self.ai_fingerprinter.fingerprint(
@@ -326,51 +328,38 @@ class WebScannerAgent:
                 verbose              = verbose,
             )
 
-            raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
-            confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(
-                ai_fingerprint.get("ml_endpoints")
-                or ai_fingerprint.get("ai_headers")
+            # Taxonomy gate: escalate only on live inference surface.
+            # Brand / product-name / stack identity alone must not escalate.
+            has_live_surface = bool(
+                ai_fingerprint.get("has_live_surface")
+                or ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("auth_required_paths")
             )
-            # Known AI chat products (LibreChat, Open WebUI, …) are AI-powered
-            # even when ask/chat APIs are auth-gated and score stays medium/low.
-            _KNOWN_AI_APPS = (
-                "librechat", "open webui", "open-webui", "flowise", "dify",
-                "anythingllm", "lobechat", "lobe-chat", "langflow", "openhands",
+            brand_only_ai = (
+                bool(ai_fingerprint.get("ai_brand_only")) and not has_live_surface
             )
-            fw = (
-                (ai_fingerprint.get("framework") or "")
-                + " "
-                + (ai_fingerprint.get("app_layer") or "")
-                + " "
-                + (stack.get("app_identity_name") or "")
-            ).lower()
-            known_ai_app = any(k in fw for k in _KNOWN_AI_APPS)
-            named_framework = bool(ai_fingerprint.get("framework"))
-            # Trust AI fingerprint when it named a framework (LibreChat etc.) even
-            # if score lands in the "low" band (framework_identified alone = 30).
-            is_ai_powered = (
-                (raw_is_ai and (
-                    confidence in ("high", "very_high", "medium")
-                    or has_concrete
-                    or named_framework
-                ))
-                or known_ai_app
+            is_ai_powered = bool(
+                ai_fingerprint.get("is_ai_powered") and has_live_surface
             )
-            if known_ai_app and ai_fingerprint is not None:
-                ai_fingerprint["is_ai_powered"] = True
-                if not ai_fingerprint.get("framework") and stack.get("app_identity_name"):
-                    ai_fingerprint["framework"] = stack.get("app_identity_name")
-                ai_fingerprint.setdefault(
-                    "ai_detection_note",
-                    "Known AI chat application — chat/ask surfaces may be auth-gated",
-                )
 
             if is_ai_powered:
                 if verbose:
-                    print(f"  AI-powered app detected [{confidence} confidence]")
+                    conf = ai_fingerprint.get("confidence", "low")
+                    det = ai_fingerprint.get("detection", "not_detected")
+                    print(f"  AI-powered app detected [{det}, confidence={conf}]")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
+
+                if verbose:
+                    print("  AI Infrastructure Build Attack Analysis...")
+                try:
+                    ai_infra_result = await self.ai_infra_agent.scan(
+                        target_url=target_url, ai_stack=ai_fingerprint,
+                    )
+                    if verbose and ai_infra_result is not None:
+                        print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
+                except Exception as e:
+                    logging.warning(f"AIInfraAgent failed: {e}")
 
                 if verbose:
                     print("  Querying AVID database for AI vulnerabilities...")
@@ -396,65 +385,20 @@ class WebScannerAgent:
                     s = len(ai_vuln_results.get("strategic_recommendations", []))
                     print(f"   AI vulns: {c} confirmed, {p} potential")
                     print(f"   Strategic recommendations: {s} ATLAS-based\n")
+            elif brand_only_ai:
+                if verbose:
+                    fw = ai_fingerprint.get("framework") or (
+                        (ai_fingerprint.get("frameworks_detected") or ["unknown"])[0]
+                    )
+                    det = ai_fingerprint.get("detection", "possible")
+                    print(f"  AI product brand detected ({fw}) but no live inference surface")
+                    print(f"     detection={det} — skipping AI escalation\n")
             else:
                 if verbose:
-                    if raw_is_ai and not has_concrete:
-                        print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
-                    else:
-                        print(f"  No AI/ML components detected — AI-specific tests skipped\n")
+                    print("  No AI/ML components detected — AI-specific tests skipped\n")
 
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
-
-        # Classic stack identity alone can mark known AI chat apps (e.g. LibreChat)
-        # when the AI fingerprinter scored below threshold or threw.
-        if not is_ai_powered:
-            _KNOWN_AI_APPS = (
-                "librechat", "open webui", "open-webui", "flowise", "dify",
-                "anythingllm", "lobechat", "lobe-chat", "langflow", "openhands",
-            )
-            identity = (
-                (stack.get("app_identity_name") or "")
-                + " "
-                + (stack.get("stack_summary") or "")
-                + " "
-                + ((ai_fingerprint or {}).get("framework") or "")
-            ).lower()
-            if any(k in identity for k in _KNOWN_AI_APPS):
-                is_ai_powered = True
-                if ai_fingerprint is None:
-                    ai_fingerprint = {
-                        "is_ai_powered": True,
-                        "framework": stack.get("app_identity_name") or "LibreChat",
-                        "confidence": "medium",
-                        "ml_endpoints": [],
-                        "ai_headers": [],
-                        "ml_libraries": [],
-                    }
-                else:
-                    ai_fingerprint["is_ai_powered"] = True
-                    if not ai_fingerprint.get("framework"):
-                        ai_fingerprint["framework"] = (
-                            stack.get("app_identity_name") or "LibreChat"
-                        )
-                if verbose:
-                    print(
-                        "  AI-powered app inferred from stack identity "
-                        f"({stack.get('app_identity_name') or ai_fingerprint.get('framework')})\n"
-                    )
-
-        ai_infra_result = None
-        try:
-            if ai_fingerprint and ai_fingerprint.get("is_ai_powered"):
-                if verbose:
-                    print("  AI Infrastructure Build Attack Analysis...")
-                ai_infra_result = await self.ai_infra_agent.scan(
-                    target_url=target_url, ai_stack=ai_fingerprint,
-                )
-                if verbose:
-                    print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
-        except Exception as e:
-            logging.warning(f"AIInfraAgent failed: {e}")
 
         # CVE mapping disabled for now — fingerprint / stack only.
         # Orphan NVD rows were drowning Section 2 (e.g. LibreChat CVE dumps).
@@ -842,7 +786,13 @@ class WebScannerAgent:
             "scan_duration":          round(duration, 1),
             "scan_scope":             "blackbox_unauth",
             "timestamp":              datetime.now().isoformat(),
-            "is_ai_powered":          is_ai_powered,
+            # Report may note brand-only AI product identity; escalation above
+            # already required live surface.
+            "is_ai_powered":          is_ai_powered or brand_only_ai,
+            "ai_brand_only":          brand_only_ai,
+            "has_live_surface":       bool(
+                (ai_fingerprint or {}).get("has_live_surface")
+            ) if ai_fingerprint else False,
             "ai_fingerprint":         ai_fingerprint,
             "avid_findings":          (avid_results or {}).get("avid_findings", []),
             "avid_backdoor_relevant": (avid_results or {}).get("backdoor_relevant", []),
