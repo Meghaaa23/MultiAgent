@@ -858,6 +858,41 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     if ai_vulns:
         confirmed_ai = [v for v in ai_vulns if v.get("status") == "Confirmed"]
         potential_ai = [v for v in ai_vulns if v.get("status") == "Potential"]
+        # Collapse duplicate auth-gated PI rows (legacy scans / fan-out).
+        collapsed_potential: List[Dict] = []
+        auth_gated_bucket: List[Dict] = []
+        for v in potential_ai:
+            if "auth-gated" in (v.get("type") or "").lower():
+                auth_gated_bucket.append(v)
+            else:
+                collapsed_potential.append(v)
+        if auth_gated_bucket:
+            primary = auth_gated_bucket[0]
+            related = []
+            for v in auth_gated_bucket:
+                loc = v.get("location")
+                if loc and loc not in related:
+                    related.append(loc)
+                for ep in v.get("related_endpoints") or []:
+                    if ep not in related:
+                        related.append(ep)
+            detail = primary.get("details") or (
+                "AI inference/chat endpoint(s) exist but require authentication. "
+                "Prompt-injection testing was not attempted without credentials."
+            )
+            if len(related) > 1 and "Related auth-gated" not in detail:
+                detail += (
+                    f" Related auth-gated surfaces ({len(related)}): "
+                    + ", ".join(related[1:6])
+                    + (" …" if len(related) > 6 else "")
+                )
+            collapsed_potential.insert(0, {
+                **primary,
+                "location": related[0] if related else primary.get("location"),
+                "details": detail,
+            })
+            potential_ai = collapsed_potential
+
         for v in confirmed_ai:
             lines += [
                 f" [CONFIRMED] {v.get('type','?')}",
@@ -913,11 +948,27 @@ def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
     lines.append(" 8.4 Strategic Recommendations (ATLAS-Based)")
     lines.append("")
 
+    has_ai_surface = bool(
+        ai_fp.get("ml_endpoints")
+        or ai_fp.get("has_live_surface")
+        or ai_fp.get("chat_components")
+        or ai_vulns
+    )
+
     if not strategic:
-        lines.append(
-            "No strategic recommendations generated — "
-            "no AI-specific attack surfaces identified during active scanning."
-        )
+        if has_ai_surface:
+            lines.append(
+                "AI chat/inference surfaces were identified (see 8.1–8.2). "
+                "No additional ATLAS strategic recommendations were generated "
+                "beyond those surfaces — keep authentication on chat APIs, "
+                "add input/output guardrails, and re-test prompt injection with "
+                "credentials when authorized."
+            )
+        else:
+            lines.append(
+                "No strategic recommendations generated — "
+                "no AI-specific attack surfaces identified during active scanning."
+            )
         return "\n".join(lines)
 
     for rec in strategic:

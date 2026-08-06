@@ -6,7 +6,11 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "multiagent"))
 
-from multiagent.agents.threat_modeling_agent import _build_section_2, _build_section_5
+from multiagent.agents.threat_modeling_agent import (
+    _build_section_2,
+    _build_section_5,
+    _build_section_8_ai_backdoor,
+)
 from multiagent.agents.ai_agents.ai_evidence_scoring import score_evidence
 
 
@@ -112,12 +116,71 @@ class TestLiveSurfaceGateNoNameHardcoding:
         assert score_evidence(["ml_endpoint_401_403"]).is_ai is True
 
 
+class TestSection8AuthGatedAndRecommendations:
+    def _scan(self, vulns, strategic=None):
+        return {
+            "ai_fingerprint": {
+                "is_ai_powered": True,
+                "confidence": "high",
+                "has_live_surface": True,
+                "ml_endpoints": ["http://localhost:3080/api/chat"],
+                "chat_components": [{"type": "chat_ui"}],
+                "atlas_techniques": ["AML.T0051"],
+            },
+            "vulnerabilities": vulns,
+            "strategic_recommendations": strategic or [],
+            "avid_backdoor_relevant": [],
+            "stack": {"technologies": [{"name": "LibreChat"}]},
+        }
+
+    def test_collapses_duplicate_auth_gated_rows(self):
+        locations = [
+            "http://localhost:3080/api/chat",
+            "http://localhost:3080/api/chat/abort",
+            "http://localhost:3080/api/chat/active",
+            "http://localhost:3080/api/chat/status",
+        ]
+        vulns = [
+            {
+                "category": "ai_vulnerability",
+                "status": "Potential",
+                "type": "Potential Prompt Injection (auth-gated)",
+                "severity": "Medium",
+                "location": loc,
+                "details": "auth required",
+                "atlas": "AML.T0051",
+                "remediation": "keep auth",
+            }
+            for loc in locations
+        ]
+        text = _build_section_8_ai_backdoor(self._scan(vulns))
+        assert text.count("[POTENTIAL] Potential Prompt Injection (auth-gated)") == 1
+        assert "Related auth-gated surfaces" in text
+
+    def test_section_84_does_not_deny_ai_surfaces(self):
+        vulns = [{
+            "category": "ai_vulnerability",
+            "status": "Potential",
+            "type": "Potential Prompt Injection (auth-gated)",
+            "severity": "Medium",
+            "location": "http://localhost:3080/api/chat",
+            "details": "auth required",
+            "atlas": "AML.T0051",
+            "remediation": "keep auth",
+        }]
+        text = _build_section_8_ai_backdoor(self._scan(vulns))
+        assert "8.4 Strategic Recommendations" in text
+        assert "no AI-specific attack surfaces identified" not in text
+        assert "AI chat/inference surfaces were identified" in text
+
+
 if __name__ == "__main__":
     fails = 0
     for cls in [
         TestSection2FingerprintOnly,
         TestStrideNoDoubleSeeSection3,
         TestLiveSurfaceGateNoNameHardcoding,
+        TestSection8AuthGatedAndRecommendations,
     ]:
         o = cls()
         for name in sorted(n for n in dir(o) if n.startswith("test_")):

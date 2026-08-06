@@ -275,6 +275,11 @@ def test_injection_capable_requires_inference_segment():
     assert not t._is_injection_capable("http://x/api/v1/chatflows")
     assert not t._is_injection_capable("http://x/openapi.json")
     assert not t._is_injection_capable("http://x/api/models")
+    # Control-plane chat suffixes are not prompt-injection surfaces.
+    assert not t._is_injection_capable("http://x/api/chat/abort")
+    assert not t._is_injection_capable("http://x/api/chat/active")
+    assert not t._is_injection_capable("http://x/api/chat/status")
+    assert not t._is_injection_capable("http://x/api/messages/cancel")
 
 
 def test_classify_endpoint_segment_boundaries():
@@ -500,6 +505,52 @@ async def test_vuln_tester_auth_gated_still_reported():
     assert result["confirmed_ai_vulns"] == []
     assert len(result["potential_ai_vulns"]) == 1
     assert "auth-gated" in result["potential_ai_vulns"][0]["type"]
+
+
+@pytest.mark.asyncio
+async def test_vuln_tester_auth_gated_collapsed_not_spammed():
+    """Many auth-gated chat URLs → one Potential, control paths excluded."""
+    t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
+    base = "http://localhost:3080"
+    auth_paths = [
+        f"{base}/api/chat",
+        f"{base}/api/chat/abort",
+        f"{base}/api/chat/active",
+        f"{base}/api/chat/status",
+        f"{base}/api/messages",
+        f"{base}/api/ask",
+    ]
+    result = await t.test_all(
+        {
+            "framework": "chat_api",
+            "is_ai_powered": True,
+            "has_live_surface": True,
+            "ml_endpoints": [],
+            "auth_required_paths": [
+                {"endpoint": ep, "auth_type": "bearer",
+                 "status_code": 401, "detail": "auth"}
+                for ep in auth_paths
+            ],
+        },
+        base,
+        verbose=False,
+    )
+    pots = result["potential_ai_vulns"]
+    auth_pots = [p for p in pots if "auth-gated" in (p.get("type") or "")]
+    assert len(auth_pots) == 1
+    finding = auth_pots[0]
+    assert finding.get("category") == "ai_vulnerability"
+    related = finding.get("related_endpoints") or []
+    assert finding["location"] in related
+    # Control-plane suffixes must not appear.
+    related_l = " ".join(related).lower()
+    assert "/abort" not in related_l
+    assert "/active" not in related_l
+    assert "/status" not in related_l
+    # Real inference surfaces remain.
+    assert any(p.endswith("/api/chat") or p.endswith("/api/messages")
+               or p.endswith("/api/ask") for p in related)
+    assert finding["evidence"].get("auth_gated_count") == len(related)
 
 
 def test_app_detect_from_inference_paths():
