@@ -378,7 +378,7 @@ _FRAMEWORK_SIGS = {
     "Django":     r"csrftoken|django",
     "Rails":      r"_rails_session|X-Runtime",
     "FastAPI":    r"fastapi|uvicorn",
-    "Spring":     r"JSESSIONID|X-Application-Context",
+    "Spring":     r"JSESSIONID|X-Application-Context|\.mvc\b",
     "ASP.NET":    r"ASP\.NET|X-AspNet-Version",
     "Next.js":    r"__NEXT_DATA__|x-nextjs",
     "Nuxt":       r"__nuxt|_nuxt",
@@ -395,11 +395,24 @@ _LANG_SIGS = {
     "PHP":    r"\.php|X-Powered-By: PHP|PHPSESSID",
     "Python": r"python|django|flask|fastapi",
     "Ruby":   r"\.rb|rack\.|_rails",
-    "Java":   r"JSESSIONID|\.jsp|\.do\b",
+    "Java":   r"JSESSIONID|\.jsp|\.do\b|\.mvc\b",
     "Node":   r"X-Powered-By: Express|node\.js",
     ".NET":   r"X-AspNet-Version|\.aspx|ASP\.NET",
     "Go":     r"Go-http-client|gorilla",
 }
+
+# URL-path stack signals (e.g. Spring MVC .mvc) — confirmed-low, not hints.
+_URL_STACK_RULES = (
+    # .mvc → Spring + Java + Tomcat (WebGoat / Spring-MVC pattern)
+    (r"\.mvc\b", [
+        {"name": "Spring", "category": "Framework", "confidence": 0.55,
+         "evidence": "URL path .mvc extension (Spring MVC)"},
+        {"name": "Java", "category": "Language", "confidence": 0.55,
+         "evidence": "URL path .mvc extension (Java)"},
+        {"name": "Tomcat", "category": "Server", "confidence": 0.50,
+         "evidence": "URL path .mvc extension (typical Tomcat host)"},
+    ]),
+)
 
 
 def _rule_match(text: str, sigs: Dict[str, str]) -> Optional[Tuple[str, Optional[str]]]:
@@ -411,13 +424,16 @@ def _rule_match(text: str, sigs: Dict[str, str]) -> Optional[Tuple[str, Optional
     return None
 
 
-def _rule_detect(headers: Dict, html_hints: List[str]) -> List[Dict]:
+def _rule_detect(headers: Dict, html_hints: List[str],
+                 url: str = "") -> List[Dict]:
     combined = (
         " ".join(f"{k}: {v}" for k, v in headers.items())
         + " " + " ".join(html_hints)
+        + " " + (url or "")
     )
     cat_map = {"server": "Server", "language": "Language", "framework": "Framework", "cms": "CMS"}
     results = []
+    seen_names: Set[str] = set()
     for field, sigs in [("server", _SERVER_SIGS), ("language", _LANG_SIGS),
                          ("framework", _FRAMEWORK_SIGS), ("cms", _CMS_SIGS)]:
         match = _rule_match(combined, sigs)
@@ -430,6 +446,28 @@ def _rule_detect(headers: Dict, html_hints: List[str]) -> List[Dict]:
                 "confidence": 0.60,
                 "evidence":   f"rule-based {field} match",
             })
+            seen_names.add(name.lower())
+
+    # URL-path stack rules (Spring MVC .mvc → confirmed-low stack)
+    path = ""
+    try:
+        path = urlparse(url or "").path or url or ""
+    except Exception:
+        path = url or ""
+    for pattern, techs in _URL_STACK_RULES:
+        if re.search(pattern, path, re.IGNORECASE):
+            for t in techs:
+                if t["name"].lower() in seen_names:
+                    continue
+                results.append({
+                    "name":       t["name"],
+                    "version":    None,
+                    "category":   t["category"],
+                    "confidence": t["confidence"],
+                    "evidence":   t["evidence"],
+                })
+                seen_names.add(t["name"].lower())
+            break
     return results
 
 
@@ -510,18 +548,42 @@ class TechFingerprintAgent:
         unverified_hints: List[str] = []
         vuln_hints:       List[str] = []
 
+        # Always merge URL/header rule hits (e.g. .mvc → Spring/Java/Tomcat)
+        # so CSS frameworks from Wappalyzer cannot bury the server stack.
+        rule_hits = _rule_detect(
+            headers, signals.get("html_hints", []), url=target_url,
+        )
+        for hit in rule_hits:
+            if not any(
+                d.get("name", "").lower() == hit["name"].lower() for d in detected
+            ):
+                detected.append(hit)
+            else:
+                # Promote low-confidence Wappalyzer row if rule is stronger signal
+                for d in detected:
+                    if d.get("name", "").lower() == hit["name"].lower():
+                        if float(d.get("confidence") or 0) < float(hit.get("confidence") or 0):
+                            d["confidence"] = hit["confidence"]
+                            d.setdefault("evidence", hit.get("evidence"))
+                        break
+
         if len(detected) < 2:
             if verbose:
                 print("   Invoking LLM synthesis (Wappalyzer insufficient)...")
             llm_result = await self._llm_synthesize(target_url, signals, detected)
             for tech_name in llm_result.get("technologies", []):
                 if not any(d["name"].lower() == tech_name.lower() for d in detected):
+                    # Don't bury strong rule-confirmed stack as a hint
                     unverified_hints.append(tech_name)
             vuln_hints = llm_result.get("vuln_hints", [])
-            if not detected:
-                detected = _rule_detect(headers, signals.get("html_hints", []))
         else:
             vuln_hints = _rule_vuln_hints(detected)
+
+        # Drop unverified hints that we already confirmed via rules
+        confirmed_names = {d.get("name", "").lower() for d in detected}
+        unverified_hints = [
+            h for h in unverified_hints if h.lower() not in confirmed_names
+        ]
 
         stack = self._build_stack(headers, detected, vuln_hints, unverified_hints)
 

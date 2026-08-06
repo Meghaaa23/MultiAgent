@@ -2,14 +2,21 @@
   "target_url": "http://localhost:3142",
   "scan_complete": true,
   "authenticated_scan": false,
-  "report": "Active scan of `http://localhost:3142` completed in 169s [Black-box unauthenticated]. Identified 3 confirmed...",
+  "report": "Active scan of `http://localhost:3142` completed in 169s [Black-box unauthenticated]. Identified 3 confirmed and 0 potential vulnerability type(s). Overall risk level on assessed pre-authentication surface: Low-Medium (score: 3). Assessed surface limited to pre-authentication endpoints; 4 functional surface(s) were auth-gated and not tested.",
   "verified_cves": [],
+  "coverage_assessment": {
+    "scope": "blackbox_unauth",
+    "assessed_count": 2,
+    "auth_gated_count": 4,
+    "auth_wall_dominated": true,
+    "note": "Assessed surface limited to pre-authentication endpoints; 4 functional surface(s) were auth-gated and not tested."
+  },
   "endpoints_discovered": [
-    {"url": "http://localhost:3142/index.php", "status": 200, "redirects_to_auth": true, "interesting": true},
+    {"url": "http://localhost:3142/index.php", "status": 200, "redirects_to_auth": true, "interesting": true, "category": "discovered_protected"},
     {"url": "http://localhost:3142/login.php", "status": 200, "interesting": true},
-    {"url": "http://localhost:3142/logout.php", "status": 200, "redirects_to_auth": true},
-    {"url": "http://localhost:3142/phpinfo.php", "status": 200, "redirects_to_auth": true},
-    {"url": "http://localhost:3142/security.php", "status": 200, "redirects_to_auth": true},
+    {"url": "http://localhost:3142/logout.php", "status": 200, "redirects_to_auth": true, "category": "discovered_protected"},
+    {"url": "http://localhost:3142/phpinfo.php", "status": 200, "redirects_to_auth": true, "category": "discovered_protected"},
+    {"url": "http://localhost:3142/security.php", "status": 200, "redirects_to_auth": true, "category": "discovered_protected"},
     {"url": "http://localhost:3142/setup.php", "status": 200, "interesting": true}
   ],
   "not_assessed_endpoints": [
@@ -67,7 +74,7 @@
     {
       "threat": "Clickjacking",
       "confirmed": true,
-      "evidence": "X-Frame-Options and CSP frame-ancestors absent"
+      "evidence": "See Section 3: Missing Clickjacking Protection (X-Frame-Options and CSP frame-ancestors absent)"
     }
   ]
 }

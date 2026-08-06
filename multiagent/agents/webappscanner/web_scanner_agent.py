@@ -80,7 +80,10 @@ def _build_evidence_gated_stride(target_url, response_headers,
         threats.append({
             "category":   "Spoofing",
             "threat":     "Clickjacking",
-            "evidence":   "X-Frame-Options and CSP frame-ancestors absent",
+            "evidence":   (
+                "Missing Clickjacking Protection "
+                "(X-Frame-Options and CSP frame-ancestors absent)"
+            ),
             "likelihood": "Medium",
             "impact":     "Medium",
             "mitigation": "Add X-Frame-Options: DENY or CSP frame-ancestors 'none'",
@@ -657,6 +660,8 @@ class WebScannerAgent:
         for f in raw_findings + verified_findings:
             ftype    = f.get("type", "")
             location = f.get("location", "").rstrip("/")
+            # XFO absence folds into clickjacking; STRIDE cites that finding
+            # (Section 3 ↔ Section 5 corroboration via shared finding name).
             if has_clickjacking and "X-Frame-Options" in ftype and "Missing Security Header" in ftype:
                 continue
             key = (ftype.lower(), location)
@@ -709,7 +714,16 @@ class WebScannerAgent:
 
         report_endpoints = []
         not_assessed_endpoints: List[Dict] = []
+        try:
+            from .endpoint_discovery_agent import is_static_asset as _is_static
+        except Exception:
+            def _is_static(url="", content_type=""):  # type: ignore
+                return False
         for ep in discovered_endpoints:
+            if ep.get("static_asset") or _is_static(
+                ep.get("url", ""), ep.get("content_type", "")
+            ):
+                continue  # CSS/fonts/images never enter the endpoint table
             if ep.get("access_controlled") or ep.get("auth_required") or ep.get(
                 "redirects_to_auth"
             ):
@@ -729,6 +743,51 @@ class WebScannerAgent:
             elif ep.get("interesting"):
                 report_endpoints.append(ep)
 
+        # Coverage honesty: how much surface was actually assessed pre-auth
+        assessed_count = sum(
+            1 for ep in report_endpoints
+            if ep.get("interesting")
+            and not ep.get("static_asset")
+            and ep.get("category") != "discovered_protected"
+            and not ep.get("auth_required")
+            and not ep.get("redirects_to_auth")
+            and not ep.get("access_controlled")
+        )
+        auth_gated_count = len(not_assessed_endpoints)
+        auth_wall_dominated = auth_gated_count > 0 and (
+            auth_gated_count >= max(assessed_count, 1) or assessed_count <= 1
+        )
+        coverage_assessment = {
+            "scope": "blackbox_unauth",
+            "assessed_count": assessed_count,
+            "auth_gated_count": auth_gated_count,
+            "auth_wall_dominated": auth_wall_dominated,
+            "note": (
+                f"Assessed surface limited to pre-authentication endpoints; "
+                f"{auth_gated_count} functional surface(s) were auth-gated "
+                f"and not tested."
+                if auth_gated_count > 0 else
+                "Full discovered pre-auth surface assessed."
+            ),
+        }
+
+        # Align STRIDE clickjacking evidence with Section 3 finding name
+        clickjacking_type = next(
+            (
+                f.get("type") for f in all_findings
+                if "Clickjacking" in (f.get("type") or "")
+                and f.get("status") == "Confirmed"
+            ),
+            None,
+        )
+        if clickjacking_type:
+            for t in stride_threats:
+                if t.get("threat") == "Clickjacking" and t.get("confirmed"):
+                    t["evidence"] = (
+                        f"See Section 3: {clickjacking_type} "
+                        "(X-Frame-Options and CSP frame-ancestors absent)"
+                    )
+
         return {
             "target_url":             target_url,
             "stack":                  stack,
@@ -738,6 +797,7 @@ class WebScannerAgent:
             "nvd_section_visible":    not is_ai_powered,
             "endpoints_discovered":   report_endpoints,
             "not_assessed_endpoints": not_assessed_endpoints,
+            "coverage_assessment":    coverage_assessment,
             "vulnerabilities":        all_findings,
             "stride_threats":         stride_threats,
             "confirmed_count":        sum(1 for f in all_findings if f.get("status") == "Confirmed"),

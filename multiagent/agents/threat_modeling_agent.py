@@ -216,10 +216,51 @@ def _is_manual_queue_finding(v: Dict) -> bool:
     return conf in ("medium", "high")
 
 
+def _coverage_from_scan(scan_results) -> Dict:
+    """
+    Black-box unauth coverage signal: how much of the discovered surface
+    was actually assessed vs auth-gated / not tested.
+    """
+    sr = scan_results or {}
+    not_assessed = list(sr.get("not_assessed_endpoints") or [])
+    endpoints = list(sr.get("endpoints_discovered") or [])
+    n_auth_gated = len(not_assessed)
+
+    assessed = []
+    for ep in endpoints:
+        if not isinstance(ep, dict):
+            continue
+        if ep.get("static_asset"):
+            continue
+        if (
+            ep.get("access_controlled")
+            or ep.get("auth_required")
+            or ep.get("redirects_to_auth")
+            or ep.get("category") == "discovered_protected"
+        ):
+            continue
+        if ep.get("interesting") or ep.get("auth_endpoint"):
+            assessed.append(ep)
+
+    n_assessed = len(assessed)
+    # Dominated = auth wall owns the functional surface (WebGoat/DVWA pattern)
+    dominated = n_auth_gated > 0 and (
+        n_auth_gated >= max(n_assessed, 1) or n_assessed <= 1
+    )
+    return {
+        "auth_gated_count": n_auth_gated,
+        "assessed_count": n_assessed,
+        "auth_wall_dominated": dominated,
+    }
+
+
 def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results):
     n_confirmed = len(confirmed_vulns)
     n_potential = len(set(v.get("type", "") for v in potential_vulns))
     duration    = (scan_results or {}).get("scan_duration", 0)
+    coverage    = _coverage_from_scan(scan_results)
+    n_auth      = coverage["auth_gated_count"]
+    dominated   = coverage["auth_wall_dominated"]
 
     _sev_base = {"Critical": 40, "High": 20, "Medium": 10, "Low": 5, "Info": 1}
     _method_mult = {
@@ -252,17 +293,42 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     ] or ["No immediate action required — continue monitoring."]
 
     actions_text = " ".join(f"({i+1}) {a}" for i, a in enumerate(actions[:3]))
+
+    # Never present a clean-ish bill of health for an app we never entered.
+    if dominated:
+        risk_clause = (
+            f"Overall risk level on assessed pre-authentication surface: {risk} "
+            f"(score: {exploit_score:.0f}). "
+            f"Assessed surface limited to pre-authentication endpoints; "
+            f"{n_auth} functional surface(s) were auth-gated and not tested."
+        )
+    elif n_auth > 0:
+        risk_clause = (
+            f"Overall risk level on assessed (pre-auth) surface: {risk} "
+            f"(score: {exploit_score:.0f}). "
+            f"{n_auth} functional surface(s) were auth-gated and not tested."
+        )
+    else:
+        risk_clause = (
+            f"Overall risk level: {risk} (score: {exploit_score:.0f})"
+        )
+
     summary = (
         f"Active scan of `{target_url}` completed in {duration:.0f}s "
         f"[Black-box unauthenticated]. "
         f"Identified {n_confirmed} confirmed and {n_potential} potential "
-        f"vulnerability type(s). Overall risk level: {risk} "
-        f"(score: {exploit_score:.0f})"
+        f"vulnerability type(s). {risk_clause}"
     )
     if n_confirmed == 0 and n_potential == 0:
-        summary += " — no exploitable surfaces found on unauthenticated surfaces."
+        if n_auth > 0:
+            summary += (
+                " No exploitable issues on the reachable pre-auth surface; "
+                "this is not an app-wide clean result."
+            )
+        else:
+            summary += " — no exploitable surfaces found on unauthenticated surfaces."
     else:
-        summary += f". Top actions: {actions_text}"
+        summary += f" Top actions: {actions_text}"
 
     return f" 1. EXECUTIVE SUMMARY\n{summary}"
 
@@ -398,7 +464,17 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
         lines.append(f"\nUnconfirmed hints (excluded): {', '.join(unverified[:5])}")
 
     lines.append("\n Attack Surface")
-    interesting = [e for e in (endpoints or []) if e.get("interesting")]
+    try:
+        from .webappscanner.endpoint_discovery_agent import is_static_asset
+    except Exception:
+        def is_static_asset(url="", content_type=""):  # type: ignore
+            return False
+
+    interesting = [
+        e for e in (endpoints or [])
+        if e.get("interesting") and not e.get("static_asset")
+        and not is_static_asset(e.get("url", ""), e.get("content_type", ""))
+    ]
     verified_eps = [
         e for e in interesting
         if e.get("status") not in (None, "", "?")
@@ -406,15 +482,26 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
     if verified_eps:
         functional, admin, discovery = [], [], []
         for ep in verified_eps:
-            url_lower = ep.get("url", "").lower()
+            url_lower = (ep.get("url") or "").lower()
+            path_lower = ""
+            try:
+                path_lower = (urllib.parse.urlsplit(url_lower).path or "").lower()
+            except Exception:
+                path_lower = url_lower
             status = ep.get("status")
+            # /plugins/ inside a static asset path is NOT administrative
+            static_path = is_static_asset(url_lower, ep.get("content_type", ""))
+            if static_path:
+                continue
             if any(x in url_lower for x in ["sitemap", "robots.txt"]):
                 discovery.append(ep)
             elif ep.get("admin_panel") or (
                 status in (401, 403)
-                and any(x in url_lower for x in [
-                    "admin", "dashboard", "manage", "wp-admin", "console"
-                ])
+                and any(x in path_lower for x in (
+                    "/admin", "/dashboard", "/manage", "/wp-admin", "/console",
+                ))
+                # Do not match "plugin" / "plugins" as admin
+                and "/plugin" not in path_lower
             ):
                 admin.append(ep)
             else:
@@ -428,15 +515,20 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
             if group:
                 lines.append(group_label)
                 for ep in group[:15]:
-                    if ep.get("auth_required"):
-                        auth = " [AUTH REQUIRED]"
-                    elif ep.get("redirects_to_auth"):
-                        auth = " [REDIRECTS TO AUTH]"
+                    # Auth redirect: do not print landing [200] — that is the
+                    # hop after redirect, not the status of the requested URL.
+                    if ep.get("redirects_to_auth"):
+                        status_disp = "REDIR→AUTH"
+                        auth_tag = " [REDIRECTS TO AUTH]"
+                    elif ep.get("auth_required"):
+                        status_disp = ep.get("status", "?")
+                        auth_tag = " [AUTH REQUIRED]"
                     else:
-                        auth = ""
+                        status_disp = ep.get("status", "?")
+                        auth_tag = ""
                     lines.append(
-                        f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
-                        f"{ep.get('url','')} [{ep.get('source','')}]{auth}"
+                        f"- [{status_disp}] {ep.get('method','GET')} "
+                        f"{ep.get('url','')} [{ep.get('source','')}]{auth_tag}"
                     )
     else:
         lines.append("None discovered with verified HTTP responses.")
@@ -570,7 +662,7 @@ def _build_section_4(potential_vulns):
     return "\n".join(l for l in lines if l is not None)
 
 
-def _build_section_5(stride_threats):
+def _build_section_5(stride_threats, confirmed_vulns=None):
     # Publisher STRIDE: evidence-confirmed architectural risks only.
     threats = [
         t for t in (stride_threats or [])
@@ -584,12 +676,31 @@ def _build_section_5(stride_threats):
         lines.append("No evidence-confirmed STRIDE risks from active scanning.")
         return "\n".join(lines)
 
+    # Prefer citing Section 3 findings over re-deriving from raw headers
+    # (avoids "XFO missing" in STRIDE when Section 3 only lists clickjacking).
+    clickjacking_finding = None
+    for v in (confirmed_vulns or []):
+        if not isinstance(v, dict):
+            continue
+        if "Clickjacking" in (v.get("type") or "") and v.get("status") == "Confirmed":
+            clickjacking_finding = v
+            break
+
     for t in threats:
+        evidence = t.get("evidence", "")
+        if (
+            clickjacking_finding
+            and "Clickjacking" in (t.get("threat") or "")
+        ):
+            evidence = (
+                f"See Section 3: {clickjacking_finding.get('type')} — "
+                f"{evidence}"
+            )
         lines += [
             "",
             f" {t.get('category','?')}: {t.get('threat','?')}",
             f"- Status: Evidence-confirmed",
-            f"- Evidence: {t.get('evidence','')}",
+            f"- Evidence: {evidence}",
             f"- Likelihood: {t.get('likelihood','?')}",
             f"- Impact: {t.get('impact','?')}",
             f"- Mitigation: {t.get('mitigation','')}",
@@ -1506,7 +1617,7 @@ Answer:"""
         section_3   = _build_section_3(confirmed_vulns)                  or ""
         section_3b  = render_section_3b(action_results)                  or ""
         section_4   = _build_section_4(potential_vulns)                  or ""
-        section_5   = _build_section_5(stride_threats)                   or ""
+        section_5   = _build_section_5(stride_threats, confirmed_vulns)  or ""
         section_6   = _build_section_6(confirmed_vulns, potential_vulns) or ""
 
         final = "\n\n".join([

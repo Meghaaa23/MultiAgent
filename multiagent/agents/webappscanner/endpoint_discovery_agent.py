@@ -159,6 +159,52 @@ EXPECTED_200_PATHS = {
     "/health", "/ping", "/status",
 }
 
+# Static assets must never enter the endpoint attack-surface table.
+STATIC_EXTS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
+    ".css", ".js", ".map", ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".pdf", ".mp4", ".mp3", ".zip", ".gz", ".tgz", ".rar",
+})
+
+STATIC_CONTENT_TYPES = (
+    "text/css",
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "image/",
+    "font/",
+    "application/font",
+    "application/octet-stream",  # only when paired with a static extension
+)
+
+
+def is_static_asset(url: str = "", content_type: str = "") -> bool:
+    """True for CSS/JS/images/fonts — not API or HTML attack surface."""
+    path = ""
+    try:
+        path = (urlsplit(url or "").path or "").lower()
+    except Exception:
+        path = (url or "").lower()
+    ext = os.path.splitext(path.split("?")[0])[-1].lower()
+    if ext in STATIC_EXTS:
+        return True
+    ct = (content_type or "").lower().split(";")[0].strip()
+    if not ct:
+        return False
+    if ct.startswith("image/") or ct.startswith("font/"):
+        return True
+    if ct in (
+        "text/css",
+        "text/javascript",
+        "application/javascript",
+        "application/x-javascript",
+        "application/font-woff",
+        "application/font-woff2",
+        "application/vnd.ms-fontobject",
+    ):
+        return True
+    return False
+
 
 class EndpointDiscoveryAgent:
     """
@@ -254,7 +300,11 @@ class EndpointDiscoveryAgent:
                 continue
             path = urlsplit(raw).path or ""
             if path.startswith("/") and 1 < len(path) < 80:
-                html_paths.append(path.split(";")[0])
+                cleaned = path.split(";")[0]
+                # Never probe stylesheets/fonts/images harvested from <link>/<a>
+                if is_static_asset(cleaned):
+                    continue
+                html_paths.append(cleaned)
 
         ordered: List[str] = []
         seen: Set[str] = set()
@@ -401,11 +451,34 @@ class EndpointDiscoveryAgent:
             ep["access_controlled"] = True
             ep["verification"]      = "403 — access controlled, not exposed"
             return ep
+
+        ctype = (ep.get("content_type") or "").lower()
+        # Static assets are never attack-surface / admin endpoints
+        if is_static_asset(url, ctype):
+            ep["interesting"]  = False
+            ep["static_asset"] = True
+            ep["admin_panel"]  = False
+            ep["verification"] = "Static asset — excluded from endpoint table"
+            return ep
         
         if status == 200:
             body       = await self._fetch_text(url) or ""
             body_lower = body.lower()
-            ctype      = (ep.get("content_type") or "").lower()
+            ctype      = (ep.get("content_type") or ctype or "").lower()
+            # Re-check after body fetch may have revealed content-type via URL only
+            if is_static_asset(url, ctype) or (
+                body and not ("html" in ctype or "<html" in body_lower[:200])
+                and (
+                    ctype.startswith("text/css")
+                    or ctype.startswith("image/")
+                    or ctype.startswith("font/")
+                )
+            ):
+                ep["interesting"]  = False
+                ep["static_asset"] = True
+                ep["admin_panel"]  = False
+                ep["verification"] = "Static asset — excluded from endpoint table"
+                return ep
 
             # Drop SPA catch-all shells before keyword heuristics
             if self._matches_spa_shell(body, ctype):
@@ -442,8 +515,10 @@ class EndpointDiscoveryAgent:
                 except Exception:
                     pass
 
+            is_html = "html" in ctype or "<html" in body_lower[:500]
+
             # Login / auth form (HTML only — never on SPA shell, already gated)
-            if any(kw in body_lower for kw in (
+            if is_html and any(kw in body_lower for kw in (
                 'type="password"', "type='password'",
                 "login", "sign in", "signin", "authenticate"
             )):
@@ -452,8 +527,9 @@ class EndpointDiscoveryAgent:
                 ep["verification"]  = "Login form detected"
                 return ep
 
-            # Admin panel indicators in HTML
-            if any(kw in body_lower for kw in (
+            # Admin panel indicators — HTML body only.
+            # Never match on /plugins/ inside a static path (CSS frameworks).
+            if is_html and any(kw in body_lower for kw in (
                 "admin", "dashboard", "control panel",
                 "management console", "administrator"
             )):
@@ -542,12 +618,6 @@ class EndpointDiscoveryAgent:
         if not body:
             return endpoints
 
-        _STATIC_EXTS = frozenset({
-            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
-            ".css", ".js", ".woff", ".woff2", ".ttf", ".eot", ".otf",
-            ".pdf", ".mp4", ".mp3", ".zip",
-        })
-
         for line in body.splitlines():
             line = line.strip()
             if line.lower().startswith(("disallow:", "allow:")):
@@ -558,8 +628,7 @@ class EndpointDiscoveryAgent:
                         continue
                     if "*" in path:
                         continue
-                    ext = os.path.splitext(path.split("?")[0])[-1].lower()
-                    if ext in _STATIC_EXTS:
+                    if is_static_asset(path):
                         continue
                     full_url = urljoin(base, path)
                     endpoints.append({
@@ -582,17 +651,18 @@ class EndpointDiscoveryAgent:
                 continue
             for loc in re.findall(r'<loc>([^<]+)</loc>', body):
                 loc = loc.strip()
-                if loc:
-                    endpoints.append({
-                        "url":          loc,
-                        "method":       "GET",
-                        "source":       "sitemap",
-                        "status":       None,
-                        "final_url":    loc,
-                        "interesting":  True,
-                        "auth_required":False,
-                        "params":       []
-                    })
+                if not loc or is_static_asset(loc):
+                    continue
+                endpoints.append({
+                    "url":          loc,
+                    "method":       "GET",
+                    "source":       "sitemap",
+                    "status":       None,
+                    "final_url":    loc,
+                    "interesting":  True,
+                    "auth_required":False,
+                    "params":       []
+                })
         return endpoints
 
     async def _parse_swagger(self, base: str) -> List[Dict]:
@@ -828,6 +898,10 @@ class EndpointDiscoveryAgent:
 
         url = f"{base}{path}"
         try:
+            # Extension gate before any network I/O
+            if is_static_asset(path):
+                return None
+
             loop = asyncio.get_event_loop()
             status, headers, final_url = await loop.run_in_executor(
                 None, lambda: self._sync_head(url)
@@ -842,6 +916,9 @@ class EndpointDiscoveryAgent:
                 if str(k).lower() == "content-type":
                     content_type = str(v).lower()
                     break
+            # Content-type gate: CSS/fonts/images are not endpoints
+            if is_static_asset(url, content_type):
+                return None
             auth_required = status in (401, 403)
 
             if final_url and final_url != url:
@@ -862,11 +939,14 @@ class EndpointDiscoveryAgent:
                         # Do NOT mark auth_required on final HTTP 200 — that
                         # produces misleading "[200] … [AUTH REQUIRED]" reports.
                         # Keep a separate redirects_to_auth flag for inventory.
+                        # status is the landing hop; report layer must not print
+                        # a clean [200] beside REDIRECTS TO AUTH.
                         return {
                             "url":               url,
                             "method":            "GET",
                             "source":            "probe",
                             "status":            status,
+                            "redirect_status":   "REDIR",
                             "final_url":         final_url,
                             "interesting":       True,
                             "auth_required":     status in (401, 403),

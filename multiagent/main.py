@@ -836,6 +836,7 @@ async def scan_web_application(request: Request):
                 ),
                 "not_assessed_count": len(scan_data.get("not_assessed_endpoints") or []),
                 "scan_duration":      scan_data.get("scan_duration", 0),
+                "coverage_assessment": scan_data.get("coverage_assessment") or {},
                 # AI backdoor fields
                 "is_ai_powered":      scan_data.get("is_ai_powered", False),
                 "avid_findings":      scan_data.get("avid_findings", 0),
@@ -844,6 +845,7 @@ async def scan_web_application(request: Request):
             "vulnerabilities":        scan_data.get("vulnerabilities", []),
             "endpoints_discovered":   scan_data.get("endpoints_discovered", []),
             "not_assessed_endpoints": scan_data.get("not_assessed_endpoints", []),
+            "coverage_assessment":    scan_data.get("coverage_assessment") or {},
             "stride_threats":         scan_data.get("stride_threats", []),
             "verified_cves":          scan_data.get("verified_cves") or [],
             "session_id":             session_id,

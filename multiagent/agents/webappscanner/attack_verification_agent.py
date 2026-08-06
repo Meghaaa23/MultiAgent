@@ -215,6 +215,8 @@ class AttackVerificationAgent:
             "Clickjacking" in f.vuln_type and f.status == VulnStatus.CONFIRMED
             for f in findings
         )
+        # Dedup: XFO header absence is the clickjacking finding's evidence.
+        # STRIDE cites that Section 3 finding rather than re-deriving XFO alone.
         if has_clickjacking:
             findings = [
                 f for f in findings
