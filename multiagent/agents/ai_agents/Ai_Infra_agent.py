@@ -246,7 +246,6 @@ class AIInfraAgent:
         self.client    = openai_client
         self.timeout   = timeout
         self.llm_model = llm_model or os.getenv("AZURE_OPENAI_DEPLOYMENT", "MultiAgentLLM")
-        self.auth_cookie = ""
 
     async def scan(self, target_url: str, ai_stack: Optional[dict] = None) -> AIInfraScanResult:
         target_url   = target_url.rstrip("/")
@@ -305,14 +304,6 @@ class AIInfraAgent:
     async def _detect_catch_all(self, base_url: str) -> bool:
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            try:
-                from ..auth_support import request_auth_headers
-            except ImportError:
-                try:
-                    from multiagent.agents.auth_support import request_auth_headers
-                except ImportError:
-                    from auth_support import request_auth_headers
-            headers.update(request_auth_headers(self.auth_cookie))
             async with httpx.AsyncClient(timeout=self.timeout, verify=False) as http:
                 r = await http.get(f"{base_url}{CANARY_PATH}", headers=headers)
                 if r.status_code == 200:
@@ -509,14 +500,6 @@ class AIInfraAgent:
     async def _probe_path(self, http: httpx.AsyncClient, base: str, path: str) -> Tuple[int, str, str]:
         headers = {"User-Agent": "Mozilla/5.0"}
         try:
-            try:
-                from ..auth_support import request_auth_headers
-            except ImportError:
-                try:
-                    from multiagent.agents.auth_support import request_auth_headers
-                except ImportError:
-                    from auth_support import request_auth_headers
-            headers.update(request_auth_headers(self.auth_cookie))
             if "delete" in path:
                 r = await http.request("DELETE", f"{base}{path}", headers=headers)
                 return r.status_code, (r.text[:400] if r.text else ""), r.headers.get("content-type", "")

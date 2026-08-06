@@ -643,7 +643,6 @@ class ChatbotUIProbe:
         self,
         url: str,
         html: str = "",
-        auth_cookie: str = "",
         verbose: bool = False,
         allow_submit: bool = True,
     ) -> ChatbotUIProbeResult:
@@ -661,7 +660,7 @@ class ChatbotUIProbe:
 
         try:
             live = await self._detect_playwright(
-                url, auth_cookie=auth_cookie, allow_submit=allow_submit, verbose=verbose,
+                url, allow_submit=allow_submit, verbose=verbose,
             )
             if live:
                 # Prefer live app-owned surfaces; keep third-party / static hints.
@@ -696,7 +695,6 @@ class ChatbotUIProbe:
         self,
         url: str,
         widget: Optional[ChatWidget] = None,
-        auth_cookie: str = "",
         verbose: bool = False,
     ) -> ChatbotUIProbeResult:
         """Differential control/treatment canary through an app-owned chat UI."""
@@ -707,7 +705,7 @@ class ChatbotUIProbe:
 
         # Always re-discover at inject time (self-healing; no CSS-path trust).
         det = await self.detect(
-            url, auth_cookie=auth_cookie, verbose=verbose, allow_submit=True,
+            url, verbose=verbose, allow_submit=True,
         )
         result.widgets = det.widgets
         result.detected = det.detected
@@ -758,7 +756,7 @@ class ChatbotUIProbe:
 
         try:
             control, treatment = await self._send_two_turns(
-                url, target, control_prompt, treatment_prompt, auth_cookie=auth_cookie,
+                url, target, control_prompt, treatment_prompt,
             )
         except Exception as exc:
             logger.warning("[chatbot-ui] inject failed: %s", exc)
@@ -811,7 +809,6 @@ class ChatbotUIProbe:
     async def _detect_playwright(
         self,
         url: str,
-        auth_cookie: str = "",
         allow_submit: bool = True,
         verbose: bool = False,
     ) -> List[ChatWidget]:
@@ -823,7 +820,6 @@ class ChatbotUIProbe:
                 headless=True, args=["--no-sandbox", "--disable-gpu"],
             )
             context = await browser.new_context()
-            await self._apply_auth(context, url, auth_cookie)
             page = await context.new_page()
             net = _NetworkWatcher(page)
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
@@ -1608,7 +1604,6 @@ class ChatbotUIProbe:
         widget: ChatWidget,
         control_prompt: str,
         treatment_prompt: str,
-        auth_cookie: str = "",
     ) -> Tuple[str, str]:
         from playwright.async_api import async_playwright
 
@@ -1617,7 +1612,6 @@ class ChatbotUIProbe:
                 headless=True, args=["--no-sandbox", "--disable-gpu"],
             )
             context = await browser.new_context()
-            await self._apply_auth(context, url, auth_cookie)
             page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
             await page.wait_for_timeout(1000)
@@ -1747,35 +1741,6 @@ class ChatbotUIProbe:
             keys.append(evidence_key_for_tier(w.tier, w.scope))
         # Preserve order, unique
         return list(dict.fromkeys(keys))
-
-    @staticmethod
-    async def _apply_auth(context, url: str, auth_cookie: str) -> None:
-        raw = (auth_cookie or "").strip()
-        if not raw:
-            return
-        if raw.lower().startswith("bearer "):
-            await context.set_extra_http_headers({"Authorization": raw})
-            return
-        host = urlparse(url).hostname or ""
-        cookies = []
-        for part in raw.split(";"):
-            part = part.strip()
-            if not part or "=" not in part:
-                continue
-            name, value = part.split("=", 1)
-            cookies.append({
-                "name": name.strip(),
-                "value": value.strip(),
-                "domain": host,
-                "path": "/",
-            })
-        if cookies:
-            try:
-                await context.add_cookies(cookies)
-            except Exception as exc:
-                logger.debug("[chatbot-ui] cookie apply failed: %s", exc)
-                await context.set_extra_http_headers({"Cookie": raw})
-
 
 class _NetworkWatcher:
     """Observe fetch/XHR/WebSocket during discovery without requiring submit."""

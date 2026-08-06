@@ -26,14 +26,13 @@ def get_openai_client():
 
 
 async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
-                             auth_cookie: str, verbose: bool,
+                             verbose: bool,
                              scope_policy=None) -> dict:
     """Detect on-page chatbot widgets (Playwright) and merge into fingerprint."""
     probe = ChatbotUIProbe(scope_policy=scope_policy or ScopePolicy())
     result = await probe.detect(
         target_url,
         html="",
-        auth_cookie=auth_cookie,
         verbose=verbose,
     )
     if not result.widgets:
@@ -97,11 +96,6 @@ async def main():
     parser.add_argument("--agent", choices=["fingerprint","infra","vuln","avid","all"], default="all")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument(
-        "--cookie",
-        default="",
-        help="Session cookie (session=...) or Bearer token (Bearer ...) supplied up front",
-    )
-    parser.add_argument(
         "--skip-chatbot-ui",
         action="store_true",
         help="Skip browser chatbot UI detection/injection",
@@ -134,7 +128,6 @@ async def main():
     args = parser.parse_args()
 
     target_url = args.target.rstrip("/")
-    auth_cookie = args.cookie or ""
     scope_policy = ScopePolicy(
         include_thirdparty=bool(args.include_thirdparty),
         authorize_external=bool(args.authorize_external),
@@ -148,12 +141,11 @@ async def main():
         page_html            = "",
         response_headers     = {},
         verbose              = True,
-        auth_cookie          = auth_cookie,
     )
 
     if not args.skip_chatbot_ui:
         ai_fingerprint = await _enrich_chatbot_ui(
-            ai_fingerprint, target_url, auth_cookie, verbose=True,
+            ai_fingerprint, target_url, verbose=True,
             scope_policy=scope_policy,
         )
 
@@ -170,7 +162,6 @@ async def main():
     print(f"\n  AI detected : {ai_fingerprint['is_ai_powered']} [{ai_fingerprint['confidence']}]")
     print(f"  Live surface: {ai_fingerprint.get('has_live_surface')}")
     print(f"  Brand only  : {ai_fingerprint.get('ai_brand_only')}")
-    print(f"  Auth cookie : {'yes' if auth_cookie else 'no'}")
     print(f"  Chat UI     : {len(ai_fingerprint.get('chat_components') or [])} widget(s)")
     print(f"  Allowed hosts: {ai_fingerprint.get('allowed_api_hosts') or []}")
     print(f"  ML endpoints: {ai_fingerprint['ml_endpoints']}")
@@ -206,7 +197,6 @@ async def main():
             print("\n  No API live surface — skipping infra (chatbot UI alone does not imply exposed infra).")
         else:
             infra_agent = AIInfraAgent(openai_client=get_openai_client(), timeout=15)
-            infra_agent.auth_cookie = auth_cookie
             infra_result = await infra_agent.scan(
                 target_url = target_url,
                 ai_stack   = ai_fingerprint,
@@ -229,11 +219,9 @@ async def main():
                 ai_fingerprint=ai_fingerprint,
                 target_url=target_url,
                 verbose=args.verbose,
-                auth_cookie=auth_cookie,
             )
             print(f"\n  Confirmed: {len(vuln_result.get('confirmed_ai_vulns') or [])}")
             print(f"  Potential: {len(vuln_result.get('potential_ai_vulns') or [])}")
-            print(f"  Authenticated requests: {vuln_result.get('authenticated')}")
             for finding in (vuln_result.get("confirmed_ai_vulns") or [])[:5]:
                 print(f"  [CONFIRMED] {finding.get('type')} @ {finding.get('location')}")
             for finding in (vuln_result.get("potential_ai_vulns") or [])[:5]:

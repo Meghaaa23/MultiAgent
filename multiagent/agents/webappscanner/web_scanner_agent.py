@@ -163,28 +163,18 @@ class WebScannerAgent:
 
     async def scan_application(self, target_url: str,
                                max_time_minutes: int = 15,
-                               verbose: bool = False,
-                               auth_cookie: str = "") -> Dict:
+                               verbose: bool = False) -> Dict:
         start = datetime.now()
 
         if "#" in target_url:
             target_url = target_url.split("#")[0].rstrip("/")
 
         target_url = _resolve_docker_url(target_url, verbose=verbose)
-        # Optional credential for AI fingerprint/tests only — web vuln crawl stays black-box.
-        cred = auth_cookie or ""
-        if cred:
-            self.ai_fingerprinter.auth_cookie = cred
-            self.ai_vuln_tester.auth_cookie = cred
-            if hasattr(self, "ai_infra_agent"):
-                self.ai_infra_agent.auth_cookie = cred
 
         if verbose:
             print(f"\n{'='*70}")
             print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
             print(f"  Mode   : Black-box unauthenticated")
-            if cred:
-                print(f"  AI auth: Session credential provided for AI fingerprint/tests only")
             print(f"  Target : {target_url}")
             print(f"  Budget : {max_time_minutes} minutes")
             print(f"  Crawl  : Deep (shared anonymous session)")
@@ -343,7 +333,6 @@ class WebScannerAgent:
                 page_html            = html,
                 response_headers     = initial_headers,
                 verbose              = verbose,
-                auth_cookie          = cred,
             )
 
             # Taxonomy gate: escalate only on live inference surface.
@@ -402,7 +391,7 @@ class WebScannerAgent:
                     print("  Running AI-specific vulnerability tests...")
                 ai_vuln_results = await self.ai_vuln_tester.test_all(
                     ai_fingerprint=ai_fingerprint, target_url=target_url,
-                    verbose=verbose, auth_cookie=cred,
+                    verbose=verbose,
                 )
                 if verbose:
                     c = len(ai_vuln_results.get("confirmed_ai_vulns", []))
