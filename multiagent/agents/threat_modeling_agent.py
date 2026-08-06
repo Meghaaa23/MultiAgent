@@ -16,7 +16,6 @@ from .webappscanner.web_scanner_agent import WebScannerAgent
 from utils.threat_prompts import (
     QUESTION_DECOMPOSITION_PROMPT,
     STRIDE_ANALYSIS_PROMPT,
-    SYNTHESIS_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,51 +27,6 @@ def _tech_display(t) -> str:
         ver  = t.get("version", "")
         return f"{name} {ver}".strip() if ver else name
     return str(t).split("/")[0].strip()
-
-
-def _sanitize_report(report_text: str) -> str:
-    if not report_text:
-        return report_text
-    lines            = report_text.split("\n")
-    cleaned_lines    = []
-    seen_owasp_lines = set()
-    in_compliance    = False
-    compliance_ended = False
-    table_row_count  = 0
-
-    for line in lines:
-        if " 7." in line or " 7 " in line or "COMPLIANCE" in line.upper():
-            in_compliance = True
-            cleaned_lines.append(line)
-            continue
-        if in_compliance and compliance_ended:
-            continue
-        m = re.search(r'\bA(\d{2,3})\b', line)
-        if m and int(m.group(1)) > 10:
-            continue
-        norm = re.sub(r'\s+', ' ', line.strip().lower())
-        if "broken xss protection" in norm:
-            if norm in seen_owasp_lines:
-                continue
-            seen_owasp_lines.add(norm)
-        if in_compliance and line.strip().startswith("|"):
-            table_row_count += 1
-            if table_row_count > 30:
-                compliance_ended = True
-                continue
-        elif in_compliance and table_row_count > 0 and not line.strip().startswith("|"):
-            if line.strip():
-                compliance_ended = True
-                continue
-        cleaned_lines.append(line)
-
-    final_lines = []
-    for line in "\n".join(cleaned_lines).split("\n"):
-        m = re.search(r'\bA(\d{2,3})\b', line)
-        if m and int(m.group(1)) > 10:
-            continue
-        final_lines.append(line)
-    return "\n".join(final_lines)
 
 
 def _format_confirmed_stack(stack: Dict) -> str:
@@ -944,180 +898,6 @@ def _build_section_6(confirmed_vulns, potential_vulns):
     return "\n".join(lines)
 
 
-_OWASP_TOP_10 = [
-    ("A01:2021", "Broken Access Control"),
-    ("A02:2021", "Cryptographic Failures"),
-    ("A03:2021", "Injection"),
-    ("A04:2021", "Insecure Design"),
-    ("A05:2021", "Security Misconfiguration"),
-    ("A06:2021", "Vulnerable and Outdated Components"),
-    ("A07:2021", "Identification and Authentication Failures"),
-    ("A08:2021", "Software and Data Integrity Failures"),
-    ("A09:2021", "Security Logging and Monitoring Failures"),
-    ("A10:2021", "Server-Side Request Forgery (SSRF)"),
-]
-
-_CWE_TO_OWASP = {
-    "CWE-22": "A01:2021", "CWE-23": "A01:2021", "CWE-284": "A01:2021",
-    "CWE-285": "A01:2021", "CWE-639": "A01:2021",
-    "CWE-259": "A02:2021", "CWE-327": "A02:2021", "CWE-319": "A02:2021",
-    "CWE-79": "A03:2021", "CWE-89": "A03:2021", "CWE-78": "A03:2021",
-    "CWE-94": "A03:2021", "CWE-77": "A03:2021", "CWE-90": "A03:2021",
-    "CWE-1336": "A03:2021",
-    "CWE-16": "A05:2021", "CWE-200": "A05:2021", "CWE-209": "A05:2021",
-    "CWE-548": "A05:2021", "CWE-1021": "A05:2021",
-    "CWE-1104": "A06:2021", "CWE-1035": "A06:2021",
-    "CWE-287": "A07:2021", "CWE-306": "A07:2021", "CWE-384": "A07:2021",
-    "CWE-352": "A08:2021", "CWE-494": "A08:2021", "CWE-502": "A08:2021",
-    "CWE-778": "A09:2021", "CWE-223": "A09:2021",
-    "CWE-918": "A10:2021",
-}
-
-
-def _normalize_cwe(cwe) -> str:
-    if not cwe:
-        return ""
-    s = str(cwe).strip().upper()
-    if not s:
-        return ""
-    if s.startswith("CWE-"):
-        return s.split()[0].split(",")[0]
-    if s.isdigit():
-        return f"CWE-{s}"
-    m = re.search(r"CWE-?(\d+)", s, re.I)
-    return f"CWE-{m.group(1)}" if m else s
-
-
-def _map_finding_to_owasp(finding: Dict) -> str:
-    """Map a finding to A01–A10. Prefer explicit owasp, then CWE, then type."""
-    explicit = (finding.get("owasp") or finding.get("owasp_category") or "").strip()
-    if explicit:
-        m = re.search(r"A0?(\d{1,2})", explicit, re.I)
-        if m:
-            n = int(m.group(1))
-            if 1 <= n <= 10:
-                return f"A{n:02d}:2021"
-    cwe = _normalize_cwe(finding.get("cwe"))
-    if cwe and cwe in _CWE_TO_OWASP:
-        return _CWE_TO_OWASP[cwe]
-    t = (finding.get("type") or "").lower()
-    d = (finding.get("details") or "").lower()
-    blob = f"{t} {d}"
-    rules = [
-        (r"ssrf|server-side request", "A10:2021"),
-        (r"prompt.?inject|xss|cross.?site.?script|sql.?inject|command.?inject|"
-         r"ssti|template.?inject|ldap.?inject|\binjection\b", "A03:2021"),
-        (r"csrf|cross.?site.?request", "A08:2021"),
-        (r"clickjack|x-frame|csp|hsts|cors|security header|misconfig|"
-         r"directory.?list|information disclosure", "A05:2021"),
-        (r"\bcve-|outdated|vulnerable.?component", "A06:2021"),
-        (r"auth.?bypass|broken.?access|idor|path.?travers|access.?control|"
-         r"forced.?brows", "A01:2021"),
-        (r"session|password|credential|authentication.?fail", "A07:2021"),
-        (r"crypto|tls|ssl|cleartext", "A02:2021"),
-        (r"log(ging)?|monitor", "A09:2021"),
-    ]
-    for pat, owasp in rules:
-        if re.search(pat, blob):
-            return owasp
-    return ""
-
-
-def _build_section_7(confirmed_vulns, potential_vulns, scan_results=None) -> str:
-    """
-    Deterministic OWASP Top 10 compliance table (published Section 7).
-    Status: Found (confirmed) | Potential | Not Found (tested clean) | Not Assessed.
-    """
-    lines = [
-        " 7. COMPLIANCE MAPPING (OWASP Top 10)",
-        "",
-        "| OWASP Category | Status | Evidence / Notes |",
-        "|----------------|--------|------------------|",
-    ]
-    buckets: Dict[str, Dict] = {
-        aid: {"confirmed": [], "potential": []} for aid, _ in _OWASP_TOP_10
-    }
-    for v in confirmed_vulns or []:
-        oid = _map_finding_to_owasp(v)
-        if oid in buckets:
-            buckets[oid]["confirmed"].append(v)
-    for v in potential_vulns or []:
-        oid = _map_finding_to_owasp(v)
-        if oid in buckets:
-            buckets[oid]["potential"].append(v)
-
-    ft = ((scan_results or {}).get("forms_testing") or {}) if scan_results else {}
-    forms_tested = int(ft.get("tested") or 0) > 0 or int(
-        (scan_results or {}).get("forms_discovered") or 0
-    ) > 0
-    # Header/CORS/path probes always run in the web tester when a scan completed
-    scanned = scan_results is not None
-    em = (scan_results or {}).get("eval_metrics") or {}
-    pi_attempted = int(em.get("prompt_injection_attempted") or 0) > 0
-
-    tested_cats = set()
-    if scanned:
-        tested_cats.add("A05:2021")  # headers / CORS / sensitive paths
-        if forms_tested:
-            tested_cats.update({"A03:2021", "A08:2021"})
-        # URL injection seeds also cover A03 even without forms
-        if int((scan_results or {}).get("urls_discovered") or 0) > 0 or forms_tested:
-            tested_cats.add("A03:2021")
-        tested_cats.add("A01:2021")  # sensitive-path / access probes
-        if pi_attempted:
-            tested_cats.add("A03:2021")
-
-    for aid, name in _OWASP_TOP_10:
-        conf = buckets[aid]["confirmed"]
-        pot = buckets[aid]["potential"]
-        if conf:
-            types = ", ".join(
-                dict.fromkeys(v.get("type") or "?" for v in conf)
-            )[:120]
-            status = "Found"
-            note = f"{len(conf)} confirmed: {types}"
-        elif pot:
-            types = ", ".join(
-                dict.fromkeys(v.get("type") or "?" for v in pot)
-            )[:120]
-            status = "Potential"
-            note = f"{len(pot)} potential: {types}"
-        elif aid in tested_cats:
-            status = "Not Found"
-            note = "Exercised in this scan; no mapped findings"
-        else:
-            status = "Not Assessed"
-            note = "Out of scope or not exercised in black-box unauth scan"
-        lines.append(f"| {aid} {name} | {status} | {note} |")
-
-    # Finding-level rows for confirmed only (prompt Table II companion)
-    lines += [
-        "",
-        "Confirmed findings → OWASP / CWE:",
-        "",
-        "| Finding | OWASP | CWE | Recommended Fix |",
-        "|---------|-------|-----|-----------------|",
-    ]
-    if not confirmed_vulns:
-        lines.append("| — | — | — | No confirmed findings |")
-    else:
-        seen = set()
-        for v in confirmed_vulns:
-            key = (v.get("type", ""), v.get("location", ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            owasp = _map_finding_to_owasp(v) or "—"
-            cwe = _normalize_cwe(v.get("cwe")) or "—"
-            fix = (v.get("remediation") or "—").replace("|", "/").replace("\n", " ")
-            if len(fix) > 100:
-                fix = fix[:97] + "..."
-            finding = (v.get("type") or "?").replace("|", "/")
-            lines.append(f"| {finding} | {owasp} | {cwe} | {fix} |")
-
-    return "\n".join(lines)
-
-
 def _build_section_8_ai_negative(scan_results: Dict) -> str:
     """
     When no AI surface is escalated, still emit §8 with a denominator —
@@ -1962,97 +1742,6 @@ Answer:"""
                     deduped_pot.append(v)
             potential_vulns = deduped_pot
 
-        interesting_endpoints = [e for e in endpoints if e.get("interesting")]
-
-        context_lines = [
-            f"TARGET: {target_url or 'N/A'}",
-            f"QUERY: {user_query}",
-            "",
-            "=== TECH STACK ===",
-            _format_confirmed_stack(stack),
-            "",
-            "=== SCAN STATISTICS ===",
-            f"Confirmed vulnerabilities : {len(confirmed_vulns)}",
-            f"Potential vulnerabilities : {len(potential_vulns)}",
-            f"Verified CVEs (NVD/OSV)   : {len(cves) if cves else 0}",
-            f"Endpoints discovered      : {len(interesting_endpoints)}",
-        ]
-        if scan_results:
-            context_lines.append(f"Scan duration             : {scan_results.get('scan_duration',0)}s")
-        context_lines.append("")
-
-        if cves:
-            context_lines.append("=== VERIFIED CVEs ===")
-            for cve in cves[:8]:
-                context_lines.append(
-                    f"  {cve.get('cve_id','?')} | {cve.get('severity','?')} | "
-                    f"CVSS {cve.get('cvss_score','N/A')} | "
-                    f"{cve.get('description','')[:200]}"
-                )
-            context_lines.append("")
-        else:
-            context_lines += ["=== VERIFIED CVEs ===", "  None found.", ""]
-
-        if confirmed_vulns:
-            context_lines.append(f"=== CONFIRMED VULNERABILITIES ({len(confirmed_vulns)}) ===")
-            for i, v in enumerate(confirmed_vulns, 1):
-                context_lines += [
-                    f"[{i}] {v.get('type','?')}",
-                    f"  Severity: {v.get('severity','?')}  ← USE THIS EXACTLY",
-                    f"  Location: {v.get('location','?')}",
-                    f"  CWE: {v.get('cwe','?')}",
-                    f"  Fix: {v.get('remediation','')[:200]}",
-                ]
-            context_lines.append("")
-
-        if potential_vulns:
-            context_lines.append(f"=== POTENTIAL VULNERABILITIES ({len(potential_vulns)}) ===")
-            for i, v in enumerate(potential_vulns, 1):
-                context_lines += [
-                    f"[{i}] {v.get('type','?')}",
-                    f"  Severity: {v.get('severity','?')}",
-                    f"  Detail: {v.get('details','')[:200]}",
-                ]
-            context_lines.append("")
-
-        context_lines += ["=== STRIDE ARCHITECTURAL THREAT MODEL ===", threat_model[:1500], ""]
-
-        if known_vulns:
-            context_lines.append("=== INTELLIGENCE FROM WEB SEARCH / KB ===")
-            for v in known_vulns[:5]:
-                label = (
-                    "CVE"        if v.get("is_cve")        else
-                    "Exploit-DB" if v.get("is_exploit_db") else
-                    v.get("source", "Reference")
-                )
-                context_lines.append(f"  [{label}] {v.get('title','?')} — {v.get('snippet','')[:150]}")
-            context_lines.append("")
-
-        report_context   = "\n".join(context_lines)
-        synthesis_prompt = SYNTHESIS_PROMPT.format(report_context=report_context)
-
-        response = self.openai_client.chat.completions.create(
-            model=self.llm_model,
-            messages=[
-                {
-                    "role":    "system",
-                    "content": (
-                        "You are a senior cybersecurity analyst. Follow the rules exactly. "
-                        "CRITICAL: OWASP Top 10 has exactly 10 items: A01 through A10. "
-                        "NEVER write A11 or higher. "
-                        "Never invent CVEs or change severity values. "
-                        "Stop after section 3 placeholders — Sections 4–9 are "
-                        "assembled deterministically by the system (including §7)."
-                    ),
-                },
-                {"role": "user", "content": synthesis_prompt},
-            ],
-            temperature=0.1, max_tokens=2500,
-        )
-
-        raw_report = response.choices[0].message.content
-        _sanitize_report(raw_report)
-
         stride_threats = (scan_results or {}).get("stride_threats", [])
         action_agent   = ActionAgent()
         action_results = action_agent.process_all(confirmed_vulns, target_url, stack)
@@ -2072,13 +1761,10 @@ Answer:"""
         section_4   = _build_section_4(potential_vulns, scan_results)    or ""
         section_5   = _build_section_5(stride_threats, confirmed_vulns)  or ""
         section_6   = _build_section_6(confirmed_vulns, potential_vulns) or ""
-        section_7   = _build_section_7(
-            confirmed_vulns, potential_vulns, scan_results
-        ) or ""
 
         final = "\n\n".join([
             s for s in [section_1, section_2, section_3, section_3b,
-                        section_4, section_5, section_6, section_7]
+                        section_4, section_5, section_6]
             if s
         ])
 
@@ -2109,7 +1795,6 @@ Answer:"""
             ("4",  "Potential Vulns",     section_4),
             ("5",  "STRIDE Model",        section_5),
             ("6",  "Remediation Roadmap", section_6),
-            ("7",  "OWASP Compliance",    section_7),
             ("8",  "AI/ML Analysis",      section_8),
             ("9",  "AI Infra Attacks",    section_9),
         ]:

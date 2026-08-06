@@ -12,11 +12,9 @@ sys.path.insert(0, os.path.join(ROOT, "multiagent"))
 from multiagent.agents.threat_modeling_agent import (
     _build_section_2,
     _build_section_4,
-    _build_section_7,
     _build_section_8_ai_backdoor,
     _build_section_8_ai_negative,
     _coverage_denominator_text,
-    _map_finding_to_owasp,
 )
 from multiagent.agents.webappscanner.action_agent import ActionAgent
 from multiagent.agents.webappscanner.app_identity import (
@@ -348,34 +346,6 @@ class TestOpenApiHelpers:
         assert disco._matches_spa_shell('{"openapi":"3.0.0","paths":{}}', "application/json") is False
 
 
-class TestSection7Owasp:
-    def test_table_has_all_ten_rows(self):
-        text = _build_section_7([], [], _scan())
-        assert "7. COMPLIANCE MAPPING" in text
-        for i in range(1, 11):
-            assert f"A{i:02d}:2021" in text
-        assert "Not Found" in text or "Not Assessed" in text
-
-    def test_confirmed_xss_maps_to_a03(self):
-        assert _map_finding_to_owasp({
-            "type": "Reflected XSS", "cwe": "CWE-79"
-        }) == "A03:2021"
-        text = _build_section_7(
-            [{
-                "type": "Reflected XSS",
-                "cwe": "CWE-79",
-                "location": "/search",
-                "remediation": "Encode output",
-                "status": "Confirmed",
-            }],
-            [],
-            _scan(),
-        )
-        assert "A03:2021" in text
-        assert "Found" in text
-        assert "Reflected XSS" in text
-
-
 if __name__ == "__main__":
     fails = 0
     for cls in [
@@ -385,7 +355,6 @@ if __name__ == "__main__":
         TestAppIdentityNotStack,
         TestClickjackingFixDialect,
         TestOpenApiHelpers,
-        TestSection7Owasp,
     ]:
         o = cls()
         for name in sorted(n for n in dir(o) if n.startswith("test_")):
