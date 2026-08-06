@@ -770,6 +770,35 @@ class TechFingerprintAgent:
             ]
         stack_summary = " · ".join(summary_parts) if summary_parts else "Unknown"
 
+        # Derived facts inherit parent confidence: Express entails Node.
+        _IMPLIES = {
+            "express": "node",
+            "next.js": "node",
+            "nestjs": "node",
+            "fastify": "node",
+            "koa": "node",
+            "django": "python",
+            "flask": "python",
+            "fastapi": "python",
+            "rails": "ruby",
+            "laravel": "php",
+            "symfony": "php",
+        }
+        by_name = {
+            (dt.get("name") or "").strip().lower(): dt
+            for dt in detected
+            if isinstance(dt, dict) and dt.get("name")
+        }
+        for child, parent in _IMPLIES.items():
+            if child in by_name and parent in by_name:
+                try:
+                    child_c = float(by_name[child].get("confidence") or 0)
+                    parent_c = float(by_name[parent].get("confidence") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if child_c > parent_c:
+                    by_name[parent]["confidence"] = child_c
+
         best_conf = max((dt["confidence"] for dt in detected), default=0.0)
         if best_conf >= 0.85:
             confidence = "High"

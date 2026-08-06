@@ -524,6 +524,37 @@ class EndpointDiscoveryAgent:
                 ep["verification"] = "Static asset — excluded from endpoint table"
                 return ep
 
+            # OpenAPI/Swagger machine docs: never treat JSON specs as SPA shells.
+            # Retry with Accept: application/json when HTML catch-all was returned.
+            path_l = urllib.parse.urlsplit(ep.get("url") or "").path.lower()
+            openapi_ish = any(
+                k in path_l for k in (
+                    "openapi", "swagger.json", "swagger.yaml", "swagger.yml",
+                )
+            )
+            if openapi_ish and (
+                self._matches_spa_shell(body, ctype)
+                or not (body.lstrip()[:1] in "{[" or "json" in ctype)
+            ):
+                rescued = await self._fetch_text_accept_json(ep.get("url") or "")
+                if rescued and rescued.lstrip()[:1] in "{[":
+                    body = rescued
+                    ctype = "application/json"
+                    ep["content_type"] = ctype
+                    try:
+                        spec = json.loads(rescued)
+                        if isinstance(spec, dict) and (
+                            spec.get("openapi") or spec.get("swagger") or spec.get("paths")
+                        ):
+                            ep["interesting"] = True
+                            ep["api_endpoint"] = True
+                            ep["spa_catch_all"] = False
+                            ep["excluded"] = False
+                            ep["verification"] = "OpenAPI/Swagger spec confirmed"
+                            return ep
+                    except Exception:
+                        pass
+
             # Drop SPA catch-all shells before keyword heuristics
             if self._matches_spa_shell(body, ctype):
                 ep["interesting"]  = False
@@ -723,44 +754,150 @@ class EndpointDiscoveryAgent:
         return endpoints
 
     async def _parse_swagger(self, base: str) -> List[Dict]:
-        endpoints = []
+        """
+        First-class OpenAPI/Swagger discovery: fetch machine-readable specs
+        (Accept: application/json), and also follow /api/docs|/swagger UI
+        pages to their underlying spec URL.
+        """
+        endpoints: List[Dict] = []
         swagger_paths = [
             "/swagger.json", "/openapi.json",
             "/api/swagger.json", "/api/openapi.json",
             "/api/docs/openapi.json", "/v1/openapi.json",
+            "/openapi.yaml", "/openapi.yml",
+            "/api/openapi.yaml", "/swagger/v1/swagger.json",
         ]
+        docs_ui_paths = (
+            "/api/docs", "/docs", "/swagger", "/swagger-ui",
+            "/swagger-ui/", "/api/swagger", "/redoc",
+        )
+
+        # Spec URLs referenced from HTML docs UIs
+        for ui_path in docs_ui_paths:
+            html = await self._fetch_text(f"{base}{ui_path}")
+            if not html:
+                continue
+            for ref in self._extract_openapi_refs_from_html(html, base):
+                if ref not in swagger_paths and not ref.startswith("http"):
+                    swagger_paths.append(ref)
+                elif ref.startswith("http"):
+                    parsed = await self._endpoints_from_openapi_url(ref, base)
+                    if parsed:
+                        return parsed
+
         for path in swagger_paths:
-            body = await self._fetch_text(f"{base}{path}")
-            if not body:
-                continue
-            try:
-                spec   = json.loads(body)
-                paths  = spec.get("paths", {})
-                for route, methods in paths.items():
-                    for method in methods.keys():
-                        if method.lower() in ("get","post","put","delete","patch"):
-                            full_url = urljoin(base, route)
-                            params   = []
-                            for m_data in methods.values():
-                                if isinstance(m_data, dict):
-                                    for p in m_data.get("parameters", []):
-                                        if isinstance(p, dict) and p.get("in") == "query":
-                                            params.append(p.get("name", ""))
-                            endpoints.append({
-                                "url":          full_url,
-                                "method":       method.upper(),
-                                "source":       "swagger",
-                                "status":       None,
-                                "final_url":    full_url,
-                                "interesting":  True,
-                                "auth_required":False,
-                                "params":       [p for p in params if p]
-                            })
-                if endpoints:
-                    break
-            except Exception:
-                continue
+            url = path if path.startswith("http") else f"{base}{path}"
+            parsed = await self._endpoints_from_openapi_url(url, base)
+            if parsed:
+                return parsed
         return endpoints
+
+    @staticmethod
+    def _extract_openapi_refs_from_html(html: str, base: str) -> List[str]:
+        """Pull likely OpenAPI/Swagger spec URLs from a docs UI page."""
+        if not html:
+            return []
+        refs: List[str] = []
+        patterns = [
+            r"""url\s*[:=]\s*["']([^"']+(?:openapi|swagger)[^"']*)["']""",
+            r"""["']([^"']+/openapi\.(?:json|ya?ml))["']""",
+            r"""["']([^"']+/swagger\.(?:json|ya?ml))["']""",
+            r"""["']((?:https?:)?//[^"']+(?:openapi|swagger)\.(?:json|ya?ml))["']""",
+            r"""spec(?:Url|URL)?\s*[:=]\s*["']([^"']+)["']""",
+        ]
+        for pat in patterns:
+            for m in re.findall(pat, html, flags=re.I):
+                ref = (m or "").strip()
+                if not ref:
+                    continue
+                if ref.startswith("//"):
+                    ref = "http:" + ref
+                if ref.startswith("http") or ref.startswith("/"):
+                    refs.append(ref)
+        # Dedup, preserve order
+        return list(dict.fromkeys(refs))
+
+    async def _endpoints_from_openapi_url(self, url: str, base: str) -> List[Dict]:
+        """Fetch one OpenAPI/Swagger document and emit path operations."""
+        body = await self._fetch_text_accept_json(url)
+        if not body:
+            body = await self._fetch_text(url)
+        if not body:
+            return []
+        stripped = body.lstrip()
+        # HTML docs shell is not a spec
+        if stripped.lower().startswith(("<!doctype", "<html")):
+            return []
+        spec = None
+        try:
+            spec = json.loads(body)
+        except Exception:
+            # Minimal YAML: only accept if it looks like OpenAPI and has paths:
+            if re.search(r"(?m)^(openapi|swagger)\s*:", body) and "paths:" in body:
+                spec = self._minimal_yaml_openapi_paths(body)
+        if not isinstance(spec, dict):
+            return []
+        if not (spec.get("openapi") or spec.get("swagger") or spec.get("paths")):
+            return []
+        paths = spec.get("paths") or {}
+        if not isinstance(paths, dict) or not paths:
+            return []
+
+        endpoints: List[Dict] = []
+        for route, methods in paths.items():
+            if not isinstance(methods, dict):
+                continue
+            for method, m_data in methods.items():
+                if method.lower() not in ("get", "post", "put", "delete", "patch"):
+                    continue
+                full_url = urljoin(base, route)
+                params: List[str] = []
+                if isinstance(m_data, dict):
+                    for p in m_data.get("parameters") or []:
+                        if isinstance(p, dict) and p.get("in") == "query" and p.get("name"):
+                            params.append(str(p["name"]))
+                endpoints.append({
+                    "url":           full_url,
+                    "method":        method.upper(),
+                    "source":        "swagger",
+                    "status":        None,
+                    "final_url":     full_url,
+                    "interesting":   True,
+                    "auth_required": False,
+                    "api_endpoint":  True,
+                    "params":        params,
+                    "openapi_spec":  url,
+                })
+        return endpoints
+
+    @staticmethod
+    def _minimal_yaml_openapi_paths(text: str) -> Optional[Dict]:
+        """Best-effort path key extraction from YAML OpenAPI (no full YAML dep)."""
+        paths: Dict[str, Dict] = {}
+        in_paths = False
+        current_path = None
+        for line in text.splitlines():
+            if re.match(r"^paths\s*:", line):
+                in_paths = True
+                current_path = None
+                continue
+            if not in_paths:
+                continue
+            if re.match(r"^[A-Za-z]", line):  # next top-level key
+                break
+            m_path = re.match(r"^  (/[^:]+)\s*:", line)
+            if m_path:
+                current_path = m_path.group(1).strip()
+                paths.setdefault(current_path, {})
+                continue
+            m_op = re.match(
+                r"^    (get|post|put|delete|patch)\s*:", line, flags=re.I
+            )
+            if m_op and current_path:
+                paths[current_path][m_op.group(1).lower()] = {}
+        if not paths:
+            return None
+        return {"openapi": "3.0.0", "paths": paths}
 
     async def _parse_manifest(self, base: str) -> List[Dict]:
         endpoints = []

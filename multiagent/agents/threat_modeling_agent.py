@@ -322,7 +322,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
         )
     else:
         risk_clause = (
-            f"Overall risk level: {risk} (score: {exploit_score:.0f})"
+            f"Overall risk level: {risk} (score: {exploit_score:.0f})."
         )
 
     summary = (
@@ -373,9 +373,17 @@ def _cves_for_tech(tech_name: str, cves: Optional[List[Dict]]) -> List[Dict]:
 
 
 def _build_section_2(stack, endpoints, cves, target_url: str = "",
-                     forms_discovered: int = 0):
+                     forms_discovered: int = 0,
+                     forms_testing: Optional[Dict] = None,
+                     scan_results: Optional[Dict] = None):
     # CVE mapping disabled for now — fingerprint / stack only.
     lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack"]
+
+    app_name = (stack or {}).get("app_identity_name") or ""
+    if app_name:
+        lines.append(f"App identity: {app_name}")
+    else:
+        lines.append("App identity: not determined")
 
     technologies = stack.get("technologies") or []
     noise_words  = {"content", "unknown", "none", "null", "n/a",
@@ -568,8 +576,60 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
                 f"{ep.get('url','')} — {reason}"
             )
 
-    if forms_discovered:
-        lines.append(f"\n Forms discovered: {forms_discovered} (included in active testing)")
+    openapi_eps = [
+        e for e in (endpoints or [])
+        if e.get("source") == "swagger"
+        and not e.get("spa_catch_all")
+        and not e.get("excluded")
+    ]
+    if openapi_eps:
+        spec_url = next(
+            (e.get("openapi_spec") for e in openapi_eps if e.get("openapi_spec")),
+            "",
+        )
+        hdr = " OpenAPI-enumerated endpoints"
+        if spec_url:
+            hdr += f" (from `{spec_url}`)"
+        lines.append("\n" + hdr)
+        # Dedup by method+url
+        seen_oa: set = set()
+        shown = 0
+        for ep in openapi_eps:
+            key = (ep.get("method", "GET"), ep.get("url", ""))
+            if key in seen_oa:
+                continue
+            seen_oa.add(key)
+            status_disp = ep.get("status")
+            if status_disp in (None, "", "?"):
+                status_disp = "spec"
+            lines.append(
+                f"- [{status_disp}] {ep.get('method','GET')} {ep.get('url','')}"
+            )
+            shown += 1
+            if shown >= 20:
+                break
+        n_unique = len({(e.get("method"), e.get("url")) for e in openapi_eps})
+        if n_unique > shown:
+            lines.append(f"- … and {n_unique - shown} more from OpenAPI spec")
+
+    ft = forms_testing if isinstance(forms_testing, dict) else {}
+    n_forms = int(forms_discovered or ft.get("discovered") or 0)
+    if n_forms or ft:
+        tested = int(ft.get("tested") if ft.get("tested") is not None else n_forms)
+        with_findings = int(ft.get("with_findings") or 0)
+        errored = int(ft.get("errored") or 0)
+        outcome = (
+            f"{with_findings} produced findings"
+            if with_findings
+            else "no injection/CSRF findings on exercised forms"
+        )
+        err_bit = f"; {errored} errored" if errored else ""
+        lines.append(
+            f"\n Forms discovered: {n_forms} "
+            f"(tested: {tested}; {outcome}{err_bit})"
+        )
+    elif scan_results is not None:
+        lines.append("\n Forms discovered: 0 (none found for active testing)")
 
     return "\n".join(lines)
 
@@ -652,12 +712,46 @@ def render_section_3b(action_results: list) -> str:
     return "\n".join(lines)
 
 
-def _build_section_4(potential_vulns):
+def _coverage_denominator_text(scan_results) -> str:
+    """Denominator for zero-finding sections — never imply app-wide cleanliness."""
+    sr = scan_results or {}
+    endpoints = list(sr.get("endpoints_discovered") or [])
+    n_functional = 0
+    n_excluded = 0
+    for ep in endpoints:
+        if not isinstance(ep, dict) or ep.get("static_asset"):
+            continue
+        if ep.get("spa_catch_all") or ep.get("excluded"):
+            n_excluded += 1
+        elif ep.get("interesting") or ep.get("auth_endpoint"):
+            if not (
+                ep.get("access_controlled")
+                or ep.get("auth_required")
+                or ep.get("redirects_to_auth")
+                or ep.get("category") == "discovered_protected"
+            ):
+                n_functional += 1
+    n_forms = int(sr.get("forms_discovered") or 0)
+    cov = _coverage_from_scan(sr)
+    n_auth = cov["auth_gated_count"]
+    parts = [
+        f"{n_functional} functional endpoint(s)",
+        f"{n_forms} form(s)",
+        "unauthenticated only",
+    ]
+    if n_excluded:
+        parts.append(f"{n_excluded} candidate path(s) excluded as soft-404")
+    if n_auth:
+        parts.append(f"{n_auth} auth-gated surface(s) not tested")
+    return "Coverage: " + "; ".join(parts) + "."
+
+
+def _build_section_4(potential_vulns, scan_results=None):
     lines = [" 4. POTENTIAL VULNERABILITIES"]
     if not potential_vulns:
         lines.append(
             "No potential vulnerabilities identified. "
-            "All tested surfaces returned clean results."
+            + _coverage_denominator_text(scan_results)
         )
         return "\n".join(lines)
     seen = set()
@@ -776,6 +870,28 @@ def _build_section_6(confirmed_vulns, potential_vulns):
     if not any_finding:
         lines.append("No findings requiring remediation.")
     return "\n".join(lines)
+
+
+def _build_section_8_ai_negative(scan_results: Dict) -> str:
+    """
+    When no AI surface is escalated, still emit §8 with a denominator —
+    silence is not a negative result under the coverage-honesty invariant.
+    """
+    brand_only = bool((scan_results or {}).get("ai_brand_only"))
+    live = bool((scan_results or {}).get("has_live_surface"))
+    if brand_only and not live:
+        note = (
+            "AI product branding was observed without a confirmed "
+            "live chat/inference surface; AI-specific active testing "
+            "was not applicable."
+        )
+    else:
+        note = (
+            "No AI/ML attack surface detected on the unauthenticated "
+            "surface; AI-specific analysis not applicable. "
+            + _coverage_denominator_text(scan_results)
+        )
+    return " 8. AI/ML BACKDOOR VULNERABILITY ANALYSIS\n\n" + note
 
 
 def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
@@ -1701,10 +1817,12 @@ Answer:"""
             cves,
             target_url=target_url or "",
             forms_discovered=int((scan_results or {}).get("forms_discovered") or 0),
+            forms_testing=(scan_results or {}).get("forms_testing"),
+            scan_results=scan_results,
         ) or ""
         section_3   = _build_section_3(confirmed_vulns)                  or ""
         section_3b  = render_section_3b(action_results)                  or ""
-        section_4   = _build_section_4(potential_vulns)                  or ""
+        section_4   = _build_section_4(potential_vulns, scan_results)    or ""
         section_5   = _build_section_5(stride_threats, confirmed_vulns)  or ""
         section_6   = _build_section_6(confirmed_vulns, potential_vulns) or ""
 
@@ -1717,8 +1835,10 @@ Answer:"""
         section_8 = ""
         if scan_results and scan_results.get("is_ai_powered"):
             section_8 = _build_section_8_ai_backdoor(scan_results)
-            if section_8:
-                final = final + "\n\n" + section_8
+        elif scan_results is not None:
+            section_8 = _build_section_8_ai_negative(scan_results)
+        if section_8:
+            final = final + "\n\n" + section_8
 
         section_9 = ""
         ai_infra_data = (scan_results or {}).get("ai_infrastructure")

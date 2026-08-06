@@ -237,11 +237,12 @@ class WebScannerAgent:
                 )
             
                 if app_identity and app_identity.name:
+                    # Always persist identity fields (both tech dict / string paths).
+                    stack["app_identity_name"]    = app_identity.name
+                    stack["app_identity_version"] = app_identity.version or ""
+                    stack["app_identity"]         = app_identity
                     existing = stack.get("technologies", [])
                     if existing and isinstance(existing[0], dict):
-                        stack["app_identity_name"]    = app_identity.name
-                        stack["app_identity_version"] = app_identity.version or ""
-                        stack["app_identity"]         = app_identity
                         current_summary = stack.get("stack_summary", "")
                         app_str = app_identity.name
                         if app_identity.version:
@@ -255,7 +256,7 @@ class WebScannerAgent:
                     else:
                         ver_str    = f" {app_identity.version}" if app_identity.version else ""
                         name_entry = f"{app_identity.name}{ver_str}"
-                        merged     = [name_entry] + app_identity.technologies + existing
+                        merged     = [name_entry] + list(app_identity.technologies or []) + list(existing or [])
                         seen_t: set = set()
                         deduped_t   = []
                         for t in merged:
@@ -264,7 +265,6 @@ class WebScannerAgent:
                                 seen_t.add(tkey)
                                 deduped_t.append(t)
                         stack["technologies"] = deduped_t
-                        stack["app_identity"] = app_identity
                         if "Unknown" in stack.get("stack_summary", ""):
                             stack["stack_summary"] = app_identity.name
                     if verbose:
@@ -557,6 +557,32 @@ class WebScannerAgent:
         except Exception as e:
             logger.error(f"Vuln testing failed: {e}")
 
+        # Form testing denominator for Section 2 (never silent when forms exist).
+        form_findings = [
+            f for f in (raw_findings or [])
+            if any(
+                k in (f.get("type") or "").lower()
+                for k in ("xss", "sql", "csrf")
+            )
+            and (
+                "form" in (f.get("details") or "").lower()
+                or any(
+                    (frm.get("action") or "")
+                    and (frm.get("action") or "") in (f.get("location") or "")
+                    for frm in (all_forms or [])
+                )
+                or "csrf" in (f.get("type") or "").lower()
+            )
+        ]
+        forms_testing = {
+            "discovered": len(all_forms or []),
+            "tested": min(len(all_forms or []), 10),
+            "with_findings": len({
+                (f.get("type"), f.get("location")) for f in form_findings
+            }),
+            "errored": 0,
+        }
+
         if verbose:
             c = sum(1 for f in raw_findings if f.get("status") == "Confirmed")
             p = sum(1 for f in raw_findings if f.get("status") == "Potential")
@@ -801,6 +827,7 @@ class WebScannerAgent:
             "tasks_generated":        len(tasks),
             "tasks_executed":         tasks_executed,
             "forms_discovered":       len(all_forms),
+            "forms_testing":          forms_testing,
             "urls_discovered":        len(all_urls),
             "scan_duration":          round(duration, 1),
             "scan_scope":             "blackbox_unauth",

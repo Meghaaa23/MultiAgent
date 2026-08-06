@@ -529,7 +529,55 @@ class ActionAgent:
         xfo_fix     = _HEADER_FIXES.get(stack_key, _HEADER_FIXES["generic"]).get(
             "X-Frame-Options", "X-Frame-Options: DENY"
         )
-        fix_snippet = xfo_fix + "\n# OR use CSP (stronger, preferred):\nContent-Security-Policy: frame-ancestors 'none';"
+        # CSP alternative must stay in the same dialect as the stack fix —
+        # never append a raw HTTP header line into a JS/nginx/apache snippet.
+        _FRAME_ANCESTOR_FIXES = {
+            "express": (
+                "// Prefer CSP frame-ancestors (stronger):\n"
+                "app.use(helmet.contentSecurityPolicy({\n"
+                "  directives: {\n"
+                "    defaultSrc: [\"'self'\"],\n"
+                "    frameAncestors: [\"'none'\"],\n"
+                "  }\n"
+                "}));"
+            ),
+            "next.js": (
+                "// Prefer CSP frame-ancestors (stronger):\n"
+                "headers: [{ key: 'Content-Security-Policy', "
+                "value: \"frame-ancestors 'none'\" }]"
+            ),
+            "sveltekit": (
+                "// Prefer CSP frame-ancestors (stronger):\n"
+                "response.headers.set('Content-Security-Policy', "
+                "\"frame-ancestors 'none'\");"
+            ),
+            "nginx": (
+                "add_header Content-Security-Policy "
+                "\"frame-ancestors 'none'\" always;"
+            ),
+            "apache": (
+                "Header always set Content-Security-Policy "
+                "\"frame-ancestors 'none'\""
+            ),
+            "django": (
+                "# Prefer CSP frame-ancestors (stronger):\n"
+                "CSP_FRAME_ANCESTORS = (\"'none'\",)"
+            ),
+            "fastapi": (
+                "# Prefer CSP frame-ancestors (stronger):\n"
+                "response.headers['Content-Security-Policy'] = "
+                "\"frame-ancestors 'none'\""
+            ),
+            "generic": "Content-Security-Policy: frame-ancestors 'none'",
+        }
+        csp_alt = _FRAME_ANCESTOR_FIXES.get(
+            stack_key, _FRAME_ANCESTOR_FIXES["generic"]
+        )
+        if stack_key in ("nginx", "apache", "django", "fastapi", "generic"):
+            sep = "\n# OR use CSP (stronger, preferred):\n"
+        else:
+            sep = "\n\n// OR use CSP (stronger, preferred):\n"
+        fix_snippet = xfo_fix + sep + csp_alt
 
         return {
             "finding_type":   "Missing Clickjacking Protection",
