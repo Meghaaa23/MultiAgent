@@ -77,21 +77,67 @@ def _from_powered_by(html: str, headers: Dict) -> Tuple[Optional[str], Optional[
     return None, None, ""
 
 
+def _title_segment_brand_score(candidate: str) -> int:
+    """
+    Rank page-title segments for product identity.
+    Prefer short brand tokens (AnythingLLM) over marketing slogans.
+    """
+    s = (candidate or "").strip()
+    if not s or not _looks_like_app_name(s):
+        return -1
+    words = s.split()
+    score = 50
+    # Marketing / slogan cues
+    if len(words) >= 4:
+        score -= 40
+    if re.match(
+        r"^(your|our|the|a|an|welcome|home|login|sign)\b", s, re.I
+    ):
+        score -= 35
+    if re.search(
+        r"\b(trained on|personal|platform|welcome to|made for|built for)\b",
+        s, re.I,
+    ):
+        score -= 30
+    # Compact product tokens score up
+    if len(words) == 1:
+        score += 40
+    if re.search(r"[A-Z]{2,}|[a-z][A-Z]", s):  # LLM, AnythingLLM, OpenWebUI
+        score += 25
+    if len(s) <= 24:
+        score += 10
+    if len(s) > 32:
+        score -= 15
+    return score
+
+
 def _from_page_title(html: str) -> Tuple[Optional[str], Optional[str], str]:
     m = re.search(r'<title[^>]*>([^<]{1,200})</title>', html, re.IGNORECASE)
     if not m:
         return None, None, ""
 
-    title    = m.group(1).strip()
+    title = m.group(1).strip()
     segments = re.split(r'\s*[-|–—·•]\s*', title)
-    candidates = [segments[-1].strip(), segments[0].strip()]
-
-    for candidate in candidates:
+    # Prefer left brand ("AnythingLLM | slogan"), then other segments
+    ordered = []
+    if segments:
+        ordered.append(segments[0].strip())
+        ordered.extend(s.strip() for s in segments[1:])
+        if len(segments) > 1:
+            ordered.append(segments[-1].strip())
+    # Dedup while scoring
+    best_name = None
+    best_score = -1
+    for candidate in ordered:
         candidate = re.sub(r'\s*\[.*?\]\s*$', '', candidate).strip()
-        if _looks_like_app_name(candidate):
-            version = _extract_version_from_string(candidate)
-            name    = re.sub(r'\s*\d[\d.]*\s*$', '', candidate).strip()
-            return name, version, f"page title: {title!r}"
+        score = _title_segment_brand_score(candidate)
+        if score > best_score:
+            best_score = score
+            best_name = candidate
+    if best_name and best_score >= 40:
+        version = _extract_version_from_string(best_name)
+        name = re.sub(r'\s*\d[\d.]*\s*$', '', best_name).strip()
+        return name, version, f"page title: {title!r}"
 
     return None, None, ""
 
@@ -565,6 +611,12 @@ def _looks_like_app_name(s: str) -> bool:
         return False
     # Never promote stack/runtime names to product identity
     if _is_infra_or_framework_name(s):
+        return False
+    # Marketing slogans are not product names
+    words = s.split()
+    if len(words) >= 5:
+        return False
+    if re.match(r"^(your|our|welcome)\b", s, re.I) and len(words) >= 3:
         return False
 
     last_word       = s.split()[-1]

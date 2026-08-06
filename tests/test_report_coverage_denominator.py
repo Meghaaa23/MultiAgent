@@ -21,6 +21,7 @@ from multiagent.agents.webappscanner.app_identity import (
     _is_infra_or_framework_name,
     _looks_like_app_name,
     _from_powered_by,
+    _from_page_title,
 )
 from multiagent.agents.webappscanner.endpoint_discovery_agent import (
     EndpointDiscoveryAgent,
@@ -180,6 +181,17 @@ class TestAppIdentityNotStack:
     def test_anythingllm_is_product(self):
         assert _looks_like_app_name("AnythingLLM") is True
         assert _is_infra_or_framework_name("AnythingLLM") is False
+
+    def test_page_title_prefers_brand_over_slogan(self):
+        html = (
+            "<title>AnythingLLM | Your personal LLM trained on anything</title>"
+        )
+        name, version, evidence = _from_page_title(html)
+        assert name == "AnythingLLM"
+        assert "page title" in evidence
+        assert _looks_like_app_name(
+            "Your personal LLM trained on anything"
+        ) is False
 
     def test_section2_rejects_express_identity(self):
         text = _build_section_2(
