@@ -46,6 +46,7 @@ _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
     # Product/framework headers and cookies are brand signals only —
     # they must not escalate detection without a live API/behavior surface.
     (re.compile(r"^framework_header$"), EvidenceClass.BRAND),
+    (re.compile(r"^framework_identified$"), EvidenceClass.BRAND),
     (re.compile(r"^framework_cookie$"), EvidenceClass.PASSIVE_HINT),
     (re.compile(r"^(?:openapi|graphql)_schema$"), EvidenceClass.PASSIVE_STRUCTURAL),
     # Chatbot UI channel — same ordinal taxonomy as API evidence.
@@ -55,6 +56,10 @@ _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
     (re.compile(r"^chatbot_ui_structural$"), EvidenceClass.PASSIVE_STRUCTURAL),
     (re.compile(r"^(?:js_|sse_in_js|websocket_|robots_|sitemap_|csp_|chatbot_ui_)"),
      EvidenceClass.PASSIVE_HINT),
+    # HTML/meta/favicon brand cues — not live surface.
+    (re.compile(r"^(?:meta_ai_tag|dom_assistant_role|html_ai_form|"
+                r"favicon_known_framework|page_title_ai|html_brand_signal)$"),
+     EvidenceClass.BRAND),
 ]
 
 

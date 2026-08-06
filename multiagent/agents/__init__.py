@@ -1,11 +1,8 @@
 # agents/__init__.py
 """
-Multi-Agent System for Threat Modeling and Web Scanning
+Multi-Agent System for Threat Modeling and Web Scanning.
 
-This package contains specialized agents for:
-- Question answering (qa_agent)
-- Threat modeling and web scanning (threat_modeling_agent)
-- State management and caching (redis_manager)
+Import submodules directly for heavy agents; this package exports QA and Redis helpers.
 """
 
 from .qa_agent import answer_question_from_db, set_config

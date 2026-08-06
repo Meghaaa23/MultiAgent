@@ -1,0 +1,75 @@
+{
+  "target": "librechat_local",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3080",
+    "http://localhost:3080/"
+  ],
+  "endpoints_true": [
+    "/api/user"
+  ],
+  "endpoints_auth_gated": [
+    "/api/user"
+  ],
+  "ai_surface": null,
+  "notes": "Local LibreChat SPA. Soft-404 /admin,/dashboard,/manage,/graphql HTML shells are not real endpoints. Headers-only unauth surface is expected. AI detection is taxonomy/live-surface based (auth-gated /api/messages|/api/ask 401), not product-name hardcoding. NVD CVE mapping is off (fingerprint-only).",
+  "expected_findings": [
+    {
+      "id": "lc-csp",
+      "type": "missing_header",
+      "name": "Content-Security-Policy",
+      "required": false,
+      "category": "missing_check"
+    },
+    {
+      "id": "lc-xcto",
+      "type": "missing_header",
+      "name": "X-Content-Type-Options",
+      "required": false,
+      "category": "missing_check"
+    },
+    {
+      "id": "lc-clickjacking",
+      "type": "clickjacking",
+      "required": false,
+      "category": "missing_check"
+    }
+  ],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf",
+    "prompt-injection",
+    "broken-auth",
+    "cors"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    },
+    {
+      "type": "cors",
+      "match": "high_without_acac",
+      "reason": "CORS High / STRIDE High for bare ACAO=* is an overclaim",
+      "category": "logic_bug"
+    },
+    {
+      "type": "missing security header: strict-transport-security",
+      "reason": "HSTS must not be reported on http://localhost",
+      "category": "logic_bug"
+    },
+    {
+      "type": "missing security header: x-xss-protection",
+      "reason": "Deprecated header — do not publish as Confirmed",
+      "category": "logic_bug"
+    },
+    {
+      "type": "spa_admin_soft404",
+      "match": "/admin",
+      "reason": "SPA catch-all /admin must not appear as interesting/admin endpoint",
+      "category": "logic_bug"
+    }
+  ]
+}

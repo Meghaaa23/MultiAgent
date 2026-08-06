@@ -345,35 +345,45 @@ class SPAScanner:
         """Method 4: Extract REST API endpoints from JS bundles."""
         api_urls: List[str] = []
         patterns = [
-            r"""['"]([/](?:api|rest|v\d+|graphql)[/][a-zA-Z0-9/_-]{1,60})['"]""",
-            r"""(?:fetch|axios\.(?:get|post))\s*\(\s*['"]([/][a-zA-Z0-9/_?=&-]{1,80})""",
+            r"""['"]([/](?:api|rest|v\d+|graphql)[/][a-zA-Z0-9/_?=&-]{1,100})['"]""",
+            r"""(?:fetch|axios\.(?:get|post))\s*\(\s*['"]([/][a-zA-Z0-9/_?=&-]{1,100})""",
             r"""(?:baseURL|apiUrl|API_URL)\s*[=:]\s*['"]([/][a-zA-Z0-9/_-]{1,60})""",
         ]
         script_urls = re.findall(
             r'<script[^>]+src=[\'"]([^\'"]+\.js[^\'"]*)[\'"]',
             raw_html, re.IGNORECASE
-        )[:2]
+        )
+        # Prefer main/runtime bundles where REST paths usually live
+        def _prio(u: str) -> int:
+            ul = u.lower()
+            s = 0
+            for kw, w in (("main", 5), ("runtime", 4), ("vendor", 3), ("app.", 2)):
+                if kw in ul:
+                    s += w
+            return -s
+        script_urls = sorted(script_urls, key=_prio)[:12]
 
         for src in script_urls:
             js_url = src if src.startswith("http") \
                      else urllib.parse.urljoin(base + "/", src)
             try:
-                _, js_body, _ = _fetch(js_url, max_bytes=256 * 1024)
+                _, js_body, _ = _fetch(js_url, max_bytes=512 * 1024)
                 if not js_body:
                     continue
                 for pattern in patterns:
                     for m in re.finditer(pattern, js_body):
-                        full = base + m.group(1)
+                        path = m.group(1)
+                        full = path if path.startswith("http") else base + path
                         if full not in api_urls:
                             api_urls.append(full)
-                        if len(api_urls) >= 10:
+                        if len(api_urls) >= 25:
                             break
             except Exception:
                 pass
 
         if verbose and api_urls:
             print(f"      API endpoints discovered: {len(api_urls)}")
-        return api_urls[:10]
+        return api_urls[:25]
 
     # ------------------------------------------------------------------
     # Route visiting with Playwright

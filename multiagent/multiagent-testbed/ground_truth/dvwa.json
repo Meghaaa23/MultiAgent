@@ -1,0 +1,101 @@
+{
+  "target": "dvwa",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3142",
+    "http://localhost:8001",
+    "http://172.30.0.21",
+    "http://172.30.0.21:80"
+  ],
+  "endpoints_true": [
+    "/setup.php",
+    "/login.php",
+    "/vulnerabilities/xss_r/",
+    "/vulnerabilities/sqli/",
+    "/vulnerabilities/csrf/",
+    "/vulnerabilities/exec/",
+    "/vulnerabilities/upload/"
+  ],
+  "endpoints_auth_gated": [
+    "/index.php",
+    "/security.php",
+    "/phpinfo.php",
+    "/logout.php"
+  ],
+  "ai_surface": null,
+  "expected_findings": [
+    {
+      "id": "dvwa-csp",
+      "type": "missing_header",
+      "name": "Content-Security-Policy",
+      "severity": "Medium",
+      "required": true,
+      "category": "missing_check"
+    },
+    {
+      "id": "dvwa-xcto",
+      "type": "missing_header",
+      "name": "X-Content-Type-Options",
+      "severity": "Low",
+      "required": true,
+      "category": "missing_check"
+    },
+    {
+      "id": "dvwa-server",
+      "type": "server_header",
+      "required": true,
+      "category": "missing_check"
+    },
+    {
+      "id": "dvwa-clickjacking",
+      "type": "clickjacking",
+      "name": "Missing Clickjacking Protection",
+      "severity": "Medium",
+      "required": false,
+      "category": "missing_check",
+      "notes": "Required for Section 3↔STRIDE corroboration when XFO/CSP frame-ancestors absent; optional until live DVWA fixture refreshed"
+    },
+    {
+      "id": "dvwa-setup-unauth",
+      "type": "unauthenticated-access",
+      "path": "/setup.php",
+      "severity": "High",
+      "required": false,
+      "category": "missing_check",
+      "notes": "Scope gap until unauth-admin oracle lands; FN does not fail CI"
+    }
+  ],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf",
+    "fileupload",
+    "cmdi",
+    "broken-auth"
+  ],
+  "must_not_report": [
+    {
+      "type": "sql injection (time-based blind)",
+      "match": "evidence_status_0",
+      "reason": "Client timeout (HTTP 0) must never confirm SLEEP",
+      "category": "logic_bug"
+    },
+    {
+      "type": "cross-site scripting",
+      "match": "confirmed_without_js_execution",
+      "reason": "Confirmed XSS requires js_execution proof",
+      "category": "logic_bug"
+    },
+    {
+      "type": "cve",
+      "id": "CVE-2016-8743",
+      "reason": "Apache banner CVEs are stack noise unless exploit-verified",
+      "category": "logic_bug"
+    },
+    {
+      "type": "authenticated_scan",
+      "reason": "Scanner is black-box unauthenticated only",
+      "category": "logic_bug"
+    }
+  ]
+}

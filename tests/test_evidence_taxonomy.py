@@ -50,7 +50,9 @@ def test_passive_structural_vs_hint_and_brand():
     # Alias maps to the same enum member as PASSIVE_HINT.
     assert EvidenceClass.PASSIVE is EvidenceClass.PASSIVE_HINT
     assert classify_evidence("framework_header") == EvidenceClass.BRAND
+    assert classify_evidence("framework_identified") == EvidenceClass.BRAND
     assert classify_evidence("page_title_ai") == EvidenceClass.BRAND
+    assert classify_evidence("meta_ai_tag") == EvidenceClass.BRAND
     assert classify_evidence("html_brand_signal") == EvidenceClass.BRAND
     assert classify_evidence("unknown_new_detector") == EvidenceClass.BRAND
 
