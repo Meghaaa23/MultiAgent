@@ -380,7 +380,15 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
     lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack"]
 
     app_name = (stack or {}).get("app_identity_name") or ""
-    if app_name:
+    # Never print a stack/runtime name as product identity
+    try:
+        from .webappscanner.app_identity import _is_infra_or_framework_name
+    except Exception:
+        def _is_infra_or_framework_name(s: str) -> bool:  # type: ignore
+            return (s or "").strip().lower() in {
+                "express", "node", "nginx", "apache", "php", "python",
+            }
+    if app_name and not _is_infra_or_framework_name(app_name):
         lines.append(f"App identity: {app_name}")
     else:
         lines.append("App identity: not determined")
@@ -582,6 +590,16 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
         and not e.get("spa_catch_all")
         and not e.get("excluded")
     ]
+    docs_ui_eps = [
+        e for e in (endpoints or [])
+        if e.get("interesting")
+        and not e.get("spa_catch_all")
+        and not e.get("excluded")
+        and any(
+            k in ((urllib.parse.urlsplit(e.get("url") or "").path) or "").lower()
+            for k in ("/docs", "swagger", "redoc", "documentation")
+        )
+    ]
     if openapi_eps:
         spec_url = next(
             (e.get("openapi_spec") for e in openapi_eps if e.get("openapi_spec")),
@@ -611,6 +629,13 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
         n_unique = len({(e.get("method"), e.get("url")) for e in openapi_eps})
         if n_unique > shown:
             lines.append(f"- … and {n_unique - shown} more from OpenAPI spec")
+    elif docs_ui_eps:
+        docs_urls = ", ".join(f"`{e.get('url')}`" for e in docs_ui_eps[:3])
+        lines.append(
+            f"\n OpenAPI/Swagger: docs UI found ({docs_urls}) but no "
+            "machine-readable OpenAPI/Swagger document was retrieved "
+            "(HTML shell or missing spec URL)."
+        )
 
     ft = forms_testing if isinstance(forms_testing, dict) else {}
     n_forms = int(forms_discovered or ft.get("discovered") or 0)
@@ -1833,12 +1858,15 @@ Answer:"""
         ])
 
         section_8 = ""
-        if scan_results and scan_results.get("is_ai_powered"):
-            section_8 = _build_section_8_ai_backdoor(scan_results)
-        elif scan_results is not None:
-            section_8 = _build_section_8_ai_negative(scan_results)
-        if section_8:
-            final = final + "\n\n" + section_8
+        if scan_results is not None:
+            # Top-level is_ai_powered may be True for brand-only; full §8
+            # builder returns "" then — fall through to AI-negative note.
+            if scan_results.get("is_ai_powered"):
+                section_8 = _build_section_8_ai_backdoor(scan_results) or ""
+            if not section_8:
+                section_8 = _build_section_8_ai_negative(scan_results)
+            if section_8:
+                final = final + "\n\n" + section_8
 
         section_9 = ""
         ai_infra_data = (scan_results or {}).get("ai_infrastructure")

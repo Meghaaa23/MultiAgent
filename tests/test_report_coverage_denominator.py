@@ -17,6 +17,11 @@ from multiagent.agents.threat_modeling_agent import (
     _coverage_denominator_text,
 )
 from multiagent.agents.webappscanner.action_agent import ActionAgent
+from multiagent.agents.webappscanner.app_identity import (
+    _is_infra_or_framework_name,
+    _looks_like_app_name,
+    _from_powered_by,
+)
 from multiagent.agents.webappscanner.endpoint_discovery_agent import (
     EndpointDiscoveryAgent,
 )
@@ -148,6 +153,69 @@ class TestAiNegativeSection:
         # Full §8 builder still returns empty when not is_ai_powered
         assert _build_section_8_ai_backdoor(_scan()) == ""
 
+    def test_brand_only_top_level_still_gets_negative_note(self):
+        """is_ai_powered True from brand-only must not blank §8."""
+        sr = _scan(
+            is_ai_powered=True,
+            ai_brand_only=True,
+            has_live_surface=False,
+            ai_fingerprint={
+                "is_ai_powered": False,
+                "ai_brand_only": True,
+                "has_live_surface": False,
+            },
+        )
+        full = _build_section_8_ai_backdoor(sr)
+        assert full == ""
+        neg = _build_section_8_ai_negative(sr)
+        assert "not applicable" in neg.lower() or "branding" in neg.lower()
+
+
+class TestAppIdentityNotStack:
+    def test_express_is_infra(self):
+        assert _is_infra_or_framework_name("Express") is True
+        assert _looks_like_app_name("Express") is False
+        assert _from_powered_by("", {"x-powered-by": "Express"}) == (None, None, "")
+
+    def test_anythingllm_is_product(self):
+        assert _looks_like_app_name("AnythingLLM") is True
+        assert _is_infra_or_framework_name("AnythingLLM") is False
+
+    def test_section2_rejects_express_identity(self):
+        text = _build_section_2(
+            {
+                "technologies": [
+                    {"name": "Node", "category": "Language", "confidence": 0.95},
+                    {"name": "Express", "category": "Framework", "confidence": 0.95},
+                ],
+                "app_identity_name": "Express",
+            },
+            [],
+            [],
+            target_url="http://localhost:3101",
+            scan_results=_scan(forms_discovered=0),
+        )
+        assert "App identity: not determined" in text
+        assert "App identity: Express" not in text
+
+    def test_docs_ui_without_spec_is_stated(self):
+        text = _build_section_2(
+            {"technologies": [{"name": "Express", "category": "Framework", "confidence": 0.9}]},
+            [
+                {
+                    "url": "http://localhost:3101/api/docs",
+                    "method": "GET",
+                    "status": 200,
+                    "source": "probe",
+                    "interesting": True,
+                }
+            ],
+            [],
+            scan_results=_scan(),
+        )
+        assert "OpenAPI/Swagger: docs UI found" in text
+        assert "no machine-readable" in text
+
 
 class TestClickjackingFixDialect:
     def test_express_csp_alt_is_javascript(self):
@@ -196,6 +264,7 @@ if __name__ == "__main__":
         TestSection4Denominator,
         TestSection2IdentityAndForms,
         TestAiNegativeSection,
+        TestAppIdentityNotStack,
         TestClickjackingFixDialect,
         TestOpenApiHelpers,
     ]:

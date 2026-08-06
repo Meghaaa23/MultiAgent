@@ -237,14 +237,19 @@ class WebScannerAgent:
                 )
             
                 if app_identity and app_identity.name:
-                    # Always persist identity fields (both tech dict / string paths).
-                    stack["app_identity_name"]    = app_identity.name
-                    stack["app_identity_version"] = app_identity.version or ""
-                    stack["app_identity"]         = app_identity
+                    from .app_identity import _is_infra_or_framework_name
+                    product_name = app_identity.name
+                    # Stack/runtime names must not become product identity.
+                    if _is_infra_or_framework_name(product_name):
+                        product_name = None
+                    if product_name:
+                        stack["app_identity_name"]    = product_name
+                        stack["app_identity_version"] = app_identity.version or ""
+                    stack["app_identity"] = app_identity
                     existing = stack.get("technologies", [])
-                    if existing and isinstance(existing[0], dict):
+                    if product_name and existing and isinstance(existing[0], dict):
                         current_summary = stack.get("stack_summary", "")
-                        app_str = app_identity.name
+                        app_str = product_name
                         if app_identity.version:
                             app_str += f" {app_identity.version}"
                         if app_str.lower() not in current_summary.lower():
@@ -253,9 +258,9 @@ class WebScannerAgent:
                                 if current_summary and current_summary != "Unknown"
                                 else app_str
                             )
-                    else:
+                    elif product_name:
                         ver_str    = f" {app_identity.version}" if app_identity.version else ""
-                        name_entry = f"{app_identity.name}{ver_str}"
+                        name_entry = f"{product_name}{ver_str}"
                         merged     = [name_entry] + list(app_identity.technologies or []) + list(existing or [])
                         seen_t: set = set()
                         deduped_t   = []
@@ -266,9 +271,10 @@ class WebScannerAgent:
                                 deduped_t.append(t)
                         stack["technologies"] = deduped_t
                         if "Unknown" in stack.get("stack_summary", ""):
-                            stack["stack_summary"] = app_identity.name
+                            stack["stack_summary"] = product_name
                     if verbose:
-                        print(f"   App identity: {app_identity.name!r} v{app_identity.version or '?'} [{app_identity.confidence}]\n")
+                        shown = product_name or "(not determined — stack-only signal)"
+                        print(f"   App identity: {shown!r} v{app_identity.version or '?'} [{app_identity.confidence}]\n")
             except Exception as e:
                 logger.debug(f"App identity failed: {e}")
 

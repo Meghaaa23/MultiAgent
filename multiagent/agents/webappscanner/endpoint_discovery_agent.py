@@ -473,12 +473,83 @@ class EndpointDiscoveryAgent:
     
         verified.sort(key=lambda x: (not x.get("interesting"), x.get("url", "")))
 
+        # Second-pass OpenAPI: if a docs UI survived as interesting, parse it
+        # even when the early passive-file pass only saw SPA shells.
+        try:
+            oa_extra = await self._enrich_openapi_from_discovered(base, verified)
+            if oa_extra:
+                existing_keys = {
+                    (e.get("method", "GET"), self._normalise_url(e.get("url", "")))
+                    for e in verified
+                }
+                added = 0
+                for ep in oa_extra:
+                    key = (ep.get("method", "GET"), self._normalise_url(ep.get("url", "")))
+                    if key in existing_keys:
+                        continue
+                    verified.append(ep)
+                    existing_keys.add(key)
+                    added += 1
+                if verbose and added:
+                    print(f"    OpenAPI enrichment: +{added} operation(s) from docs/spec")
+        except Exception as e:
+            logger.debug("OpenAPI enrichment failed: %s", e)
+
+        verified.sort(key=lambda x: (not x.get("interesting"), x.get("url", "")))
+
         if verbose:
             interesting = [e for e in verified if e.get("interesting")]
             print(f"   ✓ Discovered {len(verified)} endpoints "
                   f"({len(interesting)} interesting)\n")
 
         return verified
+
+    async def _enrich_openapi_from_discovered(
+        self, base: str, endpoints: List[Dict]
+    ) -> List[Dict]:
+        """Parse OpenAPI from any discovered docs/spec URLs."""
+        candidates: List[str] = []
+        for ep in endpoints:
+            url = ep.get("url") or ""
+            if not url:
+                continue
+            path = (urllib.parse.urlsplit(url).path or "").lower()
+            if any(
+                k in path
+                for k in (
+                    "/docs", "swagger", "redoc", "openapi", "docs-json",
+                    "documentation",
+                )
+            ):
+                candidates.append(url)
+        # Always retry well-known spec paths with Accept: JSON
+        for path in (
+            "/api/openapi.json", "/openapi.json", "/api/docs/json",
+            "/api/docs-json", "/docs-json", "/api/swagger.json",
+        ):
+            candidates.append(base.rstrip("/") + path)
+
+        seen_cands: set = set()
+        for cand in candidates:
+            if cand in seen_cands:
+                continue
+            seen_cands.add(cand)
+            # Docs HTML → follow refs
+            path_l = (urllib.parse.urlsplit(cand).path or "").lower()
+            if any(k in path_l for k in ("/docs", "swagger-ui", "redoc")) and not path_l.endswith(
+                (".json", ".yaml", ".yml")
+            ):
+                html = await self._fetch_text(cand)
+                if html and not html.lstrip().startswith(("{", "[")):
+                    for ref in self._extract_openapi_refs_from_html(html, base):
+                        url = ref if ref.startswith("http") else urljoin(base, ref)
+                        parsed = await self._endpoints_from_openapi_url(url, base)
+                        if parsed:
+                            return parsed
+            parsed = await self._endpoints_from_openapi_url(cand, base)
+            if parsed:
+                return parsed
+        return []
 
 
 
@@ -763,27 +834,36 @@ class EndpointDiscoveryAgent:
         swagger_paths = [
             "/swagger.json", "/openapi.json",
             "/api/swagger.json", "/api/openapi.json",
-            "/api/docs/openapi.json", "/v1/openapi.json",
-            "/openapi.yaml", "/openapi.yml",
+            "/api/docs/openapi.json", "/api/docs/json",
+            "/api/docs-json", "/docs-json", "/docs/json",
+            "/v1/openapi.json", "/openapi.yaml", "/openapi.yml",
             "/api/openapi.yaml", "/swagger/v1/swagger.json",
+            "/api/v1/openapi.json", "/api/swagger-json",
         ]
         docs_ui_paths = (
             "/api/docs", "/docs", "/swagger", "/swagger-ui",
-            "/swagger-ui/", "/api/swagger", "/redoc",
+            "/swagger-ui/", "/api/swagger", "/redoc", "/api/redoc",
+            "/api/documentation", "/documentation",
         )
 
-        # Spec URLs referenced from HTML docs UIs
+        # Spec URLs referenced from HTML docs UIs (and JSON Accept on the UI itself)
         for ui_path in docs_ui_paths:
-            html = await self._fetch_text(f"{base}{ui_path}")
+            ui_url = f"{base}{ui_path}"
+            # Some frameworks serve the OpenAPI document at the docs path when
+            # Accept: application/json is set (NestJS /docs-json pattern).
+            parsed = await self._endpoints_from_openapi_url(ui_url, base)
+            if parsed:
+                return parsed
+            html = await self._fetch_text(ui_url)
             if not html:
                 continue
             for ref in self._extract_openapi_refs_from_html(html, base):
-                if ref not in swagger_paths and not ref.startswith("http"):
-                    swagger_paths.append(ref)
-                elif ref.startswith("http"):
+                if ref.startswith("http"):
                     parsed = await self._endpoints_from_openapi_url(ref, base)
                     if parsed:
                         return parsed
+                elif ref not in swagger_paths:
+                    swagger_paths.append(ref)
 
         for path in swagger_paths:
             url = path if path.startswith("http") else f"{base}{path}"
@@ -799,19 +879,25 @@ class EndpointDiscoveryAgent:
             return []
         refs: List[str] = []
         patterns = [
-            r"""url\s*[:=]\s*["']([^"']+(?:openapi|swagger)[^"']*)["']""",
+            r"""url\s*[:=]\s*["']([^"']+(?:openapi|swagger|docs-json|docs/json)[^"']*)["']""",
             r"""["']([^"']+/openapi\.(?:json|ya?ml))["']""",
             r"""["']([^"']+/swagger\.(?:json|ya?ml))["']""",
+            r"""["']([^"']+(?:docs-json|/docs/json|/api/docs/json))["']""",
             r"""["']((?:https?:)?//[^"']+(?:openapi|swagger)\.(?:json|ya?ml))["']""",
             r"""spec(?:Url|URL)?\s*[:=]\s*["']([^"']+)["']""",
+            r"""swaggerUrl\s*[:=]\s*["']([^"']+)["']""",
+            r"""configUrl\s*[:=]\s*["']([^"']+)["']""",
+            r"""href=["']([^"']*(?:openapi|swagger)[^"']*)["']""",
         ]
         for pat in patterns:
             for m in re.findall(pat, html, flags=re.I):
                 ref = (m or "").strip()
-                if not ref:
+                if not ref or ref.startswith("data:") or ref.startswith("#"):
                     continue
                 if ref.startswith("//"):
                     ref = "http:" + ref
+                if ref.startswith("./"):
+                    ref = urljoin(base + "/", ref[2:])
                 if ref.startswith("http") or ref.startswith("/"):
                     refs.append(ref)
         # Dedup, preserve order

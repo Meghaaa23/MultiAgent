@@ -279,9 +279,12 @@ def _pick_preferred_wappalyzer_app(
         if not isinstance(tech, dict):
             continue
         name = (tech.get("name") or "").strip()
-        if not name:
+        if not name or _is_infra_or_framework_name(name):
             continue
-        category = tech.get("category") or ""
+        category = (tech.get("category") or "").strip()
+        # Framework/Language/Server are stack, not product identity
+        if category in ("Framework", "Language", "Server", "CDN", "Analytics"):
+            continue
         if category == "CMS":
             return tech  # CMS is authoritative
         if category == "Other" and name not in (
@@ -416,6 +419,11 @@ async def detect_app_identity(
         _build_cve_queries(identity, technologies)
         return identity
 
+    # Drop infrastructure/framework names that slipped through extractors
+    signals = [
+        s for s in signals
+        if s[0] and _looks_like_app_name(s[0]) and not _is_infra_or_framework_name(s[0])
+    ]
     signals.sort(key=lambda s: s[3], reverse=True)
 
     best = next(
@@ -514,6 +522,33 @@ def _build_cve_queries(identity: AppIdentity,
     identity.cve_queries = queries
 
 
+# Runtimes / frameworks / servers are stack signals, not product identity.
+_INFRA_OR_FRAMEWORK_NAMES = {
+    "express", "node", "nodejs", "node.js", "nginx", "apache", "httpd",
+    "iis", "tomcat", "jetty", "uvicorn", "gunicorn", "werkzeug", "php",
+    "python", "ruby", "rails", "django", "flask", "fastapi", "laravel",
+    "symfony", "spring", "spring boot", "koa", "fastify", "nestjs",
+    "next.js", "nextjs", "nuxt", "react", "vue", "angular", "svelte",
+    "jquery", "bootstrap", "webpack", "vite", "caddy", "traefik",
+    "cloudflare", "varnish", "haproxy", "openresty", "passenger",
+    "puma", "unicorn", "webrick", "cherrypy", "tornado", "aiohttp",
+    "asp.net", "asp.net core", ".net", "kestrel", "http/2", "http/3",
+    "openssl", "ubuntu", "debian", "alpine", "centos", "redhat",
+}
+
+
+def _is_infra_or_framework_name(s: str) -> bool:
+    n = re.sub(r"\s+", " ", (s or "").strip().lower())
+    n = re.sub(r"\s*\d[\d.]*\s*$", "", n).strip()
+    if not n:
+        return True
+    if n in _INFRA_OR_FRAMEWORK_NAMES:
+        return True
+    # x-powered-by style "Express" / "PHP/8.2"
+    base = n.split("/")[0].strip()
+    return base in _INFRA_OR_FRAMEWORK_NAMES
+
+
 def _looks_like_app_name(s: str) -> bool:
     if not s or not isinstance(s, str):
         return False
@@ -527,6 +562,9 @@ def _looks_like_app_name(s: str) -> bool:
     if ':' in s or ';' in s:
         return False
     if re.match(r'^\d+$', s):
+        return False
+    # Never promote stack/runtime names to product identity
+    if _is_infra_or_framework_name(s):
         return False
 
     last_word       = s.split()[-1]
