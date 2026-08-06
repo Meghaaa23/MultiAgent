@@ -152,6 +152,39 @@ class TestSection2IdentityAndForms:
         assert "Evaluation metrics" in text
         assert "Prompt injection attempted:" in text
 
+    def test_excluded_list_reconciles_with_denominator_when_over_ten(self):
+        # Section 2's enumerated excluded list truncates at 10 for readability;
+        # Section 4's coverage line reports the true total (e.g. 24). The two
+        # must reconcile in the same section rather than silently disagreeing.
+        excluded = [
+            {
+                "url": f"http://localhost:3101/api/path{i}",
+                "method": "GET",
+                "status": 200,
+                "source": "probe",
+                "interesting": False,
+                "spa_catch_all": True,
+                "excluded": True,
+                "exclude_reason": "SPA/soft-404 shell — not a real endpoint",
+            }
+            for i in range(24)
+        ]
+        scan = _scan(endpoints_discovered=_scan()["endpoints_discovered"][:2] + excluded)
+        text = _build_section_2(
+            {"technologies": [{"name": "Express", "category": "Framework", "confidence": 0.95}]},
+            scan["endpoints_discovered"],
+            [],
+            target_url="http://localhost:3101",
+            forms_discovered=1,
+            forms_testing=scan["forms_testing"],
+            scan_results=scan,
+        )
+        assert text.count("api/path") == 10
+        assert "...and 14 more" in text
+
+        denom = _coverage_denominator_text(scan)
+        assert "24 candidate path(s) excluded as soft-404" in denom
+
     def test_openapi_enumerated_listed(self):
         eps = _scan()["endpoints_discovered"] + [
             {

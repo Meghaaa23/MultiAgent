@@ -577,12 +577,16 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
 
     if excluded_eps:
         lines.append("\n Excluded endpoints (SPA/soft-404 — not attack surface)")
-        for ep in excluded_eps[:10]:
+        shown_excluded = excluded_eps[:10]
+        for ep in shown_excluded:
             reason = ep.get("exclude_reason") or ep.get("verification") or "SPA catch-all"
             lines.append(
                 f"- [{ep.get('status','?')}] {ep.get('method','GET')} "
                 f"{ep.get('url','')} — {reason}"
             )
+        remaining = len(excluded_eps) - len(shown_excluded)
+        if remaining > 0:
+            lines.append(f"- ...and {remaining} more (see JSON output for full list)")
 
     openapi_eps = [
         e for e in (endpoints or [])
