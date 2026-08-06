@@ -374,17 +374,31 @@ def _cves_for_tech(tech_name: str, cves: Optional[List[Dict]]) -> List[Dict]:
 
 def _build_section_2(stack, endpoints, cves, target_url: str = "",
                      forms_discovered: int = 0):
-    lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack & Known CVEs"]
+    # CVE mapping disabled for now — fingerprint / stack only.
+    lines = [" 2. TECHNOLOGY STACK & ATTACK SURFACE", " Technology Stack"]
 
     technologies = stack.get("technologies") or []
     noise_words  = {"content", "unknown", "none", "null", "n/a",
                     "signals", "content signals", "true", "false"}
+    # Header leftovers that are not technologies
+    noise_tech = {
+        "x-robots-tag", "x-robots-tag: noindex", "noindex",
+        "nosniff", "sameorigin",
+    }
 
-    matched_cve_ids: set = set()
+    def _is_noise_tech(name: str) -> bool:
+        n = (name or "").strip().lower()
+        if not n or n in noise_words or n in noise_tech:
+            return True
+        if n.startswith("x-") and ":" in n:
+            return True
+        return False
 
     if technologies and isinstance(technologies[0], dict):
         by_cat: Dict[str, list] = {}
         for dt in technologies:
+            if _is_noise_tech(dt.get("name", "")):
+                continue
             by_cat.setdefault(dt.get("category", "Other"), []).append(dt)
 
         cat_order     = ["CMS", "Server", "Language", "Framework", "CDN",
@@ -403,17 +417,14 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
                 ver     = dt.get("version", "")
                 conf    = dt.get("confidence", 0)
                 display = f"{name} {ver}".strip() if ver else name
-                lines.append(f"- {display}  [{cat}, {conf:.0%} confidence]")
+                try:
+                    conf_s = f"{float(conf):.0%}"
+                except (TypeError, ValueError):
+                    conf_s = str(conf)
+                lines.append(f"- {display}  [{cat}, {conf_s} confidence]")
 
-                tech_cves = _cves_for_tech(name, cves)
-                if tech_cves:
-                    for c in tech_cves:
-                        cid = c.get("cve_id", "") or c.get("title", "Unknown")
-                        if c.get("cve_id"):
-                            matched_cve_ids.add(c["cve_id"])
-                        lines.append(f"      - {cid}")
-                else:
-                    lines.append("      None found")
+        if not by_cat:
+            technologies = []
 
     elif technologies:
         confirmed = [
@@ -422,19 +433,31 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
             and len(str(t).strip()) > 2
             and "signal" not in str(t).lower()
             and str(t).strip().lower() not in noise_words
+            and not _is_noise_tech(str(t))
         ]
         if confirmed:
             lines.extend(f"- {t}" for t in confirmed)
         else:
             technologies = []
 
-    if not technologies:
+    if not technologies or (
+        isinstance(technologies[0], dict)
+        and not any(
+            not _is_noise_tech(dt.get("name", ""))
+            for dt in technologies if isinstance(dt, dict)
+        )
+    ):
+        # Prefer app identity / named stack fields over empty tech list
+        app_name = stack.get("app_identity_name") or ""
+        if app_name:
+            lines.append(f"- {app_name}")
         summary      = stack.get("stack_summary", "")
         noise_summary = {"unknown", "unknown (no technology confirmed from http evidence)", ""}
         if summary and summary.strip().lower() not in noise_summary:
-            lines.append(f"- {summary}")
+            if not app_name or app_name.lower() not in summary.lower():
+                lines.append(f"- {summary}")
         else:
-            added = False
+            added = bool(app_name)
             for field in ("server", "language", "framework", "frontend", "cms", "cdn"):
                 val = stack.get(field)
                 if val and str(val).strip().lower() not in noise_words:
@@ -453,23 +476,6 @@ def _build_section_2(stack, endpoints, cves, target_url: str = "",
                         "equivalent) headers observed. See Section 3 for "
                         "detected headers."
                     )
-
-    if cves:
-        orphaned = [
-            c for c in cves
-            if c.get("cve_id") and c["cve_id"] not in matched_cve_ids
-        ]
-        seen_orphan_ids: set = set()
-        orphaned_deduped = []
-        for c in orphaned:
-            if c["cve_id"] in seen_orphan_ids:
-                continue
-            seen_orphan_ids.add(c["cve_id"])
-            orphaned_deduped.append(c)
-        if orphaned_deduped:
-            lines.append("- Other detected components")
-            for c in orphaned_deduped:
-                lines.append(f"      - {c.get('cve_id','Unknown')}")
 
     unverified = stack.get("unverified_hints", [])
     if unverified:
@@ -716,15 +722,17 @@ def _build_section_5(stride_threats, confirmed_vulns=None):
             break
 
     for t in threats:
-        evidence = t.get("evidence", "")
+        evidence = t.get("evidence", "") or ""
         if (
             clickjacking_finding
             and "Clickjacking" in (t.get("threat") or "")
         ):
-            evidence = (
-                f"See Section 3: {clickjacking_finding.get('type')} — "
-                f"{evidence}"
-            )
+            # Scanner may already set "See Section 3: …" — do not double-prefix.
+            if "see section 3" not in evidence.lower():
+                evidence = (
+                    f"See Section 3: {clickjacking_finding.get('type')} — "
+                    f"{evidence}"
+                )
         lines += [
             "",
             f" {t.get('category','?')}: {t.get('threat','?')}",

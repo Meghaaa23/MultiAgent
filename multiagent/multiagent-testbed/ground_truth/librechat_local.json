@@ -12,7 +12,7 @@
     "/api/user"
   ],
   "ai_surface": null,
-  "notes": "Local LibreChat SPA. Soft-404 /admin,/dashboard,/manage,/graphql HTML shells are not real endpoints. Headers-only unauth surface is expected.",
+  "notes": "Local LibreChat SPA. Soft-404 /admin,/dashboard,/manage,/graphql HTML shells are not real endpoints. Headers-only unauth surface is expected. Scanner should fingerprint LibreChat as AI-powered even when chat/ask APIs are auth-gated; NVD CVE mapping is off (fingerprint-only).",
   "expected_findings": [
     {
       "id": "lc-csp",

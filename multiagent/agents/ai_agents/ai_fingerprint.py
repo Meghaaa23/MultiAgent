@@ -112,8 +112,13 @@ FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
         "capabilities": ["chat", "rag", "memory"],
     },
     "LibreChat": {
-        "paths":       ["/api/messages", "/api/ask", "/api/convos"],
-        "js_strings":  ["librechat", "LibreChat"],
+        # /api/config and /api/user are reachable unauth (200/401); ask/messages
+        # are often auth-gated — still valid LibreChat identity signals.
+        "paths":       [
+            "/api/messages", "/api/ask", "/api/convos",
+            "/api/config", "/api/user", "/api/search", "/api/agents",
+        ],
+        "js_strings":  ["librechat", "LibreChat", "LibreChatConfig"],
         "cookie_names":["refreshToken"],
         "capabilities": ["chat", "tool_calling", "image_generation", "web_search"],
     },
@@ -658,7 +663,13 @@ class AIFingerprintAgent:
 
         total_score = sum(ev.weight for ev in all_evidence)
         confidence  = score_to_confidence(total_score)
-        is_ai       = total_score >= 26
+        # Named AI app/framework (LibreChat, Open WebUI, …) is sufficient even
+        # when chat/ask APIs are auth-gated and the numeric score stays modest.
+        is_ai = total_score >= 26 or (
+            bool(detected_framework)
+            and detected_framework in FRAMEWORK_SIGNATURES
+            and detected_framework not in {"OpenAI-compatible"}
+        )
 
         atlas: List[str] = []
         for ep in ml_endpoints:

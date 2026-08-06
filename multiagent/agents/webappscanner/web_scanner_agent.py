@@ -328,8 +328,43 @@ class WebScannerAgent:
 
             raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
             confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers"))
-            is_ai_powered = raw_is_ai and (confidence == "high" or has_concrete)
+            has_concrete = bool(
+                ai_fingerprint.get("ml_endpoints")
+                or ai_fingerprint.get("ai_headers")
+            )
+            # Known AI chat products (LibreChat, Open WebUI, …) are AI-powered
+            # even when ask/chat APIs are auth-gated and score stays medium/low.
+            _KNOWN_AI_APPS = (
+                "librechat", "open webui", "open-webui", "flowise", "dify",
+                "anythingllm", "lobechat", "lobe-chat", "langflow", "openhands",
+            )
+            fw = (
+                (ai_fingerprint.get("framework") or "")
+                + " "
+                + (ai_fingerprint.get("app_layer") or "")
+                + " "
+                + (stack.get("app_identity_name") or "")
+            ).lower()
+            known_ai_app = any(k in fw for k in _KNOWN_AI_APPS)
+            named_framework = bool(ai_fingerprint.get("framework"))
+            # Trust AI fingerprint when it named a framework (LibreChat etc.) even
+            # if score lands in the "low" band (framework_identified alone = 30).
+            is_ai_powered = (
+                (raw_is_ai and (
+                    confidence in ("high", "very_high", "medium")
+                    or has_concrete
+                    or named_framework
+                ))
+                or known_ai_app
+            )
+            if known_ai_app and ai_fingerprint is not None:
+                ai_fingerprint["is_ai_powered"] = True
+                if not ai_fingerprint.get("framework") and stack.get("app_identity_name"):
+                    ai_fingerprint["framework"] = stack.get("app_identity_name")
+                ai_fingerprint.setdefault(
+                    "ai_detection_note",
+                    "Known AI chat application — chat/ask surfaces may be auth-gated",
+                )
 
             if is_ai_powered:
                 if verbose:
@@ -371,6 +406,43 @@ class WebScannerAgent:
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
 
+        # Classic stack identity alone can mark known AI chat apps (e.g. LibreChat)
+        # when the AI fingerprinter scored below threshold or threw.
+        if not is_ai_powered:
+            _KNOWN_AI_APPS = (
+                "librechat", "open webui", "open-webui", "flowise", "dify",
+                "anythingllm", "lobechat", "lobe-chat", "langflow", "openhands",
+            )
+            identity = (
+                (stack.get("app_identity_name") or "")
+                + " "
+                + (stack.get("stack_summary") or "")
+                + " "
+                + ((ai_fingerprint or {}).get("framework") or "")
+            ).lower()
+            if any(k in identity for k in _KNOWN_AI_APPS):
+                is_ai_powered = True
+                if ai_fingerprint is None:
+                    ai_fingerprint = {
+                        "is_ai_powered": True,
+                        "framework": stack.get("app_identity_name") or "LibreChat",
+                        "confidence": "medium",
+                        "ml_endpoints": [],
+                        "ai_headers": [],
+                        "ml_libraries": [],
+                    }
+                else:
+                    ai_fingerprint["is_ai_powered"] = True
+                    if not ai_fingerprint.get("framework"):
+                        ai_fingerprint["framework"] = (
+                            stack.get("app_identity_name") or "LibreChat"
+                        )
+                if verbose:
+                    print(
+                        "  AI-powered app inferred from stack identity "
+                        f"({stack.get('app_identity_name') or ai_fingerprint.get('framework')})\n"
+                    )
+
         ai_infra_result = None
         try:
             if ai_fingerprint and ai_fingerprint.get("is_ai_powered"):
@@ -384,67 +456,11 @@ class WebScannerAgent:
         except Exception as e:
             logging.warning(f"AIInfraAgent failed: {e}")
 
+        # CVE mapping disabled for now — fingerprint / stack only.
+        # Orphan NVD rows were drowning Section 2 (e.g. LibreChat CVE dumps).
+        verified_cves = []
         if verbose:
-            print(" CVE Lookup ")
-        try:
-            app_name    = stack.get("app_identity_name", "")
-            app_version = stack.get("app_identity_version", "")
-
-            if not app_name and app_identity and app_identity.name:
-                app_name    = app_identity.name
-                app_version = app_identity.version or ""
-
-            if is_ai_powered and app_name:
-                cve_queries = []
-                if app_version:
-                    cve_queries.append(f"{app_name} {app_version}")
-                cve_queries.append(app_name)
-                ml_libs = (ai_fingerprint or {}).get("ml_libraries", [])
-                for lib in ml_libs[:2]:
-                    if lib and lib not in cve_queries:
-                        cve_queries.append(lib)
-                cve_stack = {
-                    "technologies":  cve_queries,
-                    "stack_summary": app_name,
-                    "app_name":      app_name,
-                    "app_version":   app_version,
-                }
-                verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
-                
-
-            elif not is_ai_powered:
-                
-                cve_stack = {
-                    "technologies": stack.get("technologies", []),
-                    "stack_summary": stack.get("stack_summary", ""),
-                    "server": stack.get("server"),
-                    "framework": stack.get("framework"),
-                    "cms": stack.get("cms"),
-                    "language": stack.get("language"),
-                }
-                print("\n===== STACK SENT TO CVE LOOKUP =====")
-                pprint(cve_stack)
-                print("====================================")
-                verified_cves = await self.cve_pipeline.lookup(cve_stack, verbose=verbose)
-                verified_cves = verified_cves or []
-                
-                print("\n===== TECHNOLOGIES =====")
-                pprint(stack["technologies"])
-                print("========================")
-                print("\n========== VERIFIED CVES ==========")
-                
-                pprint(verified_cves)
-                print("===================================\n")
-
-            else:
-                verified_cves = []
-
-        except Exception as e:
-            logger.warning(f"CVE lookup error: {e}")
-
-        if verbose:
-            cve_count = len(verified_cves) if verified_cves is not None else "lookup failed"
-            print(f"   Verified CVEs: {cve_count}\n")
+            print(" CVE Lookup — skipped (fingerprint-only mode)\n")
 
         if verbose:
             print("Deep Browser Crawl (Yura-style shared session)...")
