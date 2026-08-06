@@ -21,7 +21,7 @@ from multiagent.agents.webappscanner.fingerprint_agent import (
     _normalise_category,
     _collapse_premium_duplicates,
 )
-from multiagent.agents.ai_agents.ai_fingerprint import EVIDENCE_WEIGHTS
+from multiagent.agents.ai_agents.ai_evidence_scoring import evidence_weight
 
 
 class TestDetectAppIdentityCrashFix:
@@ -94,4 +94,4 @@ class TestPremiumCollapse:
 
 class TestSseChunkedWeight:
     def test_weight_is_low(self):
-        assert EVIDENCE_WEIGHTS["sse_chunked_transfer"] <= 3
+        assert evidence_weight("sse_chunked_transfer") <= 3
