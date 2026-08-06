@@ -837,6 +837,34 @@ async def scan_web_application(request: Request):
                 "not_assessed_count": len(scan_data.get("not_assessed_endpoints") or []),
                 "scan_duration":      scan_data.get("scan_duration", 0),
                 "coverage_assessment": scan_data.get("coverage_assessment") or {},
+                # Table II eval columns (AI surfaces / PI / coverage)
+                "eval_metrics":       scan_data.get("eval_metrics") or {},
+                "ai_surfaces_discovered": (
+                    (scan_data.get("eval_metrics") or {}).get("ai_surfaces_discovered", 0)
+                ),
+                "ai_surfaces_unauthenticated": (
+                    (scan_data.get("eval_metrics") or {}).get(
+                        "ai_surfaces_unauthenticated", 0
+                    )
+                ),
+                "prompt_injection_attempted": (
+                    (scan_data.get("eval_metrics") or {}).get(
+                        "prompt_injection_attempted", 0
+                    )
+                ),
+                "prompt_injection_confirmed": (
+                    (scan_data.get("eval_metrics") or {}).get(
+                        "prompt_injection_confirmed", 0
+                    )
+                ),
+                "endpoint_coverage_percent": (
+                    (scan_data.get("eval_metrics") or {}).get(
+                        "endpoint_coverage_percent",
+                        (scan_data.get("coverage_assessment") or {}).get(
+                            "coverage_percent", 0
+                        ),
+                    )
+                ),
                 # AI backdoor fields
                 "is_ai_powered":      scan_data.get("is_ai_powered", False),
                 "avid_findings":      scan_data.get("avid_findings", 0),

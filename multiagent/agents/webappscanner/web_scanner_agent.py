@@ -539,6 +539,7 @@ class WebScannerAgent:
         if verbose:
             print("Vulnerability Testing...")
         raw_findings: List[Dict] = []
+        forms_exercised: List[Dict] = []
         try:
             disco_paths = [
                 ep.get("url", "") for ep in discovered_endpoints
@@ -553,40 +554,34 @@ class WebScannerAgent:
                 u for u in all_urls
                 if "/api/" in u or "/rest/" in u or "/graphql" in u
             )
-            raw_findings = await self.vuln_tester.test_all(
+            vuln_bundle = await self.vuln_tester.test_all(
                 forms=all_forms, urls=all_urls, page_html=html,
                 target_url=target_url,
                 discovered_paths=disco_paths,
                 shared_headers=initial_headers,
                 verbose=verbose,
             )
+            if isinstance(vuln_bundle, dict):
+                raw_findings = vuln_bundle.get("findings") or []
+                forms_exercised = vuln_bundle.get("forms_exercised") or []
+            else:
+                raw_findings = vuln_bundle or []
+                forms_exercised = getattr(
+                    self.vuln_tester, "last_forms_exercised", None
+                ) or []
         except Exception as e:
             logger.error(f"Vuln testing failed: {e}")
+            forms_exercised = []
 
         # Form testing denominator for Section 2 (never silent when forms exist).
-        form_findings = [
-            f for f in (raw_findings or [])
-            if any(
-                k in (f.get("type") or "").lower()
-                for k in ("xss", "sql", "csrf")
-            )
-            and (
-                "form" in (f.get("details") or "").lower()
-                or any(
-                    (frm.get("action") or "")
-                    and (frm.get("action") or "") in (f.get("location") or "")
-                    for frm in (all_forms or [])
-                )
-                or "csrf" in (f.get("type") or "").lower()
-            )
-        ]
+        per_form = list(forms_exercised or [])
+        with_findings = sum(1 for r in per_form if r.get("outcome") == "finding")
         forms_testing = {
             "discovered": len(all_forms or []),
-            "tested": min(len(all_forms or []), 10),
-            "with_findings": len({
-                (f.get("type"), f.get("location")) for f in form_findings
-            }),
+            "tested": len(per_form) if per_form else min(len(all_forms or []), 10),
+            "with_findings": with_findings,
             "errored": 0,
+            "per_form": per_form,
         }
 
         if verbose:
@@ -785,11 +780,18 @@ class WebScannerAgent:
         auth_wall_dominated = auth_gated_count > 0 and (
             auth_gated_count >= max(assessed_count, 1) or assessed_count <= 1
         )
+        discovered_ep_count = len(discovered_endpoints or [])
+        coverage_pct = (
+            round(100.0 * assessed_count / discovered_ep_count, 1)
+            if discovered_ep_count else 0.0
+        )
         coverage_assessment = {
             "scope": "blackbox_unauth",
             "assessed_count": assessed_count,
             "auth_gated_count": auth_gated_count,
             "auth_wall_dominated": auth_wall_dominated,
+            "discovered_count": discovered_ep_count,
+            "coverage_percent": coverage_pct,
             "note": (
                 f"Assessed surface limited to pre-authentication endpoints; "
                 f"{auth_gated_count} functional surface(s) were auth-gated "
@@ -797,6 +799,49 @@ class WebScannerAgent:
                 if auth_gated_count > 0 else
                 "Full discovered pre-auth surface assessed."
             ),
+        }
+
+        # Table II-style eval columns (surfaces / PI / coverage)
+        ai_fp = ai_fingerprint or {}
+        ml_eps = list(ai_fp.get("ml_endpoints") or [])
+        auth_req = ai_fp.get("auth_required_paths") or []
+        auth_urls = {
+            (a.get("endpoint") if isinstance(a, dict) else str(a))
+            for a in auth_req
+        }
+        ai_unauth = [e for e in ml_eps if e not in auth_urls]
+        classified = ai_fp.get("classified_endpoints") or []
+        if not ml_eps and classified:
+            ai_surfaces_discovered = len(classified)
+            ai_surfaces_unauth = sum(
+                1 for e in classified
+                if isinstance(e, dict) and not e.get("auth_required")
+            )
+        else:
+            ai_surfaces_discovered = len(ml_eps)
+            ai_surfaces_unauth = len(ai_unauth)
+        ai_vr = ai_vuln_results or {}
+        eval_metrics = {
+            "ai_surfaces_discovered": ai_surfaces_discovered,
+            "ai_surfaces_unauthenticated": ai_surfaces_unauth,
+            "prompt_injection_attempted": int(
+                ai_vr.get("prompt_injection_attempts")
+                or ai_vr.get("requests_sent")
+                or 0
+            ),
+            "prompt_injection_confirmed": int(
+                ai_vr.get("prompt_injection_confirmed")
+                or len(ai_vr.get("confirmed_ai_vulns") or [])
+            ),
+            "prompt_injection_potential": int(
+                ai_vr.get("prompt_injection_potential")
+                or len(ai_vr.get("potential_ai_vulns") or [])
+            ),
+            "endpoint_coverage_percent": coverage_pct,
+            "forms_discovered": len(all_forms or []),
+            "forms_tested": int((forms_testing or {}).get("tested") or 0),
+            "has_live_surface": bool(ai_fp.get("has_live_surface")),
+            "ai_brand_only": bool(brand_only_ai),
         }
 
         # Align STRIDE clickjacking evidence with Section 3 finding name
@@ -826,6 +871,7 @@ class WebScannerAgent:
             "endpoints_discovered":   report_endpoints,
             "not_assessed_endpoints": not_assessed_endpoints,
             "coverage_assessment":    coverage_assessment,
+            "eval_metrics":           eval_metrics,
             "vulnerabilities":        all_findings,
             "stride_threats":         stride_threats,
             "confirmed_count":        sum(1 for f in all_findings if f.get("status") == "Confirmed"),

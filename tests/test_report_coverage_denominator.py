@@ -12,9 +12,11 @@ sys.path.insert(0, os.path.join(ROOT, "multiagent"))
 from multiagent.agents.threat_modeling_agent import (
     _build_section_2,
     _build_section_4,
+    _build_section_7,
     _build_section_8_ai_backdoor,
     _build_section_8_ai_negative,
     _coverage_denominator_text,
+    _map_finding_to_owasp,
 )
 from multiagent.agents.webappscanner.action_agent import ActionAgent
 from multiagent.agents.webappscanner.app_identity import (
@@ -62,11 +64,33 @@ def _scan(**kwargs):
             "tested": 1,
             "with_findings": 0,
             "errored": 0,
+            "per_form": [
+                {
+                    "action": "http://localhost:3101/login",
+                    "method": "POST",
+                    "input_fields": ["username", "password"],
+                    "tests_run": ["sqli"],
+                    "outcome": "clean",
+                    "finding_types": [],
+                    "response_note": "no XSS/SQLi/CSRF findings (xss skipped (no text fields); csrf skipped (SPA/login/public))",
+                }
+            ],
+        },
+        "eval_metrics": {
+            "ai_surfaces_discovered": 0,
+            "ai_surfaces_unauthenticated": 0,
+            "prompt_injection_attempted": 0,
+            "prompt_injection_confirmed": 0,
+            "prompt_injection_potential": 0,
+            "endpoint_coverage_percent": 50.0,
+            "forms_discovered": 1,
+            "forms_tested": 1,
         },
         "not_assessed_endpoints": [],
         "is_ai_powered": False,
         "ai_brand_only": False,
         "has_live_surface": False,
+        "urls_discovered": 3,
     }
     base.update(kwargs)
     return base
@@ -122,6 +146,11 @@ class TestSection2IdentityAndForms:
         assert "Forms discovered: 1" in text
         assert "tested: 1" in text
         assert "no injection/CSRF findings" in text
+        assert "Form exercises:" in text
+        assert "POST http://localhost:3101/login" in text
+        assert "fields=[username,password]" in text
+        assert "Evaluation metrics" in text
+        assert "Prompt injection attempted:" in text
 
     def test_openapi_enumerated_listed(self):
         eps = _scan()["endpoints_discovered"] + [
@@ -263,11 +292,55 @@ class TestOpenApiHelpers:
         )
         assert "/api/openapi.json" in refs
 
+    def test_extract_embedded_openapi_spec(self):
+        html = '''
+        <html><script>
+        SwaggerUIBundle({
+          spec: {"openapi":"3.0.0","paths":{"/api/v1/workspaces":{"get":{}}}},
+          dom_id: "#swagger"
+        })
+        </script></html>
+        '''
+        specs = EndpointDiscoveryAgent._extract_embedded_openapi_specs(html)
+        assert specs and "/api/v1/workspaces" in specs[0]["paths"]
+        eps = EndpointDiscoveryAgent()._endpoints_from_embedded_openapi(
+            html, "http://localhost:3101", source_url="http://localhost:3101/api/docs"
+        )
+        assert any("/api/v1/workspaces" in (e.get("url") or "") for e in eps)
+
     def test_spa_shell_never_matches_json(self):
         disco = EndpointDiscoveryAgent()
         disco._soft_mode = True
         disco._soft404_bodies = ["<!doctype html><html><body><div id='app'></div></body></html>"]
         assert disco._matches_spa_shell('{"openapi":"3.0.0","paths":{}}', "application/json") is False
+
+
+class TestSection7Owasp:
+    def test_table_has_all_ten_rows(self):
+        text = _build_section_7([], [], _scan())
+        assert "7. COMPLIANCE MAPPING" in text
+        for i in range(1, 11):
+            assert f"A{i:02d}:2021" in text
+        assert "Not Found" in text or "Not Assessed" in text
+
+    def test_confirmed_xss_maps_to_a03(self):
+        assert _map_finding_to_owasp({
+            "type": "Reflected XSS", "cwe": "CWE-79"
+        }) == "A03:2021"
+        text = _build_section_7(
+            [{
+                "type": "Reflected XSS",
+                "cwe": "CWE-79",
+                "location": "/search",
+                "remediation": "Encode output",
+                "status": "Confirmed",
+            }],
+            [],
+            _scan(),
+        )
+        assert "A03:2021" in text
+        assert "Found" in text
+        assert "Reflected XSS" in text
 
 
 if __name__ == "__main__":
@@ -279,6 +352,7 @@ if __name__ == "__main__":
         TestAppIdentityNotStack,
         TestClickjackingFixDialect,
         TestOpenApiHelpers,
+        TestSection7Owasp,
     ]:
         o = cls()
         for name in sorted(n for n in dir(o) if n.startswith("test_")):

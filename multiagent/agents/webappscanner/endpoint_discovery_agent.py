@@ -526,6 +526,9 @@ class EndpointDiscoveryAgent:
         for path in (
             "/api/openapi.json", "/openapi.json", "/api/docs/json",
             "/api/docs-json", "/docs-json", "/api/swagger.json",
+            "/v3/api-docs", "/api/v3/api-docs", "/api-docs",
+            "/swagger/v1/swagger.json", "/api/v1/openapi.json",
+            "/openapi.yaml", "/api/openapi.yaml",
         ):
             candidates.append(base.rstrip("/") + path)
 
@@ -534,13 +537,18 @@ class EndpointDiscoveryAgent:
             if cand in seen_cands:
                 continue
             seen_cands.add(cand)
-            # Docs HTML → follow refs
+            # Docs HTML → follow refs + embedded specs
             path_l = (urllib.parse.urlsplit(cand).path or "").lower()
-            if any(k in path_l for k in ("/docs", "swagger-ui", "redoc")) and not path_l.endswith(
+            if any(k in path_l for k in ("/docs", "swagger-ui", "redoc", "documentation")) and not path_l.endswith(
                 (".json", ".yaml", ".yml")
             ):
                 html = await self._fetch_text(cand)
                 if html and not html.lstrip().startswith(("{", "[")):
+                    embedded = self._endpoints_from_embedded_openapi(
+                        html, base, source_url=cand
+                    )
+                    if embedded:
+                        return embedded
                     for ref in self._extract_openapi_refs_from_html(html, base):
                         url = ref if ref.startswith("http") else urljoin(base, ref)
                         parsed = await self._endpoints_from_openapi_url(url, base)
@@ -839,6 +847,7 @@ class EndpointDiscoveryAgent:
             "/v1/openapi.json", "/openapi.yaml", "/openapi.yml",
             "/api/openapi.yaml", "/swagger/v1/swagger.json",
             "/api/v1/openapi.json", "/api/swagger-json",
+            "/v3/api-docs", "/api/v3/api-docs", "/api-docs",
         ]
         docs_ui_paths = (
             "/api/docs", "/docs", "/swagger", "/swagger-ui",
@@ -857,6 +866,11 @@ class EndpointDiscoveryAgent:
             html = await self._fetch_text(ui_url)
             if not html:
                 continue
+            embedded = self._endpoints_from_embedded_openapi(
+                html, base, source_url=ui_url
+            )
+            if embedded:
+                return embedded
             for ref in self._extract_openapi_refs_from_html(html, base):
                 if ref.startswith("http"):
                     parsed = await self._endpoints_from_openapi_url(ref, base)
@@ -879,15 +893,16 @@ class EndpointDiscoveryAgent:
             return []
         refs: List[str] = []
         patterns = [
-            r"""url\s*[:=]\s*["']([^"']+(?:openapi|swagger|docs-json|docs/json)[^"']*)["']""",
+            r"""url\s*[:=]\s*["']([^"']+(?:openapi|swagger|docs-json|docs/json|api-docs)[^"']*)["']""",
             r"""["']([^"']+/openapi\.(?:json|ya?ml))["']""",
             r"""["']([^"']+/swagger\.(?:json|ya?ml))["']""",
-            r"""["']([^"']+(?:docs-json|/docs/json|/api/docs/json))["']""",
+            r"""["']([^"']+(?:docs-json|/docs/json|/api/docs/json|/v3/api-docs))["']""",
             r"""["']((?:https?:)?//[^"']+(?:openapi|swagger)\.(?:json|ya?ml))["']""",
             r"""spec(?:Url|URL)?\s*[:=]\s*["']([^"']+)["']""",
             r"""swaggerUrl\s*[:=]\s*["']([^"']+)["']""",
             r"""configUrl\s*[:=]\s*["']([^"']+)["']""",
-            r"""href=["']([^"']*(?:openapi|swagger)[^"']*)["']""",
+            r"""href=["']([^"']*(?:openapi|swagger|api-docs)[^"']*)["']""",
+            r"""fetch\(\s*["']([^"']+(?:openapi|swagger|api-docs)[^"']*)["']""",
         ]
         for pat in patterns:
             for m in re.findall(pat, html, flags=re.I):
@@ -903,24 +918,81 @@ class EndpointDiscoveryAgent:
         # Dedup, preserve order
         return list(dict.fromkeys(refs))
 
-    async def _endpoints_from_openapi_url(self, url: str, base: str) -> List[Dict]:
-        """Fetch one OpenAPI/Swagger document and emit path operations."""
-        body = await self._fetch_text_accept_json(url)
-        if not body:
-            body = await self._fetch_text(url)
-        if not body:
+    @classmethod
+    def _extract_embedded_openapi_specs(cls, html: str) -> List[Dict]:
+        """
+        Best-effort extract of OpenAPI/Swagger JSON objects embedded in docs HTML.
+        Does not invent specs — only parses objects that already contain paths.
+        """
+        if not html or len(html) < 40:
             return []
-        stripped = body.lstrip()
-        # HTML docs shell is not a spec
-        if stripped.lower().startswith(("<!doctype", "<html")):
+        specs: List[Dict] = []
+        decoder = json.JSONDecoder()
+        markers = []
+        for m in re.finditer(
+            r"""["'](?:openapi|swagger)["']\s*:""", html, flags=re.I
+        ):
+            markers.append(m.start())
+        for m in re.finditer(
+            r"""(?:__redoc_state|Redoc\.init|SwaggerUIBundle)\s*[=(]""",
+            html, flags=re.I,
+        ):
+            markers.append(m.start())
+        if not markers:
             return []
-        spec = None
-        try:
-            spec = json.loads(body)
-        except Exception:
-            # Minimal YAML: only accept if it looks like OpenAPI and has paths:
-            if re.search(r"(?m)^(openapi|swagger)\s*:", body) and "paths:" in body:
-                spec = self._minimal_yaml_openapi_paths(body)
+
+        tried: set = set()
+        for mark in markers[:12]:
+            start = html.rfind("{", max(0, mark - 8000), mark + 1)
+            if start < 0 or start in tried:
+                start = html.find("{", mark, mark + 400)
+            if start < 0 or start in tried:
+                continue
+            tried.add(start)
+            chunk = html[start:start + 900_000]
+            try:
+                obj, _end = decoder.raw_decode(chunk)
+            except Exception:
+                continue
+            candidates = [obj]
+            if isinstance(obj, dict):
+                for key in ("spec", "data", "openapi", "swaggerDoc", "definition"):
+                    inner = obj.get(key)
+                    if isinstance(inner, dict):
+                        candidates.append(inner)
+                    elif isinstance(inner, str) and inner.lstrip().startswith("{"):
+                        try:
+                            candidates.append(json.loads(inner))
+                        except Exception:
+                            pass
+            for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
+                if not (cand.get("openapi") or cand.get("swagger")):
+                    continue
+                paths = cand.get("paths")
+                if isinstance(paths, dict) and paths:
+                    specs.append(cand)
+                    break
+            if specs:
+                break
+        return specs
+
+    def _endpoints_from_embedded_openapi(
+        self, html: str, base: str, source_url: str = ""
+    ) -> List[Dict]:
+        for spec in self._extract_embedded_openapi_specs(html):
+            parsed = self._endpoints_from_openapi_spec(
+                spec, base, source_url=source_url or "embedded"
+            )
+            if parsed:
+                return parsed
+        return []
+
+    def _endpoints_from_openapi_spec(
+        self, spec: Dict, base: str, source_url: str = ""
+    ) -> List[Dict]:
+        """Emit path operations from a parsed OpenAPI/Swagger dict."""
         if not isinstance(spec, dict):
             return []
         if not (spec.get("openapi") or spec.get("swagger") or spec.get("paths")):
@@ -952,9 +1024,33 @@ class EndpointDiscoveryAgent:
                     "auth_required": False,
                     "api_endpoint":  True,
                     "params":        params,
-                    "openapi_spec":  url,
+                    "openapi_spec":  source_url or "embedded",
                 })
         return endpoints
+
+    async def _endpoints_from_openapi_url(self, url: str, base: str) -> List[Dict]:
+        """Fetch one OpenAPI/Swagger document and emit path operations."""
+        body = await self._fetch_text_accept_json(url)
+        if not body:
+            body = await self._fetch_text(url)
+        if not body:
+            return []
+        stripped = body.lstrip()
+        # HTML docs shell — try embedded spec, else not a machine-readable doc
+        if stripped.lower().startswith(("<!doctype", "<html")):
+            return self._endpoints_from_embedded_openapi(
+                body, base, source_url=url
+            )
+        spec = None
+        try:
+            spec = json.loads(body)
+        except Exception:
+            # Minimal YAML: only accept if it looks like OpenAPI and has paths:
+            if re.search(r"(?m)^(openapi|swagger)\s*:", body) and "paths:" in body:
+                spec = self._minimal_yaml_openapi_paths(body)
+        if not isinstance(spec, dict):
+            return []
+        return self._endpoints_from_openapi_spec(spec, base, source_url=url)
 
     @staticmethod
     def _minimal_yaml_openapi_paths(text: str) -> Optional[Dict]:
