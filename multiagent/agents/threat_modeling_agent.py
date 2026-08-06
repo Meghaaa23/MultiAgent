@@ -908,7 +908,8 @@ def _build_section_8_ai_negative(scan_results: Dict) -> str:
         note = (
             "AI product branding was observed without a confirmed "
             "live chat/inference surface; AI-specific active testing "
-            "was not applicable."
+            "was not applicable. "
+            + _coverage_denominator_text(scan_results)
         )
     else:
         note = (
