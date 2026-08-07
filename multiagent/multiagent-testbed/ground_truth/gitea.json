@@ -1,0 +1,24 @@
+{
+  "target": "gitea",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3131"],
+  "extraction_note": "No source checked out on disk (Go static binary image). Research sub-agent ran `strings -n 6` on the full /app/gitea/gitea binary, found Copilot/ChatCompletion tokens, then traced them and confirmed they belong entirely to vendored third-party libraries (go-github's GitHub Copilot-metrics API bindings, meilisearch-go client types) — not Gitea's own code. A package-path-scoped grep restricted to code.gitea.io/gitea/{routers,services,modules} combined with ai/llm/openai/anthropic/chat/copilot returned zero hits.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Gitea (Go, own web framework)", "language": "Go"}
+  },
+  "notes": "Source-verified absence with an explicit false-positive trap avoided: naive string-matching on 'Copilot'/'ChatCompletion' in the binary would have wrongly flagged this as AI-surface-positive — those strings belong to vendored dependency code (go-github's GitHub Copilot metrics API client, meilisearch-go), not to any route Gitea itself serves. Package-path-scoped verification (restricting to Gitea's own code.gitea.io/gitea/* paths) is what distinguishes a real finding from vendor noise, and is a good example of the kind of false-positive a less careful scan (or scanner) could produce.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"},
+    {"type": "ai_surface", "match": "Copilot or ChatCompletion string match", "reason": "These strings belong to vendored dependency code (go-github, meilisearch-go), not any route Gitea itself serves — a naive binary string match would false-positive here", "category": "logic_bug"}
+  ]
+}

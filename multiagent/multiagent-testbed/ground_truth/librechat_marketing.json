@@ -17,8 +17,16 @@
     ".png",
     "favicon"
   ],
-  "ai_surface": null,
-  "notes": "Marketing/docs site on Vercel — not a LibreChat app instance. Clean report is expected.",
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": "proper_404",
+    "stack_true": {"framework": "Next.js docs/marketing site (Vercel)", "language": "TypeScript/Node.js"}
+  },
+  "notes": "Marketing/docs site on Vercel — not a LibreChat app instance. Clean report is expected. Brand-only distractor: 'LibreChat' appears throughout as product name/branding with zero live chat/inference surface — scanner must not escalate has_ai_surface on name alone (this is the ai_brand_only false-positive denominator case, not a partial-AI-surface case).",
   "expected_findings": [],
   "out_of_scope_types": [
     "sqli",

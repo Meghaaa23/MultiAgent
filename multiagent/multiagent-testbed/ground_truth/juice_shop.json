@@ -18,7 +18,15 @@
     "/api/Users",
     "/rest/user/whoami"
   ],
-  "ai_surface": null,
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": "catch_all_spa",
+    "stack_true": {"framework": "Angular SPA + Express REST API", "language": "TypeScript/Node.js"}
+  },
   "expected_findings": [
     {
       "id": "js-csp",

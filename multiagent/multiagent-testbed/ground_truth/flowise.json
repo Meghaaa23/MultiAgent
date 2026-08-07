@@ -1,0 +1,35 @@
+{
+  "target": "flowise",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3100"
+  ],
+  "extraction_note": "No source checked out on disk for this target — extracted compiled server (dist/) from the flowiseai/flowise:latest image itself via `docker create` + `docker cp` (no container run/RAM cost) into a scratch dir, then read the actual route/controller/constants files. This is source-verified against the real deployed image, not documented-knowledge.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "yes",
+    "ai_endpoints_true": [
+      "/api/v1/prediction/:chatflowId"
+    ],
+    "ai_auth_gated": false,
+    "chat_ui_present": true,
+    "injection_authorized": true,
+    "soft_404_behavior": "catch_all_spa",
+    "stack_true": {"framework": "Express (API) + React (flowise-ui)", "language": "TypeScript/Node.js"}
+  },
+  "notes": "SOURCE-VERIFIED, HIGH-CONFIDENCE, UNAUTHENTICATED-BY-DEFAULT FINDING: dist/utils/constants.js WHITELIST_URLS array explicitly includes '/api/v1/prediction/' (line 17) and '/api/v1/chatmessage/abort' (line 18). dist/index.js's global auth gate (lines 184-211) checks `isWhitelisted = whitelistURLs.some(url => req.path.startsWith(url))` FIRST and calls next() immediately if whitelisted, bypassing the API-key/workspace/org check entirely — the org-wide API-key gate never runs for /api/v1/prediction/*. The createPrediction controller itself (dist/controllers/predictions/index.js) has NO independent auth check — the only gate is an OPTIONAL per-chatflow 'allowedOrigins' Origin-header allowlist (chatbotConfig.allowedOrigins), which defaults to isDomainAllowed=true when unset (not configured by default) and is trivially bypassed by omitting/spoofing the Origin header even when set, since it is not a credential check. CONCLUSION: the real chat-inference endpoint POST /api/v1/prediction/:chatflowId is reachable WITHOUT any authentication by default — this is a source-verified unauthenticated AI surface, not an assumption. Route mounted at dist/routes/index.js:110 ('/prediction' -> predictions router), API-prefixed at dist/index.js:277 (app.use('/api/v1', routes)). Endpoint name trap: '/api/v1/chatmessage' (dist/routes/index.js:81) is message/conversation CRUD (history), NOT inference — do not confuse with '/api/v1/prediction' which IS inference; both are plausible names for 'the chat endpoint' and only one actually triggers an LLM call. soft_404_behavior verified at dist/index.js:300-304 — express.static(uiBuildPath) followed by an unconditional catch-all app.use((req,res) => res.sendFile(uiHtmlPath)) for ANY unmatched request (not scoped to non-API paths), so even bogus /api/v1/* paths that don't match a mounted route fall through to a 200 SPA shell rather than a JSON 404. Per-chatflow API-key protection is a real, separate feature in the Flowise UI (chatflow.apikeyid) but was not found enforced anywhere in the createPrediction code path read here — if such enforcement exists it is not in this controller and would need runtime verification to confirm it actually blocks unkeyed requests for a chatflow marked apikeyid-protected.",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    }
+  ]
+}

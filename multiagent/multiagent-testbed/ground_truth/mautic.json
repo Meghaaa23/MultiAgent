@@ -1,0 +1,23 @@
+{
+  "target": "mautic",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3121"],
+  "extraction_note": "No source checked out on disk (image mautic/mautic:latest). Light-pass: read composer.json (core/plugin/theme packages only — clearbit, crm, emailmarketing, gmail, outlook, social, zapier, etc., no AI addon), listed docroot/app/bundles (DynamicContentBundle exists but is rule-based personalization, not LLM-backed), recursive grep of bundles+plugins for AI keywords hit only icon-font CSS false positives.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Symfony (Mautic core-lib)", "language": "PHP"}
+  },
+  "notes": "Source-verified absence. Worth noting: DynamicContentBundle exists and could be mistaken for an AI personalization feature by name alone — it is rule-based, not LLM-backed; confirmed by inspection, not assumed.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

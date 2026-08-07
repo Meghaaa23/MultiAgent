@@ -1,0 +1,24 @@
+{
+  "target": "glpi",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3122"],
+  "extraction_note": "METHODOLOGICALLY DISTINCT FROM EVERY OTHER TARGET: this image (diouxx/glpi:latest) contains NO application source at all in its static layers. /var/www/html holds only a placeholder index.html. /opt/glpi-start.sh shows the real behavior: at container FIRST RUN, it curls the GitHub Releases API for the latest (or a pinned $VERSION_GLPI) GLPI tag, wgets the release tarball, and extracts it into /var/www/html/glpi on the fly. The actual application code is fetched from the internet at container startup, not baked into the Docker image layer. Static `docker create`/`docker cp`/`docker run --entrypoint sh` inspection — the method used for every other target in this manifest — CANNOT answer the has_ai_surface question here, because the code being asked about does not exist in the image.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "unverifiable",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": null,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "GLPI (version fetched from GitHub Releases at container startup, not pinned in the image)", "language": "PHP"}
+  },
+  "notes": "DO NOT treat this as has_ai_surface: 'no' — that would be an unverified assumption, exactly the failure mode this manifest exists to avoid. To actually verify, the container would need to run its startup script (a stateful, network-dependent operation: it reaches out to GitHub at runtime) and then the extracted /var/www/html/glpi tree would need to be inspected post-startup — materially different from every other target's read-only static image inspection. If glpi becomes a target the eval needs a real answer for, either (a) start the container, let it complete its first-run download, then extract/grep the resulting tree the same way as other targets, or (b) pin $VERSION_GLPI to a known release and inspect that specific GitHub tarball directly without running the container at all. Recording 'unverifiable' rather than a guess is itself a data point worth keeping in the manifest — a scanner that also declares 'coverage unknown' for this target rather than silently asserting no-AI-surface should be treated as reporting honestly, not as underperforming.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"},
+    {"type": "has_ai_surface", "match": "no", "reason": "Cannot be asserted from static image inspection since the app source is fetched from GitHub at container runtime and is not present in the image layers", "category": "irreducible"}
+  ]
+}

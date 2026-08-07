@@ -1,0 +1,23 @@
+{
+  "target": "joomla",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3116"],
+  "extraction_note": "No source checked out on disk (official image). Full CMS source found at /usr/src/joomla (Joomla 6.1, copied into webroot at container start). Research sub-agent did a full source tree walk plus dependency/text grep (composer.json/composer.lock, php/json/xml files) for AI keywords and AI-named components/plugins — not just a directory-name scan.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Joomla 6.1", "language": "PHP"}
+  },
+  "notes": "Source-verified absence: no composer.json/composer.lock dependency hits for openai/anthropic/gpt/copilot/langchain; no AI-named component (com_*) or plugin folder in components/, administrator/components/, or plugins/*; full-tree text grep for provider API strings across php/json/xml returned nothing.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

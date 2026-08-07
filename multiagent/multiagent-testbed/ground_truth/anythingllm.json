@@ -1,0 +1,41 @@
+{
+  "target": "anythingllm",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3101"
+  ],
+  "extraction_note": "No source checked out on disk — read directly from the running, healthy container benchmark-anythingllm (image mintplexlabs/anythingllm, v1.15.0) via docker exec: server/index.js, endpoints/chat.js, endpoints/workspaces.js, endpoints/embed/index.js, endpoints/api/openai/index.js, utils/middleware/validatedRequest.js, utils/middleware/validApiKey.js, models/systemSettings.js, plus a live query against the system_settings table (multi_user_mode unset) and env (no AUTH_TOKEN/JWT_SECRET set). Source- and runtime-verified, not documented-knowledge.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [
+    "/v1/openai/chat/completions"
+  ],
+  "ai_surface": {
+    "has_ai_surface": "yes",
+    "ai_endpoints_true": [
+      "/workspace/:slug/stream-chat",
+      "/workspace/:slug/thread/:threadSlug/stream-chat",
+      "/embed/:embedId/stream-chat",
+      "/v1/openai/chat/completions"
+    ],
+    "ai_auth_gated": false,
+    "chat_ui_present": true,
+    "injection_authorized": true,
+    "soft_404_behavior": "catch_all_spa",
+    "stack_true": {"framework": "Express (backend) + React/Vite (frontend)", "language": "Node.js / TypeScript"}
+  },
+  "notes": "SOURCE- AND RUNTIME-VERIFIED, HIGH-PRIORITY FINDING (inverted-expectation case): the PRIMARY, first-party chat endpoints (/workspace/:slug/stream-chat, .../thread/:threadSlug/stream-chat) are UNAUTHENTICATED BY DEFAULT in this container, while the secondary OpenAI-compatible developer API (/v1/openai/chat/completions) IS properly API-key-gated — the reverse of what's typically assumed ('the API-key-shaped endpoint is the gated one'). Proof: validatedRequest middleware (utils/middleware/validatedRequest.js:7-24) does `if (multiUserMode) return validateMultiUserRequest(...)`, else (single-user mode) `if (NODE_ENV==='development' || !process.env.AUTH_TOKEN || !process.env.JWT_SECRET) { next(); return; }` — with no password ever set, it calls next() with zero auth check. Confirmed live: `docker exec ... env | grep -iE 'AUTH_TOKEN|JWT_SECRET'` returned nothing, and a live Prisma query against system_settings for multi_user_mode returned empty (defaults false per models/systemSettings.js:729-733). The target's docker-compose.yml sets no AUTH_TOKEN/JWT_SECRET/multi-user vars either. By contrast /v1/openai/chat/completions is wrapped in validApiKey middleware which unconditionally 403s without a Bearer key matching an ApiKey DB row, regardless of single/multi-user mode. /embed/:embedId/stream-chat is gated by validEmbedConfig (a valid embedId + allowed-domain check) — gated on a pre-created embed config, not on user identity, so ai_auth_gated for it is a different kind of gate than a login; recorded here as part of the same 'no', since it is not credential-based auth. CONTROL-PLANE-AS-INFERENCE TRAP: GET /workspace/:slug/chats (history), /workspace/:slug/delete-chats, /workspace/:slug/update-chat, /workspace/:slug/chat-feedback/:chatId, /workspace/:slug/suggested-messages (static admin-configured, no LLM call), /workspace/:slug/is-agent-command-available (capability check), /workspace/:slug/tts/:chatId (renders audio for an ALREADY-GENERATED stored message) all contain 'chat' in the path but are excluded from ai_endpoints_true — none of them triggers a live prompt-to-completion call. soft_404_behavior verified: production branch of server/index.js ends with app.use('/', (_, response) => IndexPage.generate(response)), and MetaGenerator.generate defaults to HTTP 200 — any unmatched path gets a 200 HTML shell.",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf",
+    "prompt-injection"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "target": "moodle",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3111"],
+  "extraction_note": "No source checked out on disk (image elestio/moodle:latest, resolved to Moodle 5.2.1 with full git checkout present at /var/www/html). Research sub-agent did a directory walk of public/ai/ confirming the provider list and external-API classes directly. I independently re-verified the auth requirement myself: read set_provider_status.php's execute() method.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [
+    "ai/classes/external/set_provider_status.php",
+    "ai/classes/external/set_provider_order.php",
+    "ai/classes/external/set_action.php",
+    "ai/classes/external/set_policy_status.php",
+    "ai/classes/external/delete_provider_instance.php"
+  ],
+  "ai_surface": {
+    "has_ai_surface": "yes",
+    "ai_endpoints_true": [
+      "ai/classes/external/set_provider_status.php",
+      "ai/classes/external/set_provider_order.php",
+      "ai/classes/external/set_action.php",
+      "ai/classes/external/set_policy_status.php",
+      "ai/classes/external/delete_provider_instance.php"
+    ],
+    "ai_auth_gated": true,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Moodle (public/ai/ core subsystem)", "language": "PHP"}
+  },
+  "notes": "SURPRISING, HIGH-VALUE FINDING: this is core Moodle (5.2.1), which ships a complete first-party 'ai' subsystem at public/ai/ with six live provider plugins already present: openai, azureai, gemini, awsbedrock, ollama, deepseek (each with its own classes/, db/, version.php) — this is provider-integration infrastructure, not a single vendor lock-in. Admin configuration pages: configure_providers.php, configure_actions.php. Webservice/external API functions listed above manage provider status/order/actions/policy. AUTH VERIFIED (independently re-checked): ai/classes/external/set_provider_status.php's execute() calls `require_capability('moodle/site:config', $context)` (line 66) after `self::validate_parameters(...)` — requires site-admin-level Moodle capability; Moodle's external_api framework additionally enforces session/webservice-token validation centrally for any call reaching execute() at all (calls are only reachable via webservice.php or ajax.php, both of which authenticate before dispatch). SCOPE CAVEAT: the functions verified here are admin PROVIDER-CONFIGURATION endpoints (which providers are enabled, in what order, with what policy) — I did not locate or trace a separate end-USER AI-generation-request endpoint (e.g. a student/teacher triggering an actual completion) in this pass; if one exists with different (possibly broader) auth, it was not found here and should not be assumed equally gated without further verification.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf", "prompt-injection"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

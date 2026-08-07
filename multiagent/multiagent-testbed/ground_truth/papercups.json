@@ -1,0 +1,33 @@
+{
+  "target": "papercups",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3103"
+  ],
+  "extraction_note": "No source checked out on disk (third-party image papercups/papercups:latest, a compiled Elixir/Phoenix release, no mix.exs present in the runtime image). Light-pass verification via docker run --entrypoint sh: located the app's own compiled OTP application (chat_api-0.1.0, papercups' internal name) among /app/lib/*, then ran `strings` against its .beam bytecode files (compiled bytecode retains literal string/atom constants) and grepped for AI-related keywords, plus checked the full /app/lib dependency listing for any AI/LLM package. Zero hits in both.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": true,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Phoenix (Elixir), app named chat_api internally", "language": "Elixir"}
+  },
+  "notes": "Source-verified absence: /app/lib dependency listing (full OTP release, ~40+ apps) contains no openai/anthropic/gpt/llm/langchain-named package; strings extracted from the app's own chat_api-0.1.0/ebin/*.beam compiled bytecode contain no openai/anthropic/gpt-3/gpt-4/chatgpt literal. chat_ui_present is true at the product level (Papercups is a live-chat widget product, human-agent-to-visitor) but this specific claim was not independently re-verified in this pass beyond general product identity — flagged as lower confidence than the has_ai_surface finding, which was directly grep-verified against the binary. soft_404_behavior not checked (no AI endpoint to characterize against it, per the lighter-pass standard for unambiguous no-AI targets).",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    }
+  ]
+}

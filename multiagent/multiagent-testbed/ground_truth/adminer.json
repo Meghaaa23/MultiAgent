@@ -1,0 +1,23 @@
+{
+  "target": "adminer",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3138"],
+  "extraction_note": "No source checked out on disk (official image adminer:latest). Light-pass: docker run --entrypoint sh, located app root /home/adminer (index.php, adminer.php, plugin-loader.php, designs/, plugins/), recursive grep of the entire app dir for AI keywords plus a directory-name scan. Zero hits — tiny single-purpose DB-admin tool.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "plain PHP, no framework", "language": "PHP"}
+  },
+  "notes": "Source-verified absence; whole-app grep is exhaustive given the app's small size.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

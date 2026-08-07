@@ -1,0 +1,51 @@
+{
+  "target": "dify",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:80"
+  ],
+  "not_yet_deployed": true,
+  "deployment_note": "Full upstream monorepo (api/, web/, docker/) checked out at multiagent-testbed/benchmark-apps/dify/ but no container has been built/run in this testbed yet. url_aliases uses the app's own docker/docker-compose.yaml nginx default (EXPOSE_NGINX_PORT=80) and will need updating once actually deployed. Real deployment is multi-container: nginx + api (langgenius/dify-api:1.16.0, also worker/worker_beat) + web (langgenius/dify-web:1.16.0) + dify-sandbox + dify-plugin-daemon + postgres/redis/vector-DB.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [
+    "/api/chat-messages",
+    "/api/completion-messages",
+    "/v1/chat-messages",
+    "/v1/completion-messages"
+  ],
+  "ai_surface": {
+    "has_ai_surface": "yes",
+    "ai_endpoints_true": [
+      "/api/chat-messages",
+      "/api/completion-messages",
+      "/v1/chat-messages",
+      "/v1/completion-messages"
+    ],
+    "ai_auth_gated": true,
+    "chat_ui_present": true,
+    "injection_authorized": true,
+    "soft_404_behavior": "proper_404",
+    "stack_true": {"framework": "Flask + Flask-RESTX (Gunicorn/gevent-websocket) API, Next.js frontend", "language": "Python / TypeScript (Node.js)"}
+  },
+  "notes": "Source-verified. Three parallel chat/completion surfaces, each with a DIFFERENT auth mechanism — a scanner checking only one auth scheme could wrongly conclude the others are unauthenticated: (1) embedded 'webapp' surface /api/chat-messages, /api/completion-messages — requires a signed JWT 'webapp passport' token (controllers/web/wraps.py:52-56,145-146; validate_jwt_token -> extract_webapp_passport -> PassportService().verify, raises Unauthorized if missing). Blueprint prefix confirmed in controllers/web/__init__.py:8. (2) public Service API /v1/chat-messages, /v1/completion-messages — requires 'Authorization: Bearer <api_key>' via @validate_app_token (controllers/service_api/app/completion.py:210,365; wraps.py:365-373 rejects requests without a Bearer header). (3) console 'explore' test-chat (controllers/console/explore/completion.py) — requires full console login session (login_required + account_initialization_required, controllers/console/explore/wraps.py:131-136); this is an internal workspace-testing surface, not a public inference endpoint, so excluded from ai_endpoints_true. CONTROL-PLANE-AS-INFERENCE TRAP: /api/chat-messages/<task_id>/stop, /api/completion-messages/<task_id>/stop, /v1/chat-messages/<task_id>/stop, /v1/completion-messages/<task_id>/stop (controllers/web/completion.py:180,296; controllers/service_api/app/completion.py:272,447) share the same path prefix and HTTP verb as the real inference routes but only call AppTaskService.stop_task(task_id) — no prompt in the body, never reaches AppGenerateService.generate. A scanner pattern-matching on '/chat-messages' or 'chat' in the path will misclassify these as additional inference endpoints; ai_endpoints_true above deliberately excludes them. soft_404_behavior verified via web/app/(commonLayout)/integrations/[[...slug]]/not-found.tsx (custom Next.js not-found page) and standalone Next server default (real 404 status, not SPA-shell 200) — no catch-all override found in web/docker/entrypoint.sh.",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf",
+    "prompt-injection"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    },
+    {
+      "type": "ai_endpoint",
+      "match": "chat-messages/*/stop or completion-messages/*/stop",
+      "reason": "Control-plane stop/cancel endpoint, not an inference endpoint — misclassifying it as AI surface is a control-plane-confused-for-inference false positive",
+      "category": "logic_bug"
+    }
+  ]
+}

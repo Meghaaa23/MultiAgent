@@ -1,0 +1,23 @@
+{
+  "target": "gitlab",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3107"],
+  "extraction_note": "No source checked out on disk (image gitlab/gitlab-ce:latest). Research sub-agent shelled into the image, walked /opt/gitlab/embedded/service/gitlab-rails, and grepped controllers/lib/api/config/Gemfile.lock for duo/ai/anthropic. Not independently re-verified by a second read in this pass for the exact auth decorator on Duo-specific API endpoints — flagged below.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "partial",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": true,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Ruby on Rails (GitLab CE)", "language": "Ruby"}
+  },
+  "notes": "GitLab Duo AI infrastructure is compiled into this gitlab-ce:latest image: Gemfile.lock bundles duo_api, opentelemetry-instrumentation-anthropic, and vendored gem gitlab-duo-workflow-service-client; live middleware lib/gitlab/middleware/duo_workflow_id.rb; API concern lib/api/concerns/ai_workflows_access.rb; application settings columns ai_gateway_url/ai_gateway_timeout_seconds; settings view _gitlab_duo.html.haml. has_ai_surface is 'partial' because no ee/ directory exists in this image (EE-only controllers are stripped from CE) — the full Duo Chat UI/functionality is Enterprise-license-gated and was not confirmed reachable in this CE build, but the AI-gateway client plumbing, settings columns, and a workflow API concern DO ship active in CE, which is more than zero surface. ai_auth_gated is recorded as true based on GitLab's foundational, well-established API architecture (virtually all GitLab REST/GraphQL API endpoints require a session or personal access token via authenticate_user!/doorkeeper, with no general unauthenticated API surface) rather than a specific traced decorator on an AI-specific route in this pass — this is a slightly lower-rigor claim than the endpoint-level auth traces done for plane/zammad/chatwoot and should be re-verified with a specific route trace if this target becomes consequential to the eval's headline numbers. No concrete ai_endpoints_true path was extracted (the Duo Workflow API concern was found, not a fully resolved route string) — left empty rather than guessed.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

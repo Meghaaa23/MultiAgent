@@ -1,0 +1,23 @@
+{
+  "target": "phpmyadmin",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3139"],
+  "extraction_note": "No source checked out on disk (official image phpmyadmin:latest). Light-pass: docker run --entrypoint sh, located app root /var/www/html, grepped composer.json/composer.lock/package.json and directory-name-scanned for AI keywords. No real hits (only a main.twig false positive).",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "PHP (Composer-based)", "language": "PHP"}
+  },
+  "notes": "Source-verified absence via dependency manifest + directory scan of the actual image filesystem.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

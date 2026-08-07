@@ -1,0 +1,58 @@
+{
+  "target": "open_webui",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3124"
+  ],
+  "extraction_note": "No source checked out on disk — extracted backend package (main.py, routers/ollama.py, utils/auth.py, env.py) and package.json from the running container 'open-webui' (image ghcr.io/open-webui/open-webui:main, v0.9.6) via docker cp, no app process started for extraction.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [
+    "/api/chat/completions",
+    "/api/v1/chat/completions",
+    "/api/message",
+    "/api/v1/messages",
+    "/api/embeddings",
+    "/ollama/api/chat",
+    "/ollama/api/generate"
+  ],
+  "ai_surface": {
+    "has_ai_surface": "yes",
+    "ai_endpoints_true": [
+      "/api/chat/completions",
+      "/api/v1/chat/completions",
+      "/api/message",
+      "/api/v1/messages",
+      "/api/embeddings",
+      "/api/v1/embeddings",
+      "/ollama/api/chat",
+      "/ollama/api/generate",
+      "/ollama/v1/chat/completions",
+      "/ollama/v1/completions"
+    ],
+    "ai_auth_gated": true,
+    "chat_ui_present": true,
+    "injection_authorized": true,
+    "soft_404_behavior": "catch_all_spa",
+    "stack_true": {"framework": "FastAPI (backend) + SvelteKit (frontend)", "language": "Python / TypeScript"}
+  },
+  "notes": "Source-verified from the live container. Every real inference route uses user=Depends(get_verified_user) (main.py:1671, routers/ollama.py:886); get_verified_user (utils/auth.py:452) requires a valid JWT (cookie or Authorization: Bearer) or an sk- prefixed API key, else 401. WEBUI_AUTH defaults to 'True' (env.py:603) and this target's docker-compose.yml does not override it, so auth is on as deployed. CONTROL-PLANE-AS-INFERENCE TRAP: POST /api/chat/completed (main.py:2277) is name-confusable with /api/chat/completions but its own docstring says 'Deprecated: outlet filters now run inline during chat completion. Kept for backward compatibility' — it post-processes an already-generated response, it does not generate one; deliberately excluded from ai_endpoints_true. Likewise /api/tasks/stop/{task_id} and /api/tasks/chat/{chat_id}[/stop] (main.py:2313-2345) are generation-cancellation control plane, not inference. soft_404_behavior verified via SPAStaticFiles (main.py:599-611), mounted at '/' after all API routers (main.py:3021-3025) — any unmatched path, including unmatched /api/* paths, falls through to a 200 SPA shell (except paths ending .js, which still 404).",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    },
+    {
+      "type": "ai_endpoint",
+      "match": "/api/chat/completed",
+      "reason": "Deprecated post-filter hook confusable by name with /api/chat/completions; it is not an inference call",
+      "category": "logic_bug"
+    }
+  ]
+}

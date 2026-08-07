@@ -1,0 +1,23 @@
+{
+  "target": "ghost",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3136"],
+  "extraction_note": "No source checked out on disk (official image ghost:latest). Light-pass: read app root /var/lib/ghost/current, grepped package.json and core/ tree for AI keywords and *ai*-named files/dirs (filtered false positives: mail, maintain, main.paid), checked top-level node_modules for openai/anthropic/langchain packages.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Ghost (Node.js core+admin, pnpm-managed)", "language": "Node.js"}
+  },
+  "notes": "Source-verified absence via dependency manifest + directory scan.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

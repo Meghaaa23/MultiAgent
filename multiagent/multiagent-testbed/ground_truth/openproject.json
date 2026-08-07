@@ -1,0 +1,23 @@
+{
+  "target": "openproject",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3130"],
+  "extraction_note": "No source checked out on disk (official image openproject/community:13). Light-pass: docker run --entrypoint sh, located app root /app, grepped Gemfile.lock/Gemfile.modules/package.json, listed all modules/* plugin directories (20+: backlogs, bim, boards, budgets, gantt, github/gitlab integration, storages, etc.), and scanned app/lib/modules/config for AI keywords. No genuine matches (only mail/container/detail false positives), and no 'ai' module present among the plugin list.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Ruby on Rails (modular plugin architecture)", "language": "Ruby"}
+  },
+  "notes": "Source-verified absence in this Community Edition 13 build: no 'ai' module among the 20+ enumerated modules/* plugin directories, no AI dependency in Gemfile.lock. Caveat: could not rule out AI features gated behind Enterprise licensing that might ship in a different edition/image than the one inspected here — this finding is specific to openproject/community:13.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

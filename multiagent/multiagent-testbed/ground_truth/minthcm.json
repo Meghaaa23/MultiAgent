@@ -1,0 +1,24 @@
+{
+  "target": "minthcm",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3120"],
+  "extraction_note": "METHODOLOGICALLY DISTINCT, SAME PATTERN AS GLPI: the minthcm/minthcm:latest image itself contains NO application source — /var/www/MintHCM is empty at build time; start.sh does a live `git clone https://github.com/minthcm/minthcm.git` on first container run, matching glpi.json's runtime-fetch pattern. UNLIKE glpi, the research sub-agent went one step further and cloned that exact upstream repo inside an ephemeral, network-only, --rm container (no ports opened, no app process started) to inspect the code that WOULD be fetched. This is supplementary verification against upstream source, not against the exact pinned commit this image's start.sh would fetch at any given point in time — flagged explicitly.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "yes",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "SuiteCRM/SugarCRM-derived 'legacy' PHP MVC + separate PHP mcp/ microservice + Vue frontend", "language": "PHP / JavaScript (Vue)"}
+  },
+  "notes": "CONFIDENCE CAVEAT: this finding is verified against the current upstream github.com/minthcm/minthcm main branch (cloned live for inspection), NOT against the exact commit this specific image build would fetch at container-start time — the image itself carries zero source to pin against. Found a full MintHCM\\AI\\Tools\\* subsystem (legacy/include/AI/Tools/Implementations/{CreateRecordTool,SearchRecordsTool,ExecuteKReportTool,...}.php) AND a separate top-level mcp/ application (mcp/index.php, mcp/oauth.php, mcp/composer.json requiring mcp/sdk) plus a legacy/modules/MCPSettings admin module — i.e. a dedicated MCP server exposing CRUD/report tools to LLM agents, structurally similar to leantime's MCP surface but implemented as an entirely separate PHP microservice (mcp/) rather than a route within the main app. No specific endpoint path or auth mechanism was extracted/verified in this pass (mcp/oauth.php's existence suggests an OAuth flow protects the mcp/ microservice, but this was not confirmed by reading its logic). Given the runtime-fetch uncertainty AND the unverified auth, treat this target's numbers as provisional if it becomes consequential — re-verify against the actual running container's post-clone state rather than relying on this upstream-source proxy.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"},
+    {"type": "has_ai_surface", "match": "verified against the exact deployed image", "reason": "This image fetches its real source from GitHub at container runtime; the finding here is verified against a live clone of upstream main, not the exact pinned commit the running container would have", "category": "irreducible"}
+  ]
+}

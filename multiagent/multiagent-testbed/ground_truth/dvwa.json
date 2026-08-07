@@ -22,7 +22,15 @@
     "/phpinfo.php",
     "/logout.php"
   ],
-  "ai_surface": null,
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": "proper_404",
+    "stack_true": {"framework": "DVWA (plain PHP, no framework)", "language": "PHP"}
+  },
   "expected_findings": [
     {
       "id": "dvwa-csp",

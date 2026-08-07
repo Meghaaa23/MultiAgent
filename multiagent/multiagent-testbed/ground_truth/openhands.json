@@ -1,0 +1,36 @@
+{
+  "target": "openhands",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3002"
+  ],
+  "extraction_note": "No source checked out on disk for this target — extracted openhands/server package from the docker.openhands.dev/openhands/openhands:1.6 image via `docker create`/`docker run --entrypoint find` + `docker cp` (no long-running container, no RAM cost) into a scratch dir, then read the actual route/dependency files. Source-verified against the deployed image.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "yes",
+    "ai_endpoints_true": [
+      "/api/conversations",
+      "/api/conversations/:conversation_id/start"
+    ],
+    "ai_auth_gated": false,
+    "chat_ui_present": true,
+    "injection_authorized": true,
+    "soft_404_behavior": "catch_all_spa",
+    "stack_true": {"framework": "FastAPI (backend, dual V0-legacy + V1 app_server routers both mounted) + SPA frontend", "language": "Python (backend) / JS-TS frontend"}
+  },
+  "notes": "SOURCE-VERIFIED, UNAUTHENTICATED-BY-DEFAULT FINDING: openhands/server/dependencies.py get_dependencies() only appends the check_session_api_key FastAPI dependency `if _SESSION_API_KEY:` (read from the SESSION_API_KEY env var) or if app_mode==SAAS. This benchmark's docker-compose.yml sets no environment variables at all (confirmed separately — sparsest compose file of any target investigated, just image+port), so SESSION_API_KEY is unset and app_mode defaults to OSS, not SAAS — get_dependencies() returns an EMPTY list, meaning the conversation-management router (routes/manage_conversations.py, mounted with `dependencies=get_dependencies()` at line 116, prefix '/api') runs with ZERO auth enforcement by default in this deployment. POST /api/conversations (manage_conversations.py:233-234, 'new_conversation') is the real agent-session-start endpoint — OpenHands' actual inference/agent-loop happens across a Socket.IO websocket (listen_socket.py) once a conversation exists, driven by MessageAction events, not a single request/response completion call like a typical chat API; POST /api/conversations is the closest REST equivalent to 'start using the AI' and is included in ai_endpoints_true for that reason. CONTROL-PLANE-AS-INFERENCE TRAP (same pattern as LibreChat/dify): POST /conversations/{conversation_id}/stop (manage_conversations.py:896-897) and DELETE /conversations/{conversation_id} (line 548) are lifecycle/control endpoints, not inference — deliberately excluded from ai_endpoints_true. VERSION NOTE: routes/conversation.py and routes/manage_conversations.py are explicitly marked 'LEGACY V0 CODE - Deprecated since version 1.0.0, scheduled for removal April 1, 2026' in source comments, but app.py:91-103 confirms BOTH the V0 legacy routers AND the new v1_router (openhands.app_server) are simultaneously include_router()'d in this 1.6 image — the legacy routes are live, not dead code, in this build. soft_404_behavior verified via static.py's SPAStaticFiles.get_response(), which falls back to serving index.html on any static-file lookup failure (explicit try/except fallback, not a framework default).",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    }
+  ]
+}

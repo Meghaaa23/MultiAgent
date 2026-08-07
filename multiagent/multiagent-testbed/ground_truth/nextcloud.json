@@ -1,0 +1,23 @@
+{
+  "target": "nextcloud",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3115"],
+  "extraction_note": "No source checked out on disk (official image, source copied from /usr/src/nextcloud into /var/www/html at container start). Light-pass: listed the full bundled apps/ directory (38 apps) — no assistant/integration_openai/context_chat/similar AI app present; grepped composer.json/package.json and 3rdparty/ for openai/anthropic/langchain — no hits.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Nextcloud server (PHP 8.5, composer-based)", "language": "PHP"}
+  },
+  "notes": "Source-verified absence: the optional 'Nextcloud Assist' AI app is confirmed NOT installed among the 38 bundled apps in this image build. Nextcloud DOES support installing this app from its App Store on a live instance, so this finding is specific to this image's bundled default set, not a claim that Nextcloud can never have an AI surface.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

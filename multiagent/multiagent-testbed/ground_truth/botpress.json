@@ -1,0 +1,43 @@
+{
+  "target": "botpress",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost:3006"
+  ],
+  "extraction_note": "CRITICAL SOURCE MISMATCH: multiagent-testbed/benchmark-apps/botpress/botpress/ is a git clone of the modern 'Botpress Cloud' monorepo (package.json name 'botpress', pnpm/turbo workspace of integrations/CLI/SDK; its own readme.md explicitly says 'For any problem related to on-premise Botpress v12, please see the Botpress v12 repository'). The actual running container (image botpress/server, entrypoint '/bin/sh -c \"./duckling & ./bp\"') is legacy self-hosted Botpress v12, built from /snapshot/v12/packages/bp/dist/... per embedded paths in the pkg-compiled binary. These are different, unrelated codebases. All claims below are sourced from the container/binary/persisted data volume, NOT from the checked-out botpress/botpress/ git clone, which does not build or represent what is actually deployed.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "partial",
+    "ai_endpoints_true": [
+      "/api/v1/bots/:botId/converse/:userId",
+      "/api/v1/bots/:botId/converse/:userId/secured",
+      "/api/v1/bots/:botId/mod/channel-web/messages",
+      "/api/v1/bots/:botId/mod/channel-web/conversations"
+    ],
+    "ai_auth_gated": null,
+    "chat_ui_present": true,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Botpress v12 (legacy, pkg-compiled single binary + duckling NLU sidecar)", "language": "Node.js"}
+  },
+  "notes": "has_ai_surface is 'partial' rather than 'yes' because data/global/workspaces.json shows \"bots\": [] — no bot has actually been created in this container's persisted data, so the Converse/webchat routes exist in the compiled code and are always mounted, but any live call would 404 on an unresolvable :botId until a bot is provisioned. Route paths above are structurally confirmed via embedded strings in the pkg-compiled binary (converse-router.js/converse-service.js module paths, '/converse' mount prefix, ':userId' and ':userId/secured' parameter strings; channel-web module confirmed enabled by default in data/global/botpress.config.json with no disable flag, and its client bundle strings show POST /messages, POST /conversations, GET /conversations/user/:userId). ai_auth_gated is explicitly null (not verified) because the auth-check logic itself is compiled/minified and could not be read from strings alone — the '/secured' suffix on one Converse variant structurally implies the base (unsuffixed) path is not secured by default, but this was NOT confirmed by reading actual guard code, so it must not be asserted as a fact. soft_404_behavior is explicitly null (not verified) — extraction ran out of safe time before this could be checked; do not assume either catch_all_spa or proper_404 for this target. chat_ui_present is 'yes' contingent on a bot existing (the channel-web widget), which is not currently the case in this container's state — this nuance matters for coverage-honesty scoring: a scanner correctly reporting 'no reachable bot instance' here should not be penalized as a false negative. The Admin/Studio UI itself requires account creation on first run (workspaces.json authStrategies: ['default']), but that is a DIFFERENT surface from the bot-facing chat endpoints above and must not be conflated with ai_auth_gated for the Converse/webchat API.",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    },
+    {
+      "type": "ai_surface_source_mismatch",
+      "reason": "The checked-out git source at benchmark-apps/botpress/botpress/ is the unrelated Botpress Cloud SDK monorepo, not the running legacy v12 server — any tool reading that checkout for route/auth claims about this target is reading the wrong codebase",
+      "category": "logic_bug"
+    }
+  ]
+}

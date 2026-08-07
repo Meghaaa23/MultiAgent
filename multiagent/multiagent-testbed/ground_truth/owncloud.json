@@ -1,0 +1,23 @@
+{
+  "target": "owncloud",
+  "scope": "blackbox_unauth",
+  "url_aliases": ["http://localhost:3113"],
+  "extraction_note": "No source checked out on disk (image owncloud/server:latest, ownCloud 10.16.3 community edition). Light-pass: located real app dir at /var/www/owncloud (not /home/owncloud, which is just data) via occ/version.php, listed bundled apps/ (activity, files_*, oauth2, openidconnect, workflow, wopi, etc. — no AI/LLM app), recursive grep of apps/+lib/ hit only a Font Awesome .eot binary false positive.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "ownCloud 10 (own PHP framework, distinct codebase from Nextcloud)", "language": "PHP"}
+  },
+  "notes": "Source-verified absence via bundled-apps listing + source-tree grep. Note this is ownCloud (not Nextcloud, which was checked separately) — the two share history but are different codebases; ownCloud's app ecosystem does not carry Nextcloud's optional Assist app.",
+  "expected_findings": [],
+  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "must_not_report": [
+    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+  ]
+}

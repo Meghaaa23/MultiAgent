@@ -1,0 +1,33 @@
+{
+  "target": "freescout",
+  "scope": "blackbox_unauth",
+  "url_aliases": [
+    "http://localhost"
+  ],
+  "extraction_note": "No source checked out on disk (third-party image tiredofit/freescout:latest). Light-pass verification via docker run --entrypoint sh + grep against the actual image filesystem (Laravel app root at /assets/install/): searched composer.json and app/ tree for AI/LLM keywords (openai, anthropic, llm, gpt-, copilot, chat.?completion) — zero matches. Not a full endpoint-by-endpoint trace (no inference endpoint exists to trace), per the agreed lighter-pass standard for targets with no plausible AI angle.",
+  "endpoints_true": [],
+  "endpoints_auth_gated": [],
+  "ai_surface": {
+    "has_ai_surface": "no",
+    "ai_endpoints_true": [],
+    "ai_auth_gated": null,
+    "chat_ui_present": false,
+    "injection_authorized": true,
+    "soft_404_behavior": null,
+    "stack_true": {"framework": "Laravel v5.5.40 (freescout core)", "language": "PHP"}
+  },
+  "notes": "Source-verified absence, not documented-knowledge: grepped composer.json and app/ for AI/LLM dependency or feature keywords, zero hits (only false-positive substring matches like Mail.php/Email.php on '*ai*' glob, unrelated to AI). chat_ui_present is false at the product level (FreeScout is an email-based helpdesk, not a live-chat widget product) but this was not independently re-verified beyond the composer.json/app-tree scan — flagged as lower confidence than the has_ai_surface finding. soft_404_behavior not checked (out of scope for the lighter pass since there is no AI endpoint to characterize against it).",
+  "expected_findings": [],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf"
+  ],
+  "must_not_report": [
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    }
+  ]
+}
