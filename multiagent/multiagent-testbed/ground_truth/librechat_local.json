@@ -14,17 +14,32 @@
   "ai_surface": {
     "has_ai_surface": "yes",
     "ai_endpoints_true": [
-      "/api/agents/chat",
-      "/api/agents/chat/:endpoint",
-      "/api/agents/v1/chat/completions"
+      {
+        "url": "/api/agents/chat",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/agents/chat/:endpoint",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/agents/v1/chat/completions",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": true,
     "chat_ui_present": true,
     "injection_authorized": true,
     "soft_404_behavior": "catch_all_spa",
-    "stack_true": {"framework": "LibreChat (Express API + Vite/React SPA, agents-based chat engine)", "language": "Node.js/TypeScript"}
+    "stack_true": {
+      "framework": "LibreChat (Express API + Vite/React SPA, agents-based chat engine)",
+      "language": "Node.js/TypeScript"
+    }
   },
-  "notes": "Local LibreChat SPA. Soft-404 /admin,/dashboard,/manage,/graphql HTML shells are not real endpoints. Headers-only unauth surface is expected. AI detection is taxonomy/live-surface based (auth-gated 401 on /api/agents/chat and /api/agents/v1/chat/completions), not product-name hardcoding. Corrected from an earlier /api/messages|/api/ask reference — this container runs LibreChat's newer agents-based chat engine; /api/ask does not exist in this version's routes and /api/messages is conversation-history CRUD, not inference. /api/agents/chat/abort, /chat/active, /chat/status, /chat/stream are control-plane (status/cancel), not inference endpoints — a scanner that lists them as AI surfaces is misclassifying control plane as inference. NVD CVE mapping is off (fingerprint-only).",
+  "notes": "Local LibreChat SPA. Soft-404 /admin,/dashboard,/manage,/graphql HTML shells are not real endpoints. Headers-only unauth surface is expected. AI detection is taxonomy/live-surface based (auth-gated 401 on /api/agents/chat and /api/agents/v1/chat/completions), not product-name hardcoding. Corrected from an earlier /api/messages|/api/ask reference \u00e2\u20ac\u201d this container runs LibreChat's newer agents-based chat engine; /api/ask does not exist in this version's routes and /api/messages is conversation-history CRUD, not inference. /api/agents/chat/abort, /chat/active, /chat/status, /chat/stream are control-plane (status/cancel), not inference endpoints \u00e2\u20ac\u201d a scanner that lists them as AI surfaces is misclassifying control plane as inference. NVD CVE mapping is off (fingerprint-only).",
   "expected_findings": [
     {
       "id": "lc-csp",
@@ -74,7 +89,7 @@
     },
     {
       "type": "missing security header: x-xss-protection",
-      "reason": "Deprecated header — do not publish as Confirmed",
+      "reason": "Deprecated header \u00e2\u20ac\u201d do not publish as Confirmed",
       "category": "logic_bug"
     },
     {

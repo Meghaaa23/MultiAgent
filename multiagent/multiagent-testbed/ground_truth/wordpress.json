@@ -1,7 +1,9 @@
 {
   "target": "wordpress",
   "scope": "blackbox_unauth",
-  "url_aliases": ["http://localhost:3106"],
+  "url_aliases": [
+    "http://localhost:3106"
+  ],
   "extraction_note": "No source checked out on disk (official image, wordpress:latest resolved to WordPress core 7.0.2). Research sub-agent extracted /usr/src/wordpress and traced a full-tree grep hit through connectors.php, the connector registry class, admin menu registration, and about-page copy. I then independently re-verified the admin-side auth gate myself: grepped wp-admin/options-connectors.php directly.",
   "endpoints_true": [],
   "endpoints_auth_gated": [
@@ -10,18 +12,33 @@
   "ai_surface": {
     "has_ai_surface": "yes",
     "ai_endpoints_true": [
-      "wp-admin/options-connectors.php"
+      {
+        "url": "wp-admin/options-connectors.php",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": true,
     "chat_ui_present": false,
     "injection_authorized": true,
     "soft_404_behavior": null,
-    "stack_true": {"framework": "WordPress core 7.0.2", "language": "PHP"}
+    "stack_true": {
+      "framework": "WordPress core 7.0.2",
+      "language": "PHP"
+    }
   },
-  "notes": "SURPRISING, HIGH-VALUE FINDING: this is core WordPress, version 7.0.2 — not a plugin. wp-includes/php-ai-client/ is a full AI client library shipped in core (AiClient.php + an OpenAI-compatible provider implementation), wired to a new core Connectors API (wp-includes/connectors.php, class-wp-connector-registry.php) that supports type => 'ai_provider' connectors. wp-admin/menu.php registers a 'Connectors' submenu under Settings unconditionally (not plugin-gated); wp_supports_ai() in wp-includes/ai-client.php defaults to enabled; wp-admin/about.php confirms in copy: \"Opt in by connecting your preferred AI provider... adds a growing set of tools directly into the editor: create titles and excerpts, generate and edit images, and suggest alt text.\" No plugin install is required to activate the surface itself — only to register a live provider. AUTH VERIFIED (independently re-checked, not just relayed): wp-admin/options-connectors.php:13 has `if ( ! current_user_can( 'manage_options' ) ) { ... }` — the connector-configuration page requires WordPress admin capability. IMPORTANT SCOPE CAVEAT: this confirms the *configuration* surface (where an admin registers an AI provider/API key) is auth-gated. I could NOT find a registered REST route (register_rest_route) for the AI client specifically in wp-includes/ai-client.php or connectors.php in this pass — the actual *usage* surface (e.g. an editor AJAX/REST call that invokes the configured provider to generate a title) was not located/traced, so I do not know its auth requirement independently; do not assume it is equally gated without further verification if this becomes consequential.",
+  "notes": "SURPRISING, HIGH-VALUE FINDING: this is core WordPress, version 7.0.2 \u00e2\u20ac\u201d not a plugin. wp-includes/php-ai-client/ is a full AI client library shipped in core (AiClient.php + an OpenAI-compatible provider implementation), wired to a new core Connectors API (wp-includes/connectors.php, class-wp-connector-registry.php) that supports type => 'ai_provider' connectors. wp-admin/menu.php registers a 'Connectors' submenu under Settings unconditionally (not plugin-gated); wp_supports_ai() in wp-includes/ai-client.php defaults to enabled; wp-admin/about.php confirms in copy: \"Opt in by connecting your preferred AI provider... adds a growing set of tools directly into the editor: create titles and excerpts, generate and edit images, and suggest alt text.\" No plugin install is required to activate the surface itself \u00e2\u20ac\u201d only to register a live provider. AUTH VERIFIED (independently re-checked, not just relayed): wp-admin/options-connectors.php:13 has `if ( ! current_user_can( 'manage_options' ) ) { ... }` \u00e2\u20ac\u201d the connector-configuration page requires WordPress admin capability. IMPORTANT SCOPE CAVEAT: this confirms the *configuration* surface (where an admin registers an AI provider/API key) is auth-gated. I could NOT find a registered REST route (register_rest_route) for the AI client specifically in wp-includes/ai-client.php or connectors.php in this pass \u00e2\u20ac\u201d the actual *usage* surface (e.g. an editor AJAX/REST call that invokes the configured provider to generate a title) was not located/traced, so I do not know its auth requirement independently; do not assume it is equally gated without further verification if this becomes consequential.",
   "expected_findings": [],
-  "out_of_scope_types": ["sqli", "xss", "csrf"],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf"
+  ],
   "must_not_report": [
-    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"}
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    }
   ]
 }

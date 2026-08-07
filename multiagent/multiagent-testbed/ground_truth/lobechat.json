@@ -4,21 +4,28 @@
   "url_aliases": [
     "http://localhost:3125"
   ],
-  "extraction_note": "No source checked out on disk — extracted compiled Next.js server output (.next/server/) from the lobehub/lobe-chat:latest image via docker create + targeted docker cp of specific compiled route files (full /app copy aborted on node_modules symlinks, same as other Node-based images on this Windows host), then read middleware.js and the chat route.js directly.",
+  "extraction_note": "No source checked out on disk \u00e2\u20ac\u201d extracted compiled Next.js server output (.next/server/) from the lobehub/lobe-chat:latest image via docker create + targeted docker cp of specific compiled route files (full /app copy aborted on node_modules symlinks, same as other Node-based images on this Windows host), then read middleware.js and the chat route.js directly.",
   "endpoints_true": [],
   "endpoints_auth_gated": [],
   "ai_surface": {
     "has_ai_surface": "yes",
     "ai_endpoints_true": [
-      "/webapi/chat/:provider"
+      {
+        "url": "/webapi/chat/:provider",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": null,
     "chat_ui_present": true,
     "injection_authorized": true,
     "soft_404_behavior": "proper_404",
-    "stack_true": {"framework": "Next.js (standalone server build)", "language": "TypeScript/Node.js"}
+    "stack_true": {
+      "framework": "Next.js (standalone server build)",
+      "language": "TypeScript/Node.js"
+    }
   },
-  "notes": "PARTIALLY VERIFIED — recording what was and wasn't confirmed rather than guessing on the unresolved part. Real inference route confirmed via compiled route tree: /app/.next/server/app/(backend)/webapi/chat/[provider]/route.js (also a hardcoded /webapi/chat/azureai/route.js variant) — App Router middleware-manifest.json confirms /(api|trpc|webapi)(.*) is matched by src/middleware.js. Middleware.js parses `process.env.ACCESS_CODE?.split(',').filter(Boolean)||[]` into an ACCESS_CODES config value; this target's docker-compose.yml sets ACCESS_CODE='' (empty string), which parses to an empty array. The chat route.js itself references and calls a `checkAuth` function, confirming SOME auth gate exists in the real code path (this is not an ungated/dead-code route) — but the checkAuth implementation itself is imported from a separate compiled chunk not extracted in this pass, so I could NOT trace whether an empty ACCESS_CODES array means the gate opens (no code required) or falls back to a different auth mode (e.g. required OAuth login). Recording ai_auth_gated as null/not-verified rather than asserting either way — LobeChat's publicly documented behavior is that an empty ACCESS_CODE disables the access-code prompt, but that is product documentation, not something I confirmed by reading the checkAuth logic itself in this build, and the project standard here is to not assert from documentation what wasn't verified in code. soft_404_behavior verified via presence of Next.js's standard _not-found route artifacts (app/_not-found.html/.rsc/.meta) — standalone Next servers return a real 404 status for unmatched app-router paths, not a SPA index.html fallback (contrast with the Express/FastAPI SPA-style catch-alls seen in flowise/anythingllm/open-webui).",
+  "notes": "PARTIALLY VERIFIED \u00e2\u20ac\u201d recording what was and wasn't confirmed rather than guessing on the unresolved part. Real inference route confirmed via compiled route tree: /app/.next/server/app/(backend)/webapi/chat/[provider]/route.js (also a hardcoded /webapi/chat/azureai/route.js variant) \u00e2\u20ac\u201d App Router middleware-manifest.json confirms /(api|trpc|webapi)(.*) is matched by src/middleware.js. Middleware.js parses `process.env.ACCESS_CODE?.split(',').filter(Boolean)||[]` into an ACCESS_CODES config value; this target's docker-compose.yml sets ACCESS_CODE='' (empty string), which parses to an empty array. The chat route.js itself references and calls a `checkAuth` function, confirming SOME auth gate exists in the real code path (this is not an ungated/dead-code route) \u00e2\u20ac\u201d but the checkAuth implementation itself is imported from a separate compiled chunk not extracted in this pass, so I could NOT trace whether an empty ACCESS_CODES array means the gate opens (no code required) or falls back to a different auth mode (e.g. required OAuth login). Recording ai_auth_gated as null/not-verified rather than asserting either way \u00e2\u20ac\u201d LobeChat's publicly documented behavior is that an empty ACCESS_CODE disables the access-code prompt, but that is product documentation, not something I confirmed by reading the checkAuth logic itself in this build, and the project standard here is to not assert from documentation what wasn't verified in code. soft_404_behavior verified via presence of Next.js's standard _not-found route artifacts (app/_not-found.html/.rsc/.meta) \u00e2\u20ac\u201d standalone Next servers return a real 404 status for unmatched app-router paths, not a SPA index.html fallback (contrast with the Express/FastAPI SPA-style catch-alls seen in flowise/anythingllm/open-webui).",
   "expected_findings": [],
   "out_of_scope_types": [
     "sqli",
@@ -34,7 +41,7 @@
     {
       "type": "ai_auth_gated",
       "match": "asserted true or false without verifying checkAuth logic",
-      "reason": "Only the presence of a checkAuth call was confirmed from source; its pass/fail logic for an empty ACCESS_CODES array was not traced — do not report a confirmed auth status for this endpoint beyond what is recorded here",
+      "reason": "Only the presence of a checkAuth call was confirmed from source; its pass/fail logic for an empty ACCESS_CODES array was not traced \u00e2\u20ac\u201d do not report a confirmed auth status for this endpoint beyond what is recorded here",
       "category": "irreducible"
     }
   ]

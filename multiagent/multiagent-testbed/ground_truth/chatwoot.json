@@ -17,19 +17,42 @@
   "ai_surface": {
     "has_ai_surface": "partial",
     "ai_endpoints_true": [
-      "/api/v1/accounts/:account_id/captain/tasks/rewrite",
-      "/api/v1/accounts/:account_id/captain/tasks/summarize",
-      "/api/v1/accounts/:account_id/captain/tasks/reply_suggestion",
-      "/api/v1/accounts/:account_id/captain/tasks/label_suggestion",
-      "/api/v1/accounts/:account_id/captain/tasks/follow_up"
+      {
+        "url": "/api/v1/accounts/:account_id/captain/tasks/rewrite",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/v1/accounts/:account_id/captain/tasks/summarize",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/v1/accounts/:account_id/captain/tasks/reply_suggestion",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/v1/accounts/:account_id/captain/tasks/label_suggestion",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/v1/accounts/:account_id/captain/tasks/follow_up",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": true,
     "chat_ui_present": true,
     "injection_authorized": true,
     "soft_404_behavior": "hybrid: SPA catch-all only under /app/*, real Rails 404 elsewhere",
-    "stack_true": {"framework": "Ruby on Rails (API) + Vue 3 SPA (Vite)", "language": "Ruby / TypeScript"}
+    "stack_true": {
+      "framework": "Ruby on Rails (API) + Vue 3 SPA (Vite)",
+      "language": "Ruby / TypeScript"
+    }
   },
-  "notes": "Source-verified (not documented-knowledge): Chatwoot ships a live 'Captain' AI feature. config/routes.rb:64-104 defines a captain namespace with tasks_controller actions (rewrite/summarize/reply_suggestion/label_suggestion/follow_up), each backed by a real service in lib/captain/*.rb (non-enterprise) that calls RubyLLM/OpenAI-compatible chat.ask(...) (lib/captain/base_task_service.rb:68-83). config/features.yml:240-242 shows captain_tasks is enabled:true with no premium:true gate, i.e. on by default in the OSS/self-hosted edition — this is NOT an enterprise-only feature. Auth: app/controllers/api/base_controller.rb:4-6 requires Devise session or api_access_token on every API request; tasks_controller additionally runs Pundit authorize(:'captain/tasks') (app/policies/captain/tasks_policy.rb allows any authenticated account user — no anonymous access). FUNCTIONAL CAVEAT: lib/captain/base_task_service.rb:43-44 short-circuits with {error: 'captain.api_key_missing', error_code: 401} if no OpenAI-compatible API key is configured (system-wide InstallationConfig row or per-account 'openai' integration hook) — so the endpoint is live/wired/auth-gated but will return a functional-not-configured error rather than a real completion unless an admin has supplied a key. This is why has_ai_surface is 'partial' rather than 'yes': the surface is real and reachable (with auth) but its downstream LLM call is gated on deployment config, not just on auth. Fuller AI-agent features (captain_integration, copilot_threads, faq_suggestions, embeddings) ARE enterprise/premium-gated (config/features.yml:143-146, enabled:false) and code lives under enterprise/ — do not conflate with the always-on tasks endpoints above. Frontend AI UI: app/javascript/dashboard/components-next/copilot/ and .../captain/ trees exist and are wired to these endpoints, not cosmetic.",
+  "notes": "Source-verified (not documented-knowledge): Chatwoot ships a live 'Captain' AI feature. config/routes.rb:64-104 defines a captain namespace with tasks_controller actions (rewrite/summarize/reply_suggestion/label_suggestion/follow_up), each backed by a real service in lib/captain/*.rb (non-enterprise) that calls RubyLLM/OpenAI-compatible chat.ask(...) (lib/captain/base_task_service.rb:68-83). config/features.yml:240-242 shows captain_tasks is enabled:true with no premium:true gate, i.e. on by default in the OSS/self-hosted edition \u00e2\u20ac\u201d this is NOT an enterprise-only feature. Auth: app/controllers/api/base_controller.rb:4-6 requires Devise session or api_access_token on every API request; tasks_controller additionally runs Pundit authorize(:'captain/tasks') (app/policies/captain/tasks_policy.rb allows any authenticated account user \u00e2\u20ac\u201d no anonymous access). FUNCTIONAL CAVEAT: lib/captain/base_task_service.rb:43-44 short-circuits with {error: 'captain.api_key_missing', error_code: 401} if no OpenAI-compatible API key is configured (system-wide InstallationConfig row or per-account 'openai' integration hook) \u00e2\u20ac\u201d so the endpoint is live/wired/auth-gated but will return a functional-not-configured error rather than a real completion unless an admin has supplied a key. This is why has_ai_surface is 'partial' rather than 'yes': the surface is real and reachable (with auth) but its downstream LLM call is gated on deployment config, not just on auth. Fuller AI-agent features (captain_integration, copilot_threads, faq_suggestions, embeddings) ARE enterprise/premium-gated (config/features.yml:143-146, enabled:false) and code lives under enterprise/ \u00e2\u20ac\u201d do not conflate with the always-on tasks endpoints above. Frontend AI UI: app/javascript/dashboard/components-next/copilot/ and .../captain/ trees exist and are wired to these endpoints, not cosmetic.",
   "expected_findings": [],
   "out_of_scope_types": [
     "sqli",
@@ -45,7 +68,7 @@
     },
     {
       "type": "prompt injection (unauthenticated)",
-      "reason": "All captain/tasks endpoints require authenticate_user!/api_access_token plus Pundit authorization — no unauthenticated path exists",
+      "reason": "All captain/tasks endpoints require authenticate_user!/api_access_token plus Pundit authorization \u00e2\u20ac\u201d no unauthenticated path exists",
       "category": "logic_bug"
     }
   ]

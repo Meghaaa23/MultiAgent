@@ -4,7 +4,7 @@
   "url_aliases": [
     "http://localhost:7860"
   ],
-  "extraction_note": "No source checked out on disk — extracted the langflow Python package from the langflowai/langflow:latest image via `docker create` + `docker cp` (found site-packages path via a throwaway `docker run --entrypoint python3 -c 'import langflow; print(...)'`, no long-running container). Source-verified.",
+  "extraction_note": "No source checked out on disk \u00e2\u20ac\u201d extracted the langflow Python package from the langflowai/langflow:latest image via `docker create` + `docker cp` (found site-packages path via a throwaway `docker run --entrypoint python3 -c 'import langflow; print(...)'`, no long-running container). Source-verified.",
   "endpoints_true": [],
   "endpoints_auth_gated": [
     "/api/v1/run/:flow_id_or_name"
@@ -12,15 +12,22 @@
   "ai_surface": {
     "has_ai_surface": "yes",
     "ai_endpoints_true": [
-      "/api/v1/run/:flow_id_or_name"
+      {
+        "url": "/api/v1/run/:flow_id_or_name",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": true,
     "chat_ui_present": true,
     "injection_authorized": true,
     "soft_404_behavior": "hybrid: proper 404 (JSON) for /api/* paths, catch_all_spa (index.html) for all other unmatched paths",
-    "stack_true": {"framework": "FastAPI (backend), frontend bundled as static files", "language": "Python"}
+    "stack_true": {
+      "framework": "FastAPI (backend), frontend bundled as static files",
+      "language": "Python"
+    }
   },
-  "notes": "SOURCE-VERIFIED CONTRAST CASE (auth correctly enforced, unlike flowise/ollama/openhands/rasa/anythingllm's primary surfaces): the real inference endpoint POST /api/v1/run/{flow_id_or_name} (endpoints.py:746) is gated by Depends(api_key_security) (line 753). Traced api_key_security through services/auth/utils.py -> services/auth/service.py:_api_key_security_impl. Langflow's OUT-OF-THE-BOX DEFAULT is AUTO_LOGIN=true, under which an unkeyed request silently auto-logs-in as the superuser if skip_auth_auto_login is also set (service.py:259-278) — that would be a real unauthenticated-by-default finding for a stock deployment. However, THIS target's docker-compose.yml explicitly sets LANGFLOW_AUTO_LOGIN=false, which routes into the elif branch (service.py:290-294): `elif not query_param and not header_param: raise HTTPException(403, 'An API key must be passed as query or header')` — no bypass exists in this branch; a real API key is required. CONCLUSION for THIS deployment: ai_auth_gated=true, verified from the actual enforcement code, not from the presence of the AUTO_LOGIN=false env var alone. IMPORTANT CAVEAT FOR REPRODUCIBILITY: if this container's compose config changes to omit LANGFLOW_AUTO_LOGIN (reverting to the framework default), the same code path would allow unauthenticated superuser access — this finding is deployment-config-dependent, not an inherent framework property, and should be re-verified if the compose file changes. soft_404_behavior verified via setup_static_files() (main.py:911-938): a custom_404_handler distinguishes request paths — /api/* paths get a real JSON 404 with the original exception detail; all other paths get index.html served inside the same handler (functionally a 200-equivalent SPA fallback). This is a more scanner-resistant hybrid than the other AI-native targets investigated, which either catch-all everything (flowise, anythingllm, openhands) or 404 everything (ollama, dify).",
+  "notes": "SOURCE-VERIFIED CONTRAST CASE (auth correctly enforced, unlike flowise/ollama/openhands/rasa/anythingllm's primary surfaces): the real inference endpoint POST /api/v1/run/{flow_id_or_name} (endpoints.py:746) is gated by Depends(api_key_security) (line 753). Traced api_key_security through services/auth/utils.py -> services/auth/service.py:_api_key_security_impl. Langflow's OUT-OF-THE-BOX DEFAULT is AUTO_LOGIN=true, under which an unkeyed request silently auto-logs-in as the superuser if skip_auth_auto_login is also set (service.py:259-278) \u00e2\u20ac\u201d that would be a real unauthenticated-by-default finding for a stock deployment. However, THIS target's docker-compose.yml explicitly sets LANGFLOW_AUTO_LOGIN=false, which routes into the elif branch (service.py:290-294): `elif not query_param and not header_param: raise HTTPException(403, 'An API key must be passed as query or header')` \u00e2\u20ac\u201d no bypass exists in this branch; a real API key is required. CONCLUSION for THIS deployment: ai_auth_gated=true, verified from the actual enforcement code, not from the presence of the AUTO_LOGIN=false env var alone. IMPORTANT CAVEAT FOR REPRODUCIBILITY: if this container's compose config changes to omit LANGFLOW_AUTO_LOGIN (reverting to the framework default), the same code path would allow unauthenticated superuser access \u00e2\u20ac\u201d this finding is deployment-config-dependent, not an inherent framework property, and should be re-verified if the compose file changes. soft_404_behavior verified via setup_static_files() (main.py:911-938): a custom_404_handler distinguishes request paths \u00e2\u20ac\u201d /api/* paths get a real JSON 404 with the original exception detail; all other paths get index.html served inside the same handler (functionally a 200-equivalent SPA fallback). This is a more scanner-resistant hybrid than the other AI-native targets investigated, which either catch-all everything (flowise, anythingllm, openhands) or 404 everything (ollama, dify).",
   "expected_findings": [],
   "out_of_scope_types": [
     "sqli",

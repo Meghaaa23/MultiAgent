@@ -4,7 +4,7 @@
   "url_aliases": [
     "http://localhost:3124"
   ],
-  "extraction_note": "No source checked out on disk — extracted backend package (main.py, routers/ollama.py, utils/auth.py, env.py) and package.json from the running container 'open-webui' (image ghcr.io/open-webui/open-webui:main, v0.9.6) via docker cp, no app process started for extraction.",
+  "extraction_note": "No source checked out on disk \u00e2\u20ac\u201d extracted backend package (main.py, routers/ollama.py, utils/auth.py, env.py) and package.json from the running container 'open-webui' (image ghcr.io/open-webui/open-webui:main, v0.9.6) via docker cp, no app process started for extraction.",
   "endpoints_true": [],
   "endpoints_auth_gated": [
     "/api/chat/completions",
@@ -18,24 +18,67 @@
   "ai_surface": {
     "has_ai_surface": "yes",
     "ai_endpoints_true": [
-      "/api/chat/completions",
-      "/api/v1/chat/completions",
-      "/api/message",
-      "/api/v1/messages",
-      "/api/embeddings",
-      "/api/v1/embeddings",
-      "/ollama/api/chat",
-      "/ollama/api/generate",
-      "/ollama/v1/chat/completions",
-      "/ollama/v1/completions"
+      {
+        "url": "/api/chat/completions",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/v1/chat/completions",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/message",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/v1/messages",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/embeddings",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/v1/embeddings",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/ollama/api/chat",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/ollama/api/generate",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/ollama/v1/chat/completions",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/ollama/v1/completions",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": true,
     "chat_ui_present": true,
     "injection_authorized": true,
     "soft_404_behavior": "catch_all_spa",
-    "stack_true": {"framework": "FastAPI (backend) + SvelteKit (frontend)", "language": "Python / TypeScript"}
+    "stack_true": {
+      "framework": "FastAPI (backend) + SvelteKit (frontend)",
+      "language": "Python / TypeScript"
+    }
   },
-  "notes": "Source-verified from the live container. Every real inference route uses user=Depends(get_verified_user) (main.py:1671, routers/ollama.py:886); get_verified_user (utils/auth.py:452) requires a valid JWT (cookie or Authorization: Bearer) or an sk- prefixed API key, else 401. WEBUI_AUTH defaults to 'True' (env.py:603) and this target's docker-compose.yml does not override it, so auth is on as deployed. CONTROL-PLANE-AS-INFERENCE TRAP: POST /api/chat/completed (main.py:2277) is name-confusable with /api/chat/completions but its own docstring says 'Deprecated: outlet filters now run inline during chat completion. Kept for backward compatibility' — it post-processes an already-generated response, it does not generate one; deliberately excluded from ai_endpoints_true. Likewise /api/tasks/stop/{task_id} and /api/tasks/chat/{chat_id}[/stop] (main.py:2313-2345) are generation-cancellation control plane, not inference. soft_404_behavior verified via SPAStaticFiles (main.py:599-611), mounted at '/' after all API routers (main.py:3021-3025) — any unmatched path, including unmatched /api/* paths, falls through to a 200 SPA shell (except paths ending .js, which still 404).",
+  "notes": "Source-verified from the live container. Every real inference route uses user=Depends(get_verified_user) (main.py:1671, routers/ollama.py:886); get_verified_user (utils/auth.py:452) requires a valid JWT (cookie or Authorization: Bearer) or an sk- prefixed API key, else 401. WEBUI_AUTH defaults to 'True' (env.py:603) and this target's docker-compose.yml does not override it, so auth is on as deployed. CONTROL-PLANE-AS-INFERENCE TRAP: POST /api/chat/completed (main.py:2277) is name-confusable with /api/chat/completions but its own docstring says 'Deprecated: outlet filters now run inline during chat completion. Kept for backward compatibility' \u00e2\u20ac\u201d it post-processes an already-generated response, it does not generate one; deliberately excluded from ai_endpoints_true. Likewise /api/tasks/stop/{task_id} and /api/tasks/chat/{chat_id}[/stop] (main.py:2313-2345) are generation-cancellation control plane, not inference. soft_404_behavior verified via SPAStaticFiles (main.py:599-611), mounted at '/' after all API routers (main.py:3021-3025) \u00e2\u20ac\u201d any unmatched path, including unmatched /api/* paths, falls through to a 200 SPA shell (except paths ending .js, which still 404).",
   "expected_findings": [],
   "out_of_scope_types": [
     "sqli",

@@ -4,7 +4,7 @@
   "url_aliases": [
     "http://localhost:3104"
   ],
-  "extraction_note": "No source checked out on disk (official image ghcr.io/zammad/zammad:latest, full Rails source present inside the image at /opt/zammad, unlike the distroless mattermost image). Read directly via docker run --entrypoint sh + cat/grep against the image filesystem (no container run/RAM cost beyond the momentary find/cat process). This target turned out to have real AI features, unlike the other AI-adjacent targets in this batch (freescout/papercups/rocketchat/mattermost) — required the fuller trace, not the lighter no-AI pass.",
+  "extraction_note": "No source checked out on disk (official image ghcr.io/zammad/zammad:latest, full Rails source present inside the image at /opt/zammad, unlike the distroless mattermost image). Read directly via docker run --entrypoint sh + cat/grep against the image filesystem (no container run/RAM cost beyond the momentary find/cat process). This target turned out to have real AI features, unlike the other AI-adjacent targets in this batch (freescout/papercups/rocketchat/mattermost) \u00e2\u20ac\u201d required the fuller trace, not the lighter no-AI pass.",
   "endpoints_true": [],
   "endpoints_auth_gated": [
     "/api/v1/ai_assistance/text_tools/:id"
@@ -12,15 +12,22 @@
   "ai_surface": {
     "has_ai_surface": "partial",
     "ai_endpoints_true": [
-      "/api/v1/ai_assistance/text_tools/:id"
+      {
+        "url": "/api/v1/ai_assistance/text_tools/:id",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": true,
     "chat_ui_present": false,
     "injection_authorized": true,
     "soft_404_behavior": null,
-    "stack_true": {"framework": "Ruby on Rails", "language": "Ruby"}
+    "stack_true": {
+      "framework": "Ruby on Rails",
+      "language": "Ruby"
+    }
   },
-  "notes": "Source-verified, same pattern as chatwoot.json's Captain feature. Zammad ships real, first-party AI controllers: app/controllers/ai_assistance_controller.rb (text tools: rewrite/summarize/etc via an LLM), ai_text_tools_controller.rb, ai_agents_controller.rb, plus background jobs (ticket_ai_assistance_summarize_job.rb, ticket_ai_assistance_generate_knowledge_base_answer_job.rb, trigger_ai_agent_job.rb). Route confirmed: config/routes/ai_assistance.rb defines `scope api_path { resources :ai_assistance, only: [] { collection { post 'text_tools/:id', action: :text_tools } } }`; api_path = '/api/v1' (config/application.rb:57) -> POST /api/v1/ai_assistance/text_tools/:id. AIAssistanceController has `prepend_before_action :authenticate_and_authorize!` applied to the whole controller (real Rails auth enforcement, no bypass found) -> ai_auth_gated=true. FUNCTIONAL CAVEAT (why has_ai_surface is 'partial' not 'yes'): app/assets/javascripts/app/views/ai/missing_provider_alert.jst.eco and app/models/setting/validation/ai_provider*.rb confirm Zammad requires an admin to configure an AI provider (API key) before these features work — same functional-gating pattern as Chatwoot's Captain (config exists, auth exists, but the downstream LLM call is gated on deployment-time provider configuration not verified as present in this container). chat_ui_present is false: this is a ticketing/helpdesk product (agent-to-customer via email/tickets), not a live chat widget, and no chat-widget route was found alongside the AI controllers. soft_404_behavior not checked in this pass (focus was the AI-surface finding, which was the consequential unknown for this target).",
+  "notes": "Source-verified, same pattern as chatwoot.json's Captain feature. Zammad ships real, first-party AI controllers: app/controllers/ai_assistance_controller.rb (text tools: rewrite/summarize/etc via an LLM), ai_text_tools_controller.rb, ai_agents_controller.rb, plus background jobs (ticket_ai_assistance_summarize_job.rb, ticket_ai_assistance_generate_knowledge_base_answer_job.rb, trigger_ai_agent_job.rb). Route confirmed: config/routes/ai_assistance.rb defines `scope api_path { resources :ai_assistance, only: [] { collection { post 'text_tools/:id', action: :text_tools } } }`; api_path = '/api/v1' (config/application.rb:57) -> POST /api/v1/ai_assistance/text_tools/:id. AIAssistanceController has `prepend_before_action :authenticate_and_authorize!` applied to the whole controller (real Rails auth enforcement, no bypass found) -> ai_auth_gated=true. FUNCTIONAL CAVEAT (why has_ai_surface is 'partial' not 'yes'): app/assets/javascripts/app/views/ai/missing_provider_alert.jst.eco and app/models/setting/validation/ai_provider*.rb confirm Zammad requires an admin to configure an AI provider (API key) before these features work \u00e2\u20ac\u201d same functional-gating pattern as Chatwoot's Captain (config exists, auth exists, but the downstream LLM call is gated on deployment-time provider configuration not verified as present in this container). chat_ui_present is false: this is a ticketing/helpdesk product (agent-to-customer via email/tickets), not a live chat widget, and no chat-widget route was found alongside the AI controllers. soft_404_behavior not checked in this pass (focus was the AI-surface finding, which was the consequential unknown for this target).",
   "expected_findings": [],
   "out_of_scope_types": [
     "sqli",
@@ -36,7 +43,7 @@
     },
     {
       "type": "prompt injection (unauthenticated)",
-      "reason": "ai_assistance_controller.rb requires authenticate_and_authorize! on every action — no unauthenticated path exists",
+      "reason": "ai_assistance_controller.rb requires authenticate_and_authorize! on every action \u00e2\u20ac\u201d no unauthenticated path exists",
       "category": "logic_bug"
     }
   ]

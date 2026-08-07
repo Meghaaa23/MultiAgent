@@ -1,7 +1,9 @@
 {
   "target": "dolibarr",
   "scope": "blackbox_unauth",
-  "url_aliases": ["http://localhost:3110"],
+  "url_aliases": [
+    "http://localhost:3110"
+  ],
   "extraction_note": "No source checked out on disk (image dolibarr/dolibarr:latest). Research sub-agent extracted /var/www/html/ai/* and read class/ai.class.php directly. I independently re-verified the auth requirement myself by reading ai/ajax/generate_content.php in full.",
   "endpoints_true": [],
   "endpoints_auth_gated": [
@@ -13,22 +15,54 @@
   "ai_surface": {
     "has_ai_surface": "partial",
     "ai_endpoints_true": [
-      "ai/ajax/generate_content.php",
-      "ai/admin/setup.php",
-      "ai/admin/custom_prompt.php",
-      "ai/admin/server_mcp.php"
+      {
+        "url": "ai/ajax/generate_content.php",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "ai/admin/setup.php",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "ai/admin/custom_prompt.php",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "ai/admin/server_mcp.php",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": true,
     "chat_ui_present": false,
     "injection_authorized": true,
     "soft_404_behavior": null,
-    "stack_true": {"framework": "Dolibarr (custom PHP MVC, no Symfony/Laravel)", "language": "PHP"}
+    "stack_true": {
+      "framework": "Dolibarr (custom PHP MVC, no Symfony/Laravel)",
+      "language": "PHP"
+    }
   },
-  "notes": "Live, wired AI module shipped in the image itself at /var/www/html/ai/: class/ai.class.php builds real HTTP calls (chat/completions, images/generations, audio/speech, transcriptions) to configurable providers (chatgpt/groq/mistral/custom), driven by admin-settable AI_API_*_KEY/AI_API_*_URL. ai/admin/server_mcp.php is an MCP (Model Context Protocol) server admin page — a second AI-adjacent surface beyond plain chat completion. AUTH VERIFIED (independently re-checked): ai/ajax/generate_content.php does NOT define the NOLOGIN constant before requiring ../../main.inc.php — in Dolibarr's framework convention, absence of NOLOGIN means the bootstrap enforces a valid session by default (no bypass found). The file also gates on `if (!isModEnabled('ai')) { accessforbidden(...) }` — a second, module-enabled check on top of login. has_ai_surface is 'partial' because functional use additionally requires an admin to have configured a provider API key (AI_API_*_KEY), same pattern as chatwoot/zammad/plane — live and auth-gated, but inert without deployment-time configuration not verified as present here.",
+  "notes": "Live, wired AI module shipped in the image itself at /var/www/html/ai/: class/ai.class.php builds real HTTP calls (chat/completions, images/generations, audio/speech, transcriptions) to configurable providers (chatgpt/groq/mistral/custom), driven by admin-settable AI_API_*_KEY/AI_API_*_URL. ai/admin/server_mcp.php is an MCP (Model Context Protocol) server admin page \u00e2\u20ac\u201d a second AI-adjacent surface beyond plain chat completion. AUTH VERIFIED (independently re-checked): ai/ajax/generate_content.php does NOT define the NOLOGIN constant before requiring ../../main.inc.php \u00e2\u20ac\u201d in Dolibarr's framework convention, absence of NOLOGIN means the bootstrap enforces a valid session by default (no bypass found). The file also gates on `if (!isModEnabled('ai')) { accessforbidden(...) }` \u00e2\u20ac\u201d a second, module-enabled check on top of login. has_ai_surface is 'partial' because functional use additionally requires an admin to have configured a provider API key (AI_API_*_KEY), same pattern as chatwoot/zammad/plane \u00e2\u20ac\u201d live and auth-gated, but inert without deployment-time configuration not verified as present here.",
   "expected_findings": [],
-  "out_of_scope_types": ["sqli", "xss", "csrf", "prompt-injection"],
+  "out_of_scope_types": [
+    "sqli",
+    "xss",
+    "csrf",
+    "prompt-injection"
+  ],
   "must_not_report": [
-    {"type": "authenticated_scan", "reason": "black-box unauthenticated only", "category": "logic_bug"},
-    {"type": "prompt injection (unauthenticated)", "reason": "generate_content.php requires a valid Dolibarr session (no NOLOGIN) plus the ai module being enabled — no unauthenticated path exists", "category": "logic_bug"}
+    {
+      "type": "authenticated_scan",
+      "reason": "black-box unauthenticated only",
+      "category": "logic_bug"
+    },
+    {
+      "type": "prompt injection (unauthenticated)",
+      "reason": "generate_content.php requires a valid Dolibarr session (no NOLOGIN) plus the ai module being enabled \u00e2\u20ac\u201d no unauthenticated path exists",
+      "category": "logic_bug"
+    }
   ]
 }

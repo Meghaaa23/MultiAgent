@@ -4,27 +4,58 @@
   "url_aliases": [
     "http://localhost:11434"
   ],
-  "extraction_note": "No source checked out on disk (Go binary, compiled) — extracted the compiled /bin/ollama binary (39MB, unstripped) from container benchmark-ollama via docker cp and read embedded symbol/route-string literals directly (Go retains function symbol names and route strings unless explicitly stripped, so this is source-equivalent verification, not documentation-based guessing).",
+  "extraction_note": "No source checked out on disk (Go binary, compiled) \u00e2\u20ac\u201d extracted the compiled /bin/ollama binary (39MB, unstripped) from container benchmark-ollama via docker cp and read embedded symbol/route-string literals directly (Go retains function symbol names and route strings unless explicitly stripped, so this is source-equivalent verification, not documentation-based guessing).",
   "endpoints_true": [],
   "endpoints_auth_gated": [],
   "ai_surface": {
     "has_ai_surface": "yes",
     "ai_endpoints_true": [
-      "/api/generate",
-      "/api/chat",
-      "/api/embed",
-      "/api/embeddings",
-      "/v1/chat/completions",
-      "/v1/completions",
-      "/v1/embeddings"
+      {
+        "url": "/api/generate",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/chat",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/embed",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/api/embeddings",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/v1/chat/completions",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/v1/completions",
+        "tier": "live_surface",
+        "routes_without_config": true
+      },
+      {
+        "url": "/v1/embeddings",
+        "tier": "live_surface",
+        "routes_without_config": true
+      }
     ],
     "ai_auth_gated": false,
     "chat_ui_present": false,
     "injection_authorized": true,
     "soft_404_behavior": "proper_404",
-    "stack_true": {"framework": "Gin (gin-gonic)", "language": "Go"}
+    "stack_true": {
+      "framework": "Gin (gin-gonic)",
+      "language": "Go"
+    }
   },
-  "notes": "SOURCE-VERIFIED, UNAUTHENTICATED-BY-DEFAULT FINDING: no Auth/APIKey middleware wraps GenerateHandler/ChatHandler/EmbedHandler/EmbeddingsHandler/completionHandler in the binary. An OLLAMA_API_KEY env var does exist in this build (string present) enabling opt-in API-key enforcement, but it is not set in this target's docker-compose.yml (only image/ports/volumes, no auth env vars). The only gate present, allowedHostsMiddleware, is a Host-header/DNS-rebinding check equivalent to CORS, not authentication — it requires no credential. Net: /api/generate, /api/chat etc. are reachable by anyone who can reach port 11434, no credential required. CONTROL-PLANE-AS-INFERENCE TRAP: /api/pull, /api/push (model download/upload), /api/create (build model from Modelfile), /api/copy, /api/show (model metadata), /api/ps (list currently-loaded models — name reads like a process-status check, which it is; easily misclassified as inference by a pattern-matching scanner), /api/signin, /api/signout (Ollama Cloud account auth, unrelated to local inference) are all excluded from ai_endpoints_true — none of them run a completion. chat_ui_present is false: root '/' returns the plain-text string 'Ollama is running', not an HTML app — this is a headless API/CLI server. soft_404_behavior verified via Gin's default 'page not found' text found in the binary; no SPA static-file catch-all is compiled in.",
+  "notes": "SOURCE-VERIFIED, UNAUTHENTICATED-BY-DEFAULT FINDING: no Auth/APIKey middleware wraps GenerateHandler/ChatHandler/EmbedHandler/EmbeddingsHandler/completionHandler in the binary. An OLLAMA_API_KEY env var does exist in this build (string present) enabling opt-in API-key enforcement, but it is not set in this target's docker-compose.yml (only image/ports/volumes, no auth env vars). The only gate present, allowedHostsMiddleware, is a Host-header/DNS-rebinding check equivalent to CORS, not authentication \u00e2\u20ac\u201d it requires no credential. Net: /api/generate, /api/chat etc. are reachable by anyone who can reach port 11434, no credential required. CONTROL-PLANE-AS-INFERENCE TRAP: /api/pull, /api/push (model download/upload), /api/create (build model from Modelfile), /api/copy, /api/show (model metadata), /api/ps (list currently-loaded models \u00e2\u20ac\u201d name reads like a process-status check, which it is; easily misclassified as inference by a pattern-matching scanner), /api/signin, /api/signout (Ollama Cloud account auth, unrelated to local inference) are all excluded from ai_endpoints_true \u00e2\u20ac\u201d none of them run a completion. chat_ui_present is false: root '/' returns the plain-text string 'Ollama is running', not an HTML app \u00e2\u20ac\u201d this is a headless API/CLI server. soft_404_behavior verified via Gin's default 'page not found' text found in the binary; no SPA static-file catch-all is compiled in.",
   "expected_findings": [],
   "out_of_scope_types": [
     "sqli",
@@ -40,7 +71,7 @@
     {
       "type": "ai_endpoint",
       "match": "/api/ps",
-      "reason": "Lists currently-loaded models (process/status check), not an inference call — name is confusable with a status-of-inference concept but performs no completion",
+      "reason": "Lists currently-loaded models (process/status check), not an inference call \u00e2\u20ac\u201d name is confusable with a status-of-inference concept but performs no completion",
       "category": "logic_bug"
     }
   ]
