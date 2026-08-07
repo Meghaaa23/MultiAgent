@@ -33,11 +33,11 @@ shape; the fields this script reads are all nested under "ai_surface":
   ai_endpoints_true entries may also be bare strings (pre-migration files);
   they are upgraded to {"url": s, "tier": None, "routes_without_config": True}.
 
-Scan-result schema (runs/<target>_r<N>.json): see SCAN_KEYS below. This is
-NOT yet verified against web_scanner_agent.py's actual JSON output shape —
-that reconciliation is a prerequisite for Step 4 (determinism runs) and is
-tracked as an open item, not assumed here. See the module docstring note at
-the bottom of this file before wiring this up against real scan output.
+Scan-result schema (runs/<target>_r<N>.json): see SCAN_KEYS below. Produced
+from a real scan_application() output dict via scan_result_adapter.py — see
+that file, not this one, for the mapping from the scanner's actual fields
+(endpoints_discovered, eval_metrics, ai_fingerprint.evidence_items, ...) to
+this shape.
 """
 
 from __future__ import annotations
@@ -143,7 +143,10 @@ def _has_evidence(f: dict) -> bool:
     if "evidence_present" in f:
         return bool(f["evidence_present"])
     ev = f.get("evidence")
-    return bool(ev and str(ev).strip())
+    # bool(ev) alone is correct for str/list/None; a plain str(ev).strip()
+    # check would be WRONG for the real scanner's evidence dicts, since
+    # str({}) == "{}" is truthy even though the dict is empty.
+    return bool(ev)
 
 
 # --------------------------------------------------------------------------
@@ -615,12 +618,25 @@ def selftest():
     check("real_schema.recall", r["recall_strict"], 1.0)
     check("real_schema.gated", r["ai_auth_gated"], False)
 
+    # 12. empty-dict evidence must NOT count as "has evidence" — the real
+    #     scanner's findings carry evidence as a dict, not a string, and
+    #     str({}) == "{}" is truthy even though the dict is empty. This is a
+    #     regression test for that exact bug class.
+    g = gt("t12", "unverifiable", [])
+    r = grade_target(g, [run("t12", findings=[
+        {"type": "cors", "location": "http://h/", "status": "Confirmed", "evidence": {}}])])
+    check("emptydict.overclaim", r["overclaim_rate"], 1.0)
+    r = grade_target(g, [run("t12", findings=[
+        {"type": "cors", "location": "http://h/", "status": "Confirmed",
+         "evidence": {"confidence": "High"}}])])
+    check("nonemptydict.overclaim", r["overclaim_rate"], 0.0)
+
     if fails:
         print("SELFTEST FAILED")
         for f in fails:
             print("  " + f)
         return 1
-    print("selftest: 11 cases OK")
+    print("selftest: 12 cases OK")
     return 0
 
 
@@ -629,12 +645,13 @@ if __name__ == "__main__":
 
 
 # --------------------------------------------------------------------------
-# OPEN ITEM (not resolved in this pass): the SCAN_KEYS / scan-result schema
-# above (ai_surfaces, findings, coverage, injection, wall_time_s) has not
-# been reconciled against web_scanner_agent.py's actual JSON output shape
-# (endpoints_discovered, coverage_assessment, eval_metrics, vulnerabilities,
-# ...). Before Step 4 (determinism runs) can feed this script real data,
-# either web_scanner_agent.py needs an adapter/export step that emits this
-# exact shape, or this script's field names need to change to match the
-# scanner's existing eval_metrics output. Do not assume they already align.
+# RESOLVED: the SCAN_KEYS / scan-result schema above (ai_surfaces, findings,
+# coverage, injection, wall_time_s) is produced from web_scanner_agent.py's
+# real output (endpoints_discovered, coverage_assessment, eval_metrics,
+# vulnerabilities, ai_fingerprint.evidence_items/auth_required_paths/
+# ml_endpoints) by scan_result_adapter.py, not natively emitted by the
+# scanner and not hand-matched here. See that file's docstring for exactly
+# which scanner fields map to which run fields, and its own --selftest for
+# an end-to-end check (adapter output -> metrics.grade_target -> correct
+# recall/overclaim numbers) against a scan_application()-shaped fixture.
 # --------------------------------------------------------------------------
