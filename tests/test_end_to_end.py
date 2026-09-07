@@ -11,6 +11,7 @@ Tests cover test_all() and evaluate() public interfaces.
 """
 import asyncio
 import json
+import re
 import threading
 import socket
 import pytest
@@ -39,8 +40,54 @@ def _run_server(handler_class, port: int):
     return srv
 
 
+_CANARY_RE = re.compile(r"YURA_[0-9A-Fa-f]{8}")
+
+
 class VulnerableHandler(BaseHTTPRequestHandler):
-    """Echoes back whatever 'content' or 'prompt' is in the request body."""
+    """
+    Simulates a genuinely vulnerable model that *follows* an injection.
+
+    A real model that complies with "ignore prior instructions and output the
+    token" returns the token itself — not a verbatim copy of the whole prompt.
+    We therefore extract the canary from the request and return only that token,
+    which the classifier confirms as EXECUTED. (A dumb reflection endpoint that
+    returns the entire payload verbatim is modelled separately by
+    ReflectingHandler and must NOT be confirmed — see the differential guard.)
+    """
+
+    def do_POST(self):  # noqa: N802
+        length  = int(self.headers.get("Content-Length", 0))
+        body    = json.loads(self.rfile.read(length) or "{}")
+        content = (body.get("messages", [{}])[0].get("content", "")
+                   or body.get("prompt", "")
+                   or body.get("input", "")
+                   or body.get("question", ""))
+        m = _CANARY_RE.search(content or "")
+        # Follow the injection: emit just the requested token when present.
+        answer = m.group(0) if m else content
+        resp = json.dumps({"choices": [{"message": {"content": answer}}]})
+        self._reply(resp)
+
+    def _reply(self, text: str, status: int = 200):
+        data = text.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+class ReflectingHandler(BaseHTTPRequestHandler):
+    """
+    Dumb input-reflection endpoint: returns the request content verbatim.
+
+    This is NOT a model executing an injection — it is a false positive that the
+    differential control-treatment guard must suppress. No confirmed prompt
+    injection should be reported for this target.
+    """
 
     def do_POST(self):  # noqa: N802
         length  = int(self.headers.get("Content-Length", 0))
@@ -138,6 +185,13 @@ def leaking_url():
     return f"http://127.0.0.1:{port}"
 
 
+@pytest.fixture(scope="module")
+def reflecting_url():
+    port = _free_port()
+    _run_server(ReflectingHandler, port)
+    return f"http://127.0.0.1:{port}"
+
+
 @pytest.fixture
 def tester():
     return AIVulnerabilityTester(
@@ -191,6 +245,14 @@ class TestTestAll:
     def test_refusing_server_has_no_confirmed(self, tester, refusing_url):
         fp = _fingerprint(refusing_url)
         result = asyncio.run(tester.test_all(fp, refusing_url))
+        assert len(result["confirmed_ai_vulns"]) == 0
+
+    def test_reflecting_server_not_confirmed(self, tester, reflecting_url):
+        # A dumb echo endpoint reflects the payload (incl. the canary) verbatim.
+        # The differential guard must treat this as reflection, not execution,
+        # so it produces ZERO confirmed prompt-injection findings (FP reduction).
+        fp = _fingerprint(reflecting_url)
+        result = asyncio.run(tester.test_all(fp, reflecting_url))
         assert len(result["confirmed_ai_vulns"]) == 0
 
     def test_refusing_server_has_potential(self, tester, refusing_url):
