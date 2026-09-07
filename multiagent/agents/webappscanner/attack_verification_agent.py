@@ -9,6 +9,11 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
+try:
+    from .xss_analysis import classify_reflection
+except ImportError:  # pragma: no cover - fallback for flat-module import
+    from xss_analysis import classify_reflection
+
 logger = logging.getLogger(__name__)
 
 
@@ -456,35 +461,58 @@ class AttackVerificationAgent:
 
     async def _test_reflected_xss(self, url: str, param: str,
                                    parsed) -> Optional[Finding]:
+        """
+        Evidence-only reflected-XSS check WITHOUT a browser.
+
+        This agent cannot execute JavaScript, so it never claims "Confirmed"
+        on mere HTTP reflection (that would be a false-positive generator and
+        would disagree with VulnerabilityTester's stricter stance). It only
+        reports raw reflection into an *executable* context as a High-severity
+        *Potential* finding; encoded/neutralised reflection is not reported.
+        Confirmation (JS execution) is left to the Playwright-backed
+        VulnerabilityTester.
+        """
         for payload in XSS_PAYLOADS[:3]:
             try:
                 test_url             = self._inject_param(parsed, param, payload)
                 status, headers, body = await self._get_full_response(test_url)
+                if not body:
+                    continue
 
-                if body and payload in body:
-                    return Finding(
-                        vuln_type   = "Reflected XSS",
-                        severity    = "High",
-                        status      = VulnStatus.CONFIRMED,
-                        location    = url,
-                        parameter   = param,
-                        payload     = payload,
-                        description = f"The '{param}' parameter reflects user input without sanitization.",
-                        impact      = "Attacker can execute arbitrary JavaScript in the victim's browser.",
-                        remediation = "Apply output encoding to all user-supplied input. Implement a strict Content-Security-Policy.",
-                        confidence  = Confidence.HIGH,
-                        evidence    = Evidence(
-                            request               = f"GET {test_url}",
-                            response_status       = status,
-                            response_body_snippet = self._extract_context(body, payload),
-                            payload_reflected     = True,
-                            verified              = True,
-                            confidence            = Confidence.HIGH,
-                            confirmation_method   = "http_body"
-                        ),
-                        cwe   = "CWE-79",
-                        owasp = "A03:2021"
-                    )
+                verdict = classify_reflection(body, payload)
+                if verdict != "executable":
+                    # encoded / text_only / absent -> not a reflected-XSS finding
+                    continue
+
+                return Finding(
+                    vuln_type   = "Reflected XSS",
+                    severity    = "High",
+                    status      = VulnStatus.POTENTIAL,
+                    location    = url,
+                    parameter   = param,
+                    payload     = payload,
+                    description = (
+                        f"The '{param}' parameter reflects the payload verbatim into an "
+                        f"executable HTML context (raw '<'/'>' survived, not entity-encoded). "
+                        f"JavaScript execution was NOT verified by a browser in this agent, "
+                        f"so this is reported as Potential pending execution proof."
+                    ),
+                    impact      = "If the reflection executes, an attacker can run arbitrary JavaScript in the victim's browser.",
+                    remediation = "Apply context-aware output encoding to all user-supplied input. Implement a strict Content-Security-Policy.",
+                    confidence  = Confidence.MEDIUM,
+                    evidence    = Evidence(
+                        request               = f"GET {test_url}",
+                        response_status       = status,
+                        response_body_snippet = self._extract_context(body, payload),
+                        payload_reflected     = True,
+                        execution_confirmed   = False,
+                        verified              = False,
+                        confidence            = Confidence.MEDIUM,
+                        confirmation_method   = "http_body_reflection"
+                    ),
+                    cwe   = "CWE-79",
+                    owasp = "A03:2021"
+                )
             except Exception:
                 continue
         return None
