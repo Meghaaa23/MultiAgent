@@ -1,44 +1,4 @@
 #!/usr/bin/env python3
-"""
-metrics.py — executable definitions for the six YuraRAG evaluation metrics.
-
-The point of this file is that the metric definitions are MECHANICAL. Once a
-number comes out of here it is not re-interpretable. If you find yourself
-wanting to argue that a case "sort of counts", change the POLICY block below,
-re-run everything, and note the change in the paper. Do not argue it in prose.
-
-Usage:
-    metrics.py --gt ground_truth/librechat_local.json --runs runs/librechat_local_*.json
-    metrics.py --gt-dir ground_truth/ --runs-dir runs/ --out table2_input.json
-    metrics.py --selftest
-
-Ground-truth schema (ground_truth/<target>.json) — see SCHEMA.md for the full
-shape; the fields this script reads are all nested under "ai_surface":
-    {
-      "target": "librechat_local",
-      "ai_surface": {
-        "has_ai_surface": "yes" | "no" | "partial" | "unverifiable",
-        "ai_auth_gated": true,
-        "chat_ui_present": true,
-        "injection_authorized": true,
-        "soft_404_behavior": "catch_all_spa" | "proper_404",
-        "stack_true": {"framework": "...", "language": "..."},
-        "ai_endpoints_true": [
-          {"url": "http://localhost:3080/api/agents/chat",
-           "tier": "live_surface",
-           "routes_without_config": true}
-        ]
-      }
-    }
-  ai_endpoints_true entries may also be bare strings (pre-migration files);
-  they are upgraded to {"url": s, "tier": None, "routes_without_config": True}.
-
-Scan-result schema (runs/<target>_r<N>.json): see SCAN_KEYS below. Produced
-from a real scan_application() output dict via scan_result_adapter.py — see
-that file, not this one, for the mapping from the scanner's actual fields
-(endpoints_discovered, eval_metrics, ai_fingerprint.evidence_items, ...) to
-this shape.
-"""
 
 from __future__ import annotations
 
@@ -50,43 +10,20 @@ import sys
 from itertools import combinations
 from urllib.parse import urlsplit
 
-# --------------------------------------------------------------------------
-# POLICY  — every judgement call in the evaluation lives here and nowhere else.
-# --------------------------------------------------------------------------
 
-# Which has_ai_surface labels are graded by which metric.
-# 'unverifiable' has no AI ground truth, so it is excluded from the four
-# ground-truth-dependent metrics (recall, precision, tier accuracy, coverage
-# honesty) — but overclaim rate and determinism are internal-consistency
-# measures that need no ground truth at all, and grade every target,
-# including 'unverifiable' ones. Splitting the exclusion per-metric (rather
-# than dropping the target everywhere) keeps denominators consistent across
-# the table instead of silently shrinking sample size for metrics that never
-# needed the exclusion.
 GRADED_FOR_AI_GROUND_TRUTH = {"yes", "no", "partial"}
 GRADED_FOR_INTERNAL_CONSISTENCY = {"yes", "no", "partial", "unverifiable"}
 
-# URL matching. 'path' ignores scheme/host/port (target host is fixed per run,
-# and port drift between testbed restarts should not read as a miss).
+
 DEFAULT_MATCH_MODE = "path"
 
-# A finding counts as an overclaim if it asserts confirmation while carrying
-# no evidence. These are the field values that mean "asserted confirmed".
 CONFIRMED_VERIFIED_VALUES = {"yes", "confirmed", True}
 
-# Tiers in the falsifiability taxonomy — MUST match EvidenceClass in
-# multiagent/agents/ai_agents/ai_evidence_scoring.py exactly (underscored,
-# not hyphenated: "live_surface" not "live-surface"). tier_accuracy is
-# meaningless if this drifts from what the scanner actually emits.
 KNOWN_TIERS = {"behavioral", "live_surface", "passive_structural",
                "passive_hint", "brand"}
 
 SCAN_KEYS = ("target", "ai_surfaces", "findings", "coverage")
 
-
-# --------------------------------------------------------------------------
-# helpers
-# --------------------------------------------------------------------------
 
 def canon(url: str, mode: str = DEFAULT_MATCH_MODE) -> str:
     """Canonicalise a URL for set comparison.
@@ -143,15 +80,8 @@ def _has_evidence(f: dict) -> bool:
     if "evidence_present" in f:
         return bool(f["evidence_present"])
     ev = f.get("evidence")
-    # bool(ev) alone is correct for str/list/None; a plain str(ev).strip()
-    # check would be WRONG for the real scanner's evidence dicts, since
-    # str({}) == "{}" is truthy even though the dict is empty.
     return bool(ev)
 
-
-# --------------------------------------------------------------------------
-# per-target grading
-# --------------------------------------------------------------------------
 
 def grade_target(gt: dict, runs: list[dict], match_mode: str = DEFAULT_MATCH_MODE) -> dict:
     """Grade one target from its ground truth and >=1 scan results.
@@ -185,22 +115,14 @@ def grade_target(gt: dict, runs: list[dict], match_mode: str = DEFAULT_MATCH_MOD
         "n_runs": len(runs),
     }
 
-    # ---- 1/2. AI surface recall & precision -------------------------------
     if graded_gt:
         tp_strict = set(true_all) & set(claimed)
         tp_reach = set(true_reachable) & set(claimed)
         fp = set(claimed) - set(true_all)
 
-        # Recall is undefined when there is nothing to find (all 'no' targets,
-        # and any 'yes'/'partial' target whose true list is empty). Skipped,
-        # not scored zero — scoring it zero would silently drag macro-recall
-        # down by the size of your no-AI stratum.
         res["recall_strict"] = (len(tp_strict) / len(true_all)) if true_all else None
         res["recall_reachable"] = (len(tp_reach) / len(true_reachable)) if true_reachable else None
 
-        # Precision IS defined with an empty true list: everything claimed on a
-        # no-AI target is a false positive. This is the headline number for the
-        # no-AI stratum.
         res["precision"] = (len(tp_strict) / len(claimed)) if claimed else None
 
         res["_counts"] = {
@@ -219,10 +141,6 @@ def grade_target(gt: dict, runs: list[dict], match_mode: str = DEFAULT_MATCH_MOD
         res["_counts"] = None
         res["skip_reason"] = f"has_ai_surface={label!r} — no AI ground truth to grade against"
 
-    # ---- 3. Tier accuracy -------------------------------------------------
-    # Only over endpoints that were both truly present and discovered, and for
-    # which ground truth records a tier. Undiscovered endpoints are a recall
-    # failure, not a tier failure; double-counting them would conflate the two.
     if graded_gt:
         tier_pairs = []
         for k in sorted(set(true_all) & set(claimed)):
@@ -240,14 +158,6 @@ def grade_target(gt: dict, runs: list[dict], match_mode: str = DEFAULT_MATCH_MOD
         res["tier_accuracy"] = None
         res["tier_confusions"] = []
 
-    # ---- 4. Coverage honesty ---------------------------------------------
-    # Scored only where there is something to be honest ABOUT: an auth-gated
-    # (or config-gated) true AI surface. Pass requires all three:
-    #   (a) the surface was discovered at all,
-    #   (b) it was marked unreachable/auth-gated rather than silently dropped,
-    #   (c) coverage.auth_state was declared in the report,
-    # and requires the absence of:
-    #   (d) any confirmed injection finding it could not have earned.
     if graded_gt and ai_gt.get("ai_auth_gated") and true_all:
         cov = primary.get("coverage") or {}
         inj = primary.get("injection") or {}
@@ -270,11 +180,6 @@ def grade_target(gt: dict, runs: list[dict], match_mode: str = DEFAULT_MATCH_MOD
         res["coverage_honesty"] = None
         res["coverage_honesty_checks"] = None
 
-    # 'partial' targets get a separate, narrower credit: did the scanner say
-    # WHY the surface was unusable (provider key / admin config / plugin not
-    # installed)? Reported alongside coverage honesty, never folded into it —
-    # a yes/no target has no opportunity to earn it and averaging across
-    # strata would be a lie.
     if label == "partial":
         cov = primary.get("coverage") or {}
         blob = " ".join(str(v) for v in cov.values()).lower()
@@ -286,8 +191,6 @@ def grade_target(gt: dict, runs: list[dict], match_mode: str = DEFAULT_MATCH_MOD
     else:
         res["config_gate_declared"] = None
 
-    # ---- 5. Overclaim rate ------------------------------------------------
-    # Ground-truth independent: graded on every target including unverifiable.
     confirmed = [f for f in (primary.get("findings") or []) if _is_confirmed(f)]
     overclaims = [f for f in confirmed if not _has_evidence(f)]
     res["overclaim_rate"] = (len(overclaims) / len(confirmed)) if confirmed else None
@@ -295,8 +198,6 @@ def grade_target(gt: dict, runs: list[dict], match_mode: str = DEFAULT_MATCH_MOD
     res["n_overclaims"] = len(overclaims)
     res["overclaim_examples"] = [_finding_key(f) for f in overclaims][:5]
 
-    # ---- 6. Determinism ---------------------------------------------------
-    # Ground-truth independent. Mean pairwise Jaccard over all run pairs.
     if len(runs) >= 2:
         f_sets = [{_finding_key(f) for f in (r.get("findings") or [])} for r in runs]
         a_sets = [{canon(s.get("url", ""), match_mode)
@@ -319,22 +220,13 @@ def grade_target(gt: dict, runs: list[dict], match_mode: str = DEFAULT_MATCH_MOD
     return res
 
 
-# --------------------------------------------------------------------------
-# aggregation
-# --------------------------------------------------------------------------
-
 def _macro(rows, key):
     vals = [r[key] for r in rows if r.get(key) is not None]
     return (sum(vals) / len(vals)) if vals else None
 
 
 def aggregate(rows: list[dict]) -> dict:
-    """Macro (per-target mean) and micro (pooled) aggregates.
-
-    They differ whenever endpoint counts differ across targets — LibreChat's
-    3 endpoints would be weighted differently than open_webui's 10 under
-    micro vs macro. Report both; a reviewer will ask.
-    """
+    
     def stratum(rows, labels):
         return [r for r in rows if r["has_ai_surface"] in labels]
 
@@ -357,7 +249,6 @@ def aggregate(rows: list[dict]) -> dict:
             "precision_micro": micro(graded, ["tp_strict"], "claimed"),
             "tier_accuracy_macro": _macro(graded, "tier_accuracy"),
             "coverage_honesty_macro": _macro(graded, "coverage_honesty"),
-            # overclaim/determinism are graded on ALL targets, unverifiable included
             "overclaim_rate_macro": _macro(rows, "overclaim_rate"),
             "determinism_findings_macro": _macro(rows, "determinism_findings"),
             "determinism_ai_surfaces_macro": _macro(rows, "determinism_ai_surfaces"),
@@ -391,10 +282,6 @@ def aggregate(rows: list[dict]) -> dict:
     return out
 
 
-# --------------------------------------------------------------------------
-# validation — catch schema drift before it becomes a wrong number
-# --------------------------------------------------------------------------
-
 def validate(gt: dict, runs: list[dict]) -> list[str]:
     warn = []
     tid = gt.get("target")
@@ -416,7 +303,6 @@ def validate(gt: dict, runs: list[dict]) -> list[str]:
                 warn.append(f"{tid} run{i}: scan result missing key {k!r}")
         if r.get("target") not in (None, tid):
             warn.append(f"{tid} run{i}: target mismatch ({r.get('target')!r})")
-        # The 24-vs-10 class: a stated count that disagrees with its list.
         cov = r.get("coverage") or {}
         eps = r.get("endpoints") or []
         if eps and cov.get("paths_excluded") is not None:
@@ -427,10 +313,6 @@ def validate(gt: dict, runs: list[dict]) -> list[str]:
                     f"but {listed} endpoints carry an excluded_reason")
     return warn
 
-
-# --------------------------------------------------------------------------
-# I/O + CLI
-# --------------------------------------------------------------------------
 
 def _load(p):
     with open(p) as fh:
@@ -491,10 +373,6 @@ def main(argv=None):
     return 0
 
 
-# --------------------------------------------------------------------------
-# self-test — the whole point is that these pass before any real run exists
-# --------------------------------------------------------------------------
-
 def selftest():
     def gt(tid, label, eps, gated=False):
         return {"target": tid, "ai_surface": {
@@ -513,27 +391,23 @@ def selftest():
         if got != want:
             fails.append(f"{name}: got {got!r} want {want!r}")
 
-    # 1. empty scan on an AI target -> recall 0, precision undefined (nothing claimed)
     g = gt("t1", "yes", [{"url": "http://h/api/chat", "tier": "live_surface"}])
     r = grade_target(g, [run("t1")])
     check("empty.recall", r["recall_strict"], 0.0)
     check("empty.precision", r["precision"], None)
     check("empty.tier", r["tier_accuracy"], None)
 
-    # 2. perfect scan
     g = gt("t2", "yes", [{"url": "http://h/api/chat", "tier": "live_surface"}])
     r = grade_target(g, [run("t2", surfaces=[{"url": "http://h/api/chat/", "tier": "live_surface"}])])
     check("perfect.recall", r["recall_strict"], 1.0)
     check("perfect.precision", r["precision"], 1.0)
     check("perfect.tier", r["tier_accuracy"], 1.0)
 
-    # 3. no-AI target with a false positive -> recall skipped, precision 0
     g = gt("t3", "no", [])
     r = grade_target(g, [run("t3", surfaces=[{"url": "http://h/api/chat"}])])
     check("noai.recall", r["recall_strict"], None)
     check("noai.precision", r["precision"], 0.0)
 
-    # 4. unverifiable -> AI metrics None, overclaim still graded
     g = gt("t4", "unverifiable", [])
     r = grade_target(g, [run("t4", findings=[{"type": "cors", "location": "http://h/",
                                               "verified": "yes", "evidence_present": False}])])
@@ -541,8 +415,6 @@ def selftest():
     check("unver.recall", r["recall_strict"], None)
     check("unver.overclaim", r["overclaim_rate"], 1.0)
 
-    # 5. control-plane endpoints claimed as inference (the LibreChat/dify/
-    #    openhands/flowise pattern — /chat/abort etc. dragging precision down)
     g = gt("t5", "yes", [{"url": "http://h/api/agents/chat", "tier": "live_surface"}])
     r = grade_target(g, [run("t5", surfaces=[
         {"url": "http://h/api/agents/chat", "tier": "live_surface"},
@@ -551,7 +423,6 @@ def selftest():
     check("ctrlplane.recall", r["recall_strict"], 1.0)
     check("ctrlplane.precision", round(r["precision"], 4), round(1 / 3, 4))
 
-    # 6. partial with a config-gated endpoint -> strict penalises, reachable does not
     g = gt("t6", "partial", [
         {"url": "http://h/api/chat", "routes_without_config": True},
         {"url": "http://h/api/llm", "routes_without_config": False}])
@@ -559,7 +430,6 @@ def selftest():
     check("partial.strict", r["recall_strict"], 0.5)
     check("partial.reachable", r["recall_reachable"], 1.0)
 
-    # 7. coverage honesty: auth-gated, found, marked, declared, no false claim
     g = gt("t7", "yes", [{"url": "http://h/api/chat"}], gated=True)
     good = run("t7", surfaces=[{"url": "http://h/api/chat", "auth_gated": True, "reachable": False}],
                coverage={"auth_state": "unauthenticated"}, injection={"attempted": 0, "confirmed": 0})
@@ -572,7 +442,6 @@ def selftest():
                      coverage={"auth_state": "unauthenticated"}, injection={"confirmed": 2})
     check("cov.falseclaim", grade_target(g, [falseclear])["coverage_honesty"], 0.0)
 
-    # 8. determinism
     g = gt("t8", "no", [])
     f1 = {"type": "cors", "location": "http://h/"}
     f2 = {"type": "csp", "location": "http://h/"}
@@ -584,13 +453,11 @@ def selftest():
     r = grade_target(g, [run("t8", findings=[f1])])
     check("det.single", r["determinism_findings"], None)
 
-    # 9. the 24-vs-10 validator
     w = validate(gt("t9", "no", []),
                  [run("t9") | {"endpoints": [{"url": "http://h/a", "excluded_reason": "soft404"}],
                                "coverage": {"paths_excluded": 24}}])
     check("validate.count", any("paths_excluded=24" in x for x in w), True)
 
-    # 10. aggregation: recall skipped on no-AI does not drag the macro down
     rows = [
         grade_target(gt("a", "yes", [{"url": "http://h/api/chat"}]),
                      [run("a", surfaces=[{"url": "http://h/api/chat"}])]),
@@ -600,8 +467,6 @@ def selftest():
     check("agg.recall_macro", agg["overall"]["recall_strict_macro"], 1.0)
     check("agg.n_graded", agg["n_targets_graded_ai"], 2)
 
-    # 11. real ground-truth schema smoke test — this is the actual shape in
-    #     multiagent-testbed/ground_truth/*.json, not a hand-rolled fixture
     real_gt = {
         "target": "flowise",
         "ai_surface": {
@@ -618,10 +483,6 @@ def selftest():
     check("real_schema.recall", r["recall_strict"], 1.0)
     check("real_schema.gated", r["ai_auth_gated"], False)
 
-    # 12. empty-dict evidence must NOT count as "has evidence" — the real
-    #     scanner's findings carry evidence as a dict, not a string, and
-    #     str({}) == "{}" is truthy even though the dict is empty. This is a
-    #     regression test for that exact bug class.
     g = gt("t12", "unverifiable", [])
     r = grade_target(g, [run("t12", findings=[
         {"type": "cors", "location": "http://h/", "status": "Confirmed", "evidence": {}}])])
@@ -642,16 +503,3 @@ def selftest():
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
-# --------------------------------------------------------------------------
-# RESOLVED: the SCAN_KEYS / scan-result schema above (ai_surfaces, findings,
-# coverage, injection, wall_time_s) is produced from web_scanner_agent.py's
-# real output (endpoints_discovered, coverage_assessment, eval_metrics,
-# vulnerabilities, ai_fingerprint.evidence_items/auth_required_paths/
-# ml_endpoints) by scan_result_adapter.py, not natively emitted by the
-# scanner and not hand-matched here. See that file's docstring for exactly
-# which scanner fields map to which run fields, and its own --selftest for
-# an end-to-end check (adapter output -> metrics.grade_target -> correct
-# recall/overclaim numbers) against a scan_application()-shaped fixture.
-# --------------------------------------------------------------------------

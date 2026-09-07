@@ -2,7 +2,7 @@
   "target": "adminer",
   "scope": "blackbox_unauth",
   "url_aliases": ["http://localhost:3138"],
-  "extraction_note": "No source checked out on disk (official image adminer:latest). Light-pass: docker run --entrypoint sh, located app root /home/adminer (index.php, adminer.php, plugin-loader.php, designs/, plugins/), recursive grep of the entire app dir for AI keywords plus a directory-name scan. Zero hits — tiny single-purpose DB-admin tool.",
+  "extraction_note": "official image adminer:latest. Light-pass: docker run --entrypoint sh, located app root /home/adminer (index.php, adminer.php, plugin-loader.php, designs/, plugins/), recursive grep of the entire app dir for AI keywords plus a directory-name scan. Zero hits — tiny single-purpose DB-admin tool.",
   "endpoints_true": [],
   "endpoints_auth_gated": [],
   "ai_surface": {

@@ -163,8 +163,31 @@ class WebScannerAgent:
 
     async def scan_application(self, target_url: str,
                                max_time_minutes: int = 15,
-                               verbose: bool = False) -> Dict:
+                               verbose: bool = False,
+                               ai_auth_token: Optional[str] = None) -> Dict:
         start = datetime.now()
+
+        # Auth token, if provided, is used ONLY for the AI/prompt-injection
+        # pipeline below — the general web-vuln crawl/test/verify path stays
+        # black-box unauthenticated. Fresh agent instances are built per-call
+        # (rather than mutating the shared self.ai_* singletons) so concurrent
+        # scans for different callers never leak each other's tokens.
+        ai_auth_headers = (
+            {"Authorization": f"Bearer {ai_auth_token}"} if ai_auth_token else None
+        )
+        ai_fingerprinter = self.ai_fingerprinter
+        ai_infra_agent   = self.ai_infra_agent
+        ai_vuln_tester   = self.ai_vuln_tester
+        if ai_auth_headers:
+            ai_fingerprinter = AIFingerprintAgent(timeout=8, auth_headers=ai_auth_headers)
+            ai_infra_agent   = AIInfraAgent(
+                openai_client=self.openai_client, llm_model=self.llm_model,
+                auth_headers=ai_auth_headers,
+            )
+            ai_vuln_tester   = AIVulnerabilityTester(
+                timeout=10, llm_model=self.llm_model, enable_embeddings=False,
+                auth_headers=ai_auth_headers,
+            )
 
         if "#" in target_url:
             target_url = target_url.split("#")[0].rstrip("/")
@@ -178,6 +201,7 @@ class WebScannerAgent:
             print(f"  Target : {target_url}")
             print(f"  Budget : {max_time_minutes} minutes")
             print(f"  Crawl  : Deep (shared anonymous session)")
+            print(f"  AI Pipeline Auth : {'provided' if ai_auth_headers else 'none (unauthenticated)'}")
             print(f"{'='*70}\n")
 
         all_forms:       List[Dict] = []
@@ -325,9 +349,10 @@ class WebScannerAgent:
         ai_infra_result = None
         is_ai_powered   = False
         brand_only_ai   = False
+        route_confirmed_only_ai = False
 
         try:
-            ai_fingerprint = await self.ai_fingerprinter.fingerprint(
+            ai_fingerprint = await ai_fingerprinter.fingerprint(
                 target_url           = target_url,
                 discovered_endpoints = discovered_endpoints,
                 page_html            = html,
@@ -335,61 +360,73 @@ class WebScannerAgent:
                 verbose              = verbose,
             )
 
-            # Taxonomy gate: escalate only on live inference surface.
-            # Brand / product-name / stack identity alone must not escalate.
-            has_live_surface = bool(
-                ai_fingerprint.get("has_live_surface")
-                or ai_fingerprint.get("ml_endpoints")
-                or ai_fingerprint.get("auth_required_paths")
-            )
+            # Taxonomy gate: escalate to CRITICAL/is_ai_powered only on an
+            # actually-observed live inference surface (model-shaped output).
+            # A structured 4xx or a discovered endpoint URL is route
+            # existence, not proof of live inference — it must not escalate.
+            has_live_surface = bool(ai_fingerprint.get("has_live_surface"))
+            has_route_confirmed = bool(ai_fingerprint.get("has_route_confirmed"))
             brand_only_ai = (
-                bool(ai_fingerprint.get("ai_brand_only")) and not has_live_surface
+                bool(ai_fingerprint.get("ai_brand_only"))
+                and not has_live_surface and not has_route_confirmed
             )
             is_ai_powered = bool(
                 ai_fingerprint.get("is_ai_powered") and has_live_surface
             )
+            # Route exists (401/403/405/validation error) but never returned
+            # model output — e.g. an endpoint disabled by config, or gated
+            # behind auth we don't hold. Worth classifying (infra/vuln
+            # agents already report this honestly as auth-gated / untested),
+            # but never as a live, CRITICAL surface.
+            route_confirmed_only_ai = has_route_confirmed and not has_live_surface
 
-            if is_ai_powered:
+            if is_ai_powered or route_confirmed_only_ai:
                 if verbose:
                     conf = ai_fingerprint.get("confidence", "low")
                     det = ai_fingerprint.get("detection", "not_detected")
-                    print(f"  AI-powered app detected [{det}, confidence={conf}]")
+                    if is_ai_powered:
+                        print(f"  AI-powered app detected [{det}, confidence={conf}]")
+                    else:
+                        print(f"  AI-shaped endpoint(s) discovered but not confirmed live "
+                              f"[{det}, confidence={conf}] — route exists, no model output "
+                              f"observed. Running classification only (no injection will be sent).")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
-                if verbose:
-                    print("  AI Infrastructure Build Attack Analysis...")
-                try:
-                    ai_infra_result = await self.ai_infra_agent.scan(
-                        target_url=target_url, ai_stack=ai_fingerprint,
-                    )
-                    if ai_infra_result and ai_infra_result.exposed_endpoints:
-                        ai_fingerprint = AIVulnerabilityTester.merge_exposed_endpoints(
-                            ai_fingerprint, ai_infra_result.exposed_endpoints)
-                        if verbose:
-                            print(f"     Infra exposed endpoints merged: "
-                                  f"{ai_infra_result.exposed_endpoints[:3]}")
-                    if verbose and ai_infra_result is not None:
-                        print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
-                except Exception as e:
-                    logging.warning(f"AIInfraAgent failed: {e}")
+                if is_ai_powered:
+                    if verbose:
+                        print("  AI Infrastructure Build Attack Analysis...")
+                    try:
+                        ai_infra_result = await ai_infra_agent.scan(
+                            target_url=target_url, ai_stack=ai_fingerprint,
+                        )
+                        if ai_infra_result and ai_infra_result.exposed_endpoints:
+                            ai_fingerprint = AIVulnerabilityTester.merge_exposed_endpoints(
+                                ai_fingerprint, ai_infra_result.exposed_endpoints)
+                            if verbose:
+                                print(f"     Infra exposed endpoints merged: "
+                                      f"{ai_infra_result.exposed_endpoints[:3]}")
+                        if verbose and ai_infra_result is not None:
+                            print(f"   AI Infra threats: {len(ai_infra_result.threats)} total\n")
+                    except Exception as e:
+                        logging.warning(f"AIInfraAgent failed: {e}")
 
-                if verbose:
-                    print("  Querying AVID database for AI vulnerabilities...")
-                ml_stack = (
-                    ai_fingerprint.get("ml_libraries", []) +
-                    [ep.split("/")[-1] for ep in ai_fingerprint.get("ml_endpoints", [])[:3]]
-                )
-                avid_results = await self.avid_lookup.lookup(
-                    ai_fingerprint=ai_fingerprint, ml_stack=ml_stack, verbose=verbose,
-                )
-                if verbose:
-                    print(f"   AVID: {avid_results.get('total_found',0)} findings "
-                          f"({len(avid_results.get('backdoor_relevant',[]))} backdoor-relevant)\n")
+                    if verbose:
+                        print("  Querying AVID database for AI vulnerabilities...")
+                    ml_stack = (
+                        ai_fingerprint.get("ml_libraries", []) +
+                        [ep.split("/")[-1] for ep in ai_fingerprint.get("ml_endpoints", [])[:3]]
+                    )
+                    avid_results = await self.avid_lookup.lookup(
+                        ai_fingerprint=ai_fingerprint, ml_stack=ml_stack, verbose=verbose,
+                    )
+                    if verbose:
+                        print(f"   AVID: {avid_results.get('total_found',0)} findings "
+                              f"({len(avid_results.get('backdoor_relevant',[]))} backdoor-relevant)\n")
 
                 if verbose:
                     print("  Running AI-specific vulnerability tests...")
-                ai_vuln_results = await self.ai_vuln_tester.test_all(
+                ai_vuln_results = await ai_vuln_tester.test_all(
                     ai_fingerprint=ai_fingerprint, target_url=target_url,
                     verbose=verbose,
                 )
@@ -872,11 +909,20 @@ class WebScannerAgent:
             "urls_discovered":        len(all_urls),
             "scan_duration":          round(duration, 1),
             "scan_scope":             "blackbox_unauth",
+            "ai_scan_authenticated":  bool(ai_auth_headers),
             "timestamp":              datetime.now().isoformat(),
-            # Report may note brand-only AI product identity; escalation above
-            # already required live surface.
-            "is_ai_powered":          is_ai_powered or brand_only_ai,
+            # Report may note brand-only/route-confirmed AI surface identity;
+            # escalation above (CRITICAL, is_ai_powered) already required an
+            # actually-observed live surface, never route existence alone.
+            "is_ai_powered":          is_ai_powered or brand_only_ai or route_confirmed_only_ai,
             "ai_brand_only":          brand_only_ai,
+            "ai_route_confirmed_only": route_confirmed_only_ai,
+            "ai_surface_status": (
+                "live" if is_ai_powered else
+                "route_confirmed" if route_confirmed_only_ai else
+                "brand_only" if brand_only_ai else
+                "none"
+            ),
             "has_live_surface":       bool(
                 (ai_fingerprint or {}).get("has_live_surface")
             ) if ai_fingerprint else False,

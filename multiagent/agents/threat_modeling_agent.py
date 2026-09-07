@@ -1299,6 +1299,7 @@ Answer:"""
                       use_cache: bool = True, filenames: List[str] = None,
                       enable_web_scan: bool = False,
                       target_url: str = None,
+                      ai_auth_token: Optional[str] = None,
                       ) -> Dict:
 
         if verbose:
@@ -1307,7 +1308,8 @@ Answer:"""
             print("=" * 80)
             print(f"Query: {user_query}")
             if enable_web_scan:
-                print(f"Web Scan: ENABLED | Target: {target_url}")
+                print(f"Web Scan: ENABLED | Target: {target_url}"
+                      f" | AI Pipeline Auth: {'provided' if ai_auth_token else 'none'}")
             print("=" * 80 + "\n")
 
         if not enable_web_scan:
@@ -1347,6 +1349,7 @@ Answer:"""
                 print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
             scan_results = await scanner.scan_application(
                 target_url=target_url, max_time_minutes=15, verbose=verbose,
+                ai_auth_token=ai_auth_token,
             )
 
         if verbose:

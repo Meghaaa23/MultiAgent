@@ -27,9 +27,10 @@ def get_openai_client():
 
 async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
                              verbose: bool,
-                             scope_policy=None) -> dict:
+                             scope_policy=None,
+                             auth_headers=None) -> dict:
     """Detect on-page chatbot widgets (Playwright) and merge into fingerprint."""
-    probe = ChatbotUIProbe(scope_policy=scope_policy or ScopePolicy())
+    probe = ChatbotUIProbe(scope_policy=scope_policy or ScopePolicy(), auth_headers=auth_headers)
     result = await probe.detect(
         target_url,
         html="",
@@ -125,6 +126,17 @@ async def main():
             "Use only when the queue routes to a test inbox you own."
         ),
     )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help=(
+            "Bearer token sent as 'Authorization: Bearer <token>' on every "
+            "request the AI/prompt-injection pipeline makes (fingerprinting, "
+            "infra probing, chatbot UI, and injection attempts). Reaches "
+            "chat/inference surfaces that only appear post-authentication. "
+            "Not used by any general web-vulnerability scanning."
+        ),
+    )
     args = parser.parse_args()
 
     target_url = args.target.rstrip("/")
@@ -133,8 +145,11 @@ async def main():
         authorize_external=bool(args.authorize_external),
         authorize_support_queue=bool(args.authorize_support_queue),
     )
+    auth_headers = (
+        {"Authorization": f"Bearer {args.auth_token}"} if args.auth_token else None
+    )
 
-    fp_agent = AIFingerprintAgent(timeout=8)
+    fp_agent = AIFingerprintAgent(timeout=8, auth_headers=auth_headers)
     ai_fingerprint = await fp_agent.fingerprint(
         target_url           = target_url,
         discovered_endpoints = [],
@@ -146,7 +161,7 @@ async def main():
     if not args.skip_chatbot_ui:
         ai_fingerprint = await _enrich_chatbot_ui(
             ai_fingerprint, target_url, verbose=True,
-            scope_policy=scope_policy,
+            scope_policy=scope_policy, auth_headers=auth_headers,
         )
 
     print("\n========== RAW FINGERPRINT ==========")
@@ -196,7 +211,8 @@ async def main():
         if not has_live:
             print("\n  No API live surface — skipping infra (chatbot UI alone does not imply exposed infra).")
         else:
-            infra_agent = AIInfraAgent(openai_client=get_openai_client(), timeout=15)
+            infra_agent = AIInfraAgent(openai_client=get_openai_client(), timeout=15,
+                                        auth_headers=auth_headers)
             infra_result = await infra_agent.scan(
                 target_url = target_url,
                 ai_stack   = ai_fingerprint,
@@ -214,7 +230,8 @@ async def main():
         if not has_live and not has_ui:
             print("\n  Skipping vuln — nothing to inject against.")
         else:
-            vuln_agent = AIVulnerabilityTester(timeout=10, scope_policy=scope_policy)
+            vuln_agent = AIVulnerabilityTester(timeout=10, scope_policy=scope_policy,
+                                                auth_headers=auth_headers)
             vuln_result = await vuln_agent.test_all(
                 ai_fingerprint=ai_fingerprint,
                 target_url=target_url,

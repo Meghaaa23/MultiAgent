@@ -802,21 +802,26 @@ async def query_stream(request: StreamQueryRequest):
 @app.post("/scan/")
 async def scan_web_application(request: Request):
     try:
-        body       = await request.json()
-        target_url = body.get("target_url")
-        session_id = body.get("session_id", "scan-default")
+        body          = await request.json()
+        target_url    = body.get("target_url")
+        session_id    = body.get("session_id", "scan-default")
+        # Used ONLY for the AI/prompt-injection pipeline (chat/inference
+        # surfaces that only appear post-authentication) — the general
+        # web-vulnerability scan stays black-box unauthenticated regardless.
+        ai_auth_token = body.get("ai_auth_token") or body.get("auth_token")
 
         if not target_url:
             raise HTTPException(status_code=400, detail="Missing target_url")
         if not threat_modeling_agent:
             raise HTTPException(status_code=503, detail="Scanner not available")
 
-        logger.info(f"SCAN: {target_url}")
+        logger.info(f"SCAN: {target_url}" + (" (AI pipeline authenticated)" if ai_auth_token else ""))
 
         result     = await threat_modeling_agent.analyze(
             user_query=f"Scan {target_url} for security vulnerabilities",
             verbose=True, use_cache=False,
             enable_web_scan=True, target_url=target_url,
+            ai_auth_token=ai_auth_token,
         )
         scan_data  = result.get("reasoning_chain", {}).get("scan_results") or {}
 
@@ -867,6 +872,7 @@ async def scan_web_application(request: Request):
                 ),
                 # AI backdoor fields
                 "is_ai_powered":      scan_data.get("is_ai_powered", False),
+                "ai_scan_authenticated": scan_data.get("ai_scan_authenticated", False),
                 "avid_findings":      scan_data.get("avid_findings", 0),
                 "strategic_recs":     scan_data.get("strategic_recommendations", 0),
             },

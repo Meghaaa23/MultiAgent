@@ -16,22 +16,28 @@ try:
     from .ai_evidence_scoring import (
         classify_evidence,
         evidence_weight,
+        extract_auth_reason,
         has_live_surface_evidence,
+        has_route_confirmed_evidence,
         score_evidence,
     )
-except ImportError:  # script / flat import (e.g. dev_ai_scan.py)
+except ImportError:
     try:
         from multiagent.agents.ai_agents.ai_evidence_scoring import (
             classify_evidence,
             evidence_weight,
+            extract_auth_reason,
             has_live_surface_evidence,
+            has_route_confirmed_evidence,
             score_evidence,
         )
     except ImportError:
         from ai_evidence_scoring import (
             classify_evidence,
             evidence_weight,
+            extract_auth_reason,
             has_live_surface_evidence,
+            has_route_confirmed_evidence,
             score_evidence,
         )
 
@@ -496,6 +502,10 @@ class AuthSignal:
     auth_type:   str
     status_code: int
     detail:      str
+    # auth_status: "authentication_required" (401) | "access_forbidden" (403)
+    # reason: best-effort code parsed from the response, e.g. "account_banned"
+    auth_status: str = ""
+    reason:      str = ""
 
 
 ENDPOINT_TYPE_RULES: List[Tuple[re.Pattern, str, str]] = [
@@ -590,6 +600,11 @@ class FingerprintReport:
     app_description:  str                = ""
 
     has_live_surface: bool = False
+    # Route exists / handler reached (structured 4xx, method-not-allowed,
+    # schema-declared operation), but no model-shaped output was ever
+    # observed. Must never drive is_ai_powered/CRITICAL on its own —
+    # report it honestly as "discovered, not confirmed live."
+    has_route_confirmed: bool = False
     ai_brand_only:    bool = False
     detection:        str  = "not_detected"
     evidence_classes: Dict = field(default_factory=dict)
@@ -601,6 +616,7 @@ class FingerprintReport:
             "detection":              self.detection,
             "confidence":             self.confidence,
             "has_live_surface":       self.has_live_surface,
+            "has_route_confirmed":    self.has_route_confirmed,
             "ai_brand_only":          self.ai_brand_only,
             "evidence_classes":       self.evidence_classes,
             "framework":              self.framework,
@@ -616,14 +632,19 @@ class FingerprintReport:
             "allowed_api_hosts":      self.allowed_api_hosts,
             "classified_endpoints": [
                 {"url": e.url, "path": e.path, "type": e.endpoint_type,
-                 "risk": e.risk, "auth_required": e.auth_required,
+                 # risk is a URL-shape category ("would be critical if
+                 # live") — confirmed_live says whether that was ever
+                 # actually observed; risk alone is potential, not confirmed.
+                 "risk": e.risk, "confirmed_live": self.has_live_surface,
+                 "auth_required": e.auth_required,
                  "auth_type": e.auth_type}
                 for e in self.classified_endpoints
             ],
             "discovered_paths": self.discovered_paths,
             "auth_required_paths": [
                 {"endpoint": a.endpoint, "auth_type": a.auth_type,
-                 "status_code": a.status_code, "detail": a.detail}
+                 "status_code": a.status_code, "detail": a.detail,
+                 "auth_status": a.auth_status, "reason": a.reason}
                 for a in self.auth_required_paths
             ],
             "frameworks_detected": self.frameworks_detected,
@@ -673,12 +694,25 @@ class FingerprintReport:
         if self.classified_endpoints:
             print(f"  Endpoints ({len(self.classified_endpoints)}):")
             risk_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
+            # risk is a URL-shape category ("/chat = critical if live") set
+            # independent of confirmation tier. Without an observed live
+            # surface, label it as potential severity, not a confirmed one —
+            # otherwise "[CRITICAL] ... [401]" reads as a confirmed critical
+            # finding sitting right next to "not tested."
+            risk_suffix = "" if self.has_live_surface else "-IF-LIVE"
             for ep in sorted(self.classified_endpoints,
                              key=lambda e: risk_order.get(e.risk, 9)):
-                auth_tag = f" [{ep.auth_type}]" if ep.auth_required else " [no auth]"
-                print(f"    [{ep.risk.upper():8s}] {ep.endpoint_type:12s} {ep.path}{auth_tag}")
+                # ep.auth_required only means "we observed a 401/403 for this
+                # URL." Its absence proves nothing — the endpoint may never
+                # have been probed for auth, or the check may sit behind a
+                # handler we never reached. Never assert "no auth" from that.
+                auth_tag = f" [{ep.auth_type}]" if ep.auth_required else " [auth: untested]"
+                risk_label = f"{ep.risk.upper()}{risk_suffix}"
+                print(f"    [{risk_label:16s}] {ep.endpoint_type:12s} {ep.path}{auth_tag}")
         if self.auth_required_paths:
             print(f"  Auth-gated       : {len(self.auth_required_paths)} endpoint(s) (not tested)")
+            for a in self.auth_required_paths[:5]:
+                print(f"    [{a.status_code}] {a.auth_status or 'auth'}: {a.reason or '-'}  {a.endpoint}")
         if self.deployment_signals:
             print(f"  Deployment       : {self.deployment_signals}")
         print(f"\n  Evidence (top 8):")
@@ -700,6 +734,7 @@ class AIFingerprintAgent:
         nondeterminism_samples: int = 3,
         nondeterminism_low: float = 0.15,
         nondeterminism_high: float = 0.98,
+        auth_headers: Optional[Dict[str, str]] = None,
     ):
         self.timeout                = timeout
         self.max_js_bundles         = max_js_bundles
@@ -710,6 +745,9 @@ class AIFingerprintAgent:
         self.nondeterminism_samples = nondeterminism_samples
         self.nondeterminism_low     = nondeterminism_low
         self.nondeterminism_high    = nondeterminism_high
+        # Sent with every request this agent makes to the target — used to
+        # reach AI/chat surfaces that only appear post-authentication.
+        self.auth_headers            = auth_headers or {}
 
     async def fingerprint(
         self,
@@ -969,19 +1007,29 @@ class AIFingerprintAgent:
         detected_protocol    = framework_result.get("protocol", "")
         detected_infra       = framework_result.get("inference_server", "")
 
-        # Live surface: evidence keys OR inference-shaped endpoints/auth only.
-        # Non-inference AuthSignals (e.g. /admin 401) must not flip is_ai.
+        # Live surface requires actually-observed model-shaped output
+        # (behavioral probe or an AI-shaped HTTP 200 body). A URL merely
+        # *looking* like an inference path — even one that 401/403/405'd —
+        # is route existence, not proof of live inference. That distinction
+        # used to be erased here: any auth-gated endpoint whose path matched
+        # an inference-shaped regex flipped has_live_surface straight to
+        # True, which is exactly "route exists" masquerading as "confirmed
+        # live" (e.g. Open WebUI's disabled task-completion endpoints).
         evidence_keys = [ev.key for ev in all_evidence]
-        live_from_keys = has_live_surface_evidence(evidence_keys)
+        has_live_surface = has_live_surface_evidence(evidence_keys)
 
         def _ep_path(ep: str) -> str:
             return urllib.parse.urlparse(ep).path if "://" in ep else ep
 
-        live_from_ml = any(_is_inference_path(_ep_path(ep)) for ep in ml_endpoints)
-        live_from_auth = any(
-            _is_inference_path(_ep_path(sig.endpoint)) for sig in auth_signals
+        # Route-confirmed: an inference-shaped endpoint exists and a handler
+        # was reached (200/401/403/405/schema-declared/validation error) but
+        # no model output was ever observed. Tracked separately so callers
+        # can report "discovered, not live" instead of escalating.
+        has_route_confirmed = (
+            has_route_confirmed_evidence(evidence_keys)
+            or any(_is_inference_path(_ep_path(ep)) for ep in ml_endpoints)
+            or any(_is_inference_path(_ep_path(sig.endpoint)) for sig in auth_signals)
         )
-        has_live_surface = live_from_keys or live_from_ml or live_from_auth
 
         if detected_framework and detected_framework not in all_frameworks:
             all_frameworks.insert(0, detected_framework)
@@ -1056,7 +1104,9 @@ class AIFingerprintAgent:
         if auth_signals:
             deployment["authentication"] = list({a.auth_type for a in auth_signals})
         else:
-            deployment["authentication"] = ["none"]
+            # No 401/403 observed is not proof no auth is required — the
+            # check may sit behind a handler we never reached.
+            deployment["authentication"] = ["untested"]
 
         PROTOCOL_LABELS = {"OpenAI-compatible", "chat_api"}
         infra_layer = detected_framework if detected_framework in PROTOCOL_LABELS else detected_infra
@@ -1146,6 +1196,7 @@ class AIFingerprintAgent:
             spa_catch_all         = spa_catch_all,
             app_description       = meta_desc,
             has_live_surface      = has_live_surface,
+            has_route_confirmed   = has_route_confirmed,
             ai_brand_only         = ai_brand_only,
             detection             = detection.detection.value,
             evidence_classes      = detection.classes,
@@ -2435,10 +2486,12 @@ class AIFingerprintAgent:
                     "frameworks": frameworks,
                 }
             auth_type = self._detect_auth_type(headers_low, body_l)
+            auth_status, reason = extract_auth_reason(status, body, headers_low)
             auth_signals.append(AuthSignal(
                 endpoint=url, auth_type=auth_type,
                 status_code=status,
-                detail=f"Auth required ({auth_type}) at {path}"))
+                detail=f"Auth required ({auth_type}) at {path}",
+                auth_status=auth_status, reason=reason))
             # Inference paths: any auth gate confirms. Related-host absolute API
             # URLs (non-inference) require an API-shaped auth/error response.
             if inference or (
@@ -2446,7 +2499,8 @@ class AIFingerprintAgent:
             ):
                 evidence.append(EvidenceItem.make(
                     "ml_endpoint_401_403",
-                    f"Auth-gated {path} (HTTP {status}, {auth_type})",
+                    f"{'Authentication required' if status == 401 else 'Access forbidden'} "
+                    f"at {path} (HTTP {status}, {auth_type}, reason={reason})",
                     "probe", endpoint=url))
                 endpoints.append(url)
 
@@ -2900,6 +2954,7 @@ class AIFingerprintAgent:
                 "User-Agent": "Mozilla/5.0 (compatible; AISecurityScanner/1.0)",
                 "Accept":     "text/html,application/json,application/xhtml+xml,*/*;q=0.8",
                 **({"Content-Type": "application/json"} if data else {}),
+                **self.auth_headers,
             }
             req = urllib.request.Request(
                 target, data=data,

@@ -10,6 +10,14 @@ from typing import Optional, Tuple
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+try:
+    from .ai_evidence_scoring import extract_auth_reason
+except ImportError:
+    try:
+        from multiagent.agents.ai_agents.ai_evidence_scoring import extract_auth_reason
+    except ImportError:
+        from ai_evidence_scoring import extract_auth_reason
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,6 +52,9 @@ class AIInfraScanResult:
     error:           str = ""
     catch_all_detected: bool = False
     auth_protected_endpoints: list = field(default_factory=list)
+    # Richer per-endpoint classification: [{"url","status","auth_status","reason"}]
+    # auth_status: "authentication_required" (401) | "access_forbidden" (403)
+    auth_protected_details: list = field(default_factory=list)
     exposed_endpoints: list = field(default_factory=list)
 
 
@@ -242,10 +253,14 @@ _INFO_VALIDATORS = {
 
 class AIInfraAgent:
 
-    def __init__(self, openai_client=None, timeout: int = 15, llm_model: str = None):
+    def __init__(self, openai_client=None, timeout: int = 15, llm_model: str = None,
+                 auth_headers: Optional[dict] = None):
         self.client    = openai_client
         self.timeout   = timeout
         self.llm_model = llm_model or os.getenv("AZURE_OPENAI_DEPLOYMENT", "MultiAgentLLM")
+        # Sent with every probe request — reaches AI infra endpoints that are
+        # only exposed post-authentication.
+        self.auth_headers = auth_headers or {}
 
     async def scan(self, target_url: str, ai_stack: Optional[dict] = None) -> AIInfraScanResult:
         target_url   = target_url.rstrip("/")
@@ -268,10 +283,18 @@ class AIInfraAgent:
                 ep = sig.get("endpoint", "") if isinstance(sig, dict) else ""
                 if ep and ep not in result.auth_protected_endpoints:
                     result.auth_protected_endpoints.append(ep)
+                if ep and isinstance(sig, dict):
+                    result.auth_protected_details.append({
+                        "url": ep,
+                        "status": sig.get("status_code"),
+                        "auth_status": sig.get("auth_status", ""),
+                        "reason": sig.get("reason", ""),
+                    })
 
             capabilities = (ai_stack or {}).get("capabilities", [])
 
-            exposed, auth_hits, catch_all = await self._probe_ai_endpoints(target_url, ai_stack)
+            exposed, auth_hits, auth_details, catch_all = await self._probe_ai_endpoints(
+                target_url, ai_stack)
             result.catch_all_detected = catch_all
             result.exposed_endpoints = [
                 (meta or {}).get("url") or (
@@ -284,6 +307,11 @@ class AIInfraAgent:
             for ep in auth_hits:
                 if ep not in result.auth_protected_endpoints:
                     result.auth_protected_endpoints.append(ep)
+            existing_urls = {d.get("url") for d in result.auth_protected_details}
+            for d in auth_details:
+                if d.get("url") not in existing_urls:
+                    result.auth_protected_details.append(d)
+                    existing_urls.add(d.get("url"))
 
             result.build_threats   = await self._analyze_build_plane(target_url, ai_stack, exposed, reachability)
             result.deploy_threats  = await self._analyze_deployment_plane(target_url, exposed, reachability)
@@ -295,7 +323,8 @@ class AIInfraAgent:
             result.threats = all_threats
             result.summary = self._synthesize_report(
                 target_url, ai_stack, all_threats, catch_all,
-                result.auth_protected_endpoints, capabilities, reachability)
+                result.auth_protected_endpoints, capabilities, reachability,
+                auth_protected_details=result.auth_protected_details)
         except Exception as e:
             logger.error("[AIInfraAgent] Scan error: %s", e, exc_info=True)
             result.error = str(e)
@@ -415,6 +444,7 @@ class AIInfraAgent:
 
         exposed: dict = {}
         auth_hits: list = []
+        auth_details: list = []
         # Work items: (probe_base, path, full_url, use_spa, same_origin)
         work = [
             (base_url, p, base_url + p, is_catch_all, True) for p in paths_to_probe
@@ -437,7 +467,14 @@ class AIInfraAgent:
             if verdict == "auth":
                 if full_url not in auth_hits:
                     auth_hits.append(full_url)
-                logger.info("[AIInfraAgent] AUTH-PROTECTED -> %s [%d]", full_url, status)
+                    auth_status, reason = extract_auth_reason(status, body)
+                    auth_details.append({
+                        "url": full_url, "status": status,
+                        "auth_status": auth_status, "reason": reason,
+                    })
+                    logger.info(
+                        "[AIInfraAgent] AUTH-PROTECTED -> %s [%d] %s (%s)",
+                        full_url, status, auth_status, reason)
                 continue
             if verdict == "skip":
                 continue
@@ -453,7 +490,7 @@ class AIInfraAgent:
             tag = "content-verified" if use_spa else "reached"
             logger.info("[AIInfraAgent] EXPOSED (%s) -> %s [%d]", tag, full_url, status)
 
-        return exposed, auth_hits, is_catch_all
+        return exposed, auth_hits, auth_details, is_catch_all
 
     def _classify(self, status: int, body: str, ct: str, path: str,
                   have_confirmed: bool, catch_all: bool = False) -> str:
@@ -498,7 +535,7 @@ class AIInfraAgent:
         return "skip"
 
     async def _probe_path(self, http: httpx.AsyncClient, base: str, path: str) -> Tuple[int, str, str]:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0", **self.auth_headers}
         try:
             if "delete" in path:
                 r = await http.request("DELETE", f"{base}{path}", headers=headers)
@@ -729,10 +766,24 @@ class AIInfraAgent:
 
         return threats
 
+    @staticmethod
+    def _format_auth_detail(url: str, details_by_url: dict) -> str:
+        d = details_by_url.get(url)
+        if not d:
+            return url
+        status = d.get("status")
+        auth_status = d.get("auth_status") or "auth"
+        reason = d.get("reason") or "-"
+        return f"{url} [{status} {auth_status}: {reason}]"
+
     def _synthesize_report(self, url, ai_stack, threats, catch_all_detected=False,
-                           auth_protected_endpoints=None, capabilities=None, reachability="unknown"):
+                           auth_protected_endpoints=None, capabilities=None,
+                           reachability="unknown", auth_protected_details=None):
         auth_protected_endpoints = auth_protected_endpoints or []
         capabilities = capabilities or []
+        details_by_url = {
+            d.get("url"): d for d in (auth_protected_details or []) if d.get("url")
+        }
 
         if not threats:
             base = "No AI infrastructure findings."
@@ -740,8 +791,12 @@ class AIInfraAgent:
                 base += (" Target uses catch-all/SPA routing; exposure verified by response "
                          "content, not status code alone.")
             if auth_protected_endpoints:
+                shown = [
+                    self._format_auth_detail(ep, details_by_url)
+                    for ep in auth_protected_endpoints[:5]
+                ]
                 base += (f" {len(auth_protected_endpoints)} AI endpoint(s) present but correctly "
-                         f"require authentication: {', '.join(auth_protected_endpoints[:5])}.")
+                         f"require authentication: {', '.join(shown)}.")
             return base
 
         confirmed = [t for t in threats if t.status == "Confirmed"]
@@ -769,8 +824,12 @@ class AIInfraAgent:
             parts.append("\nPotential (reachable/inferred; harmful action not verified):")
             parts += [_line(t) for t in potential]
         if auth_protected_endpoints:
+            shown = [
+                self._format_auth_detail(ep, details_by_url)
+                for ep in auth_protected_endpoints[:5]
+            ]
             parts.append(f"\nSecure configuration: {len(auth_protected_endpoints)} AI endpoint(s) "
-                         f"correctly require authentication: {', '.join(auth_protected_endpoints[:5])}.")
+                         f"correctly require authentication: {', '.join(shown)}.")
         if catch_all_detected:
             parts.append("\nExposure verified by response content (catch-all/SPA routing detected).")
 
@@ -810,6 +869,7 @@ class AIInfraAgent:
             "summary":        result.summary,
             "catch_all_detected": result.catch_all_detected,
             "auth_protected_endpoints": result.auth_protected_endpoints,
+            "auth_protected_details": result.auth_protected_details,
             "exposed_endpoints": result.exposed_endpoints,
             "planes_covered": ["BUILD", "DEPLOYMENT", "RUNTIME", "ORCHESTRATION"],
         }

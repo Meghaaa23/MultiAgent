@@ -8,6 +8,7 @@
   "deployment_note": "Full upstream source checked out at multiagent-testbed/benchmark-apps/chatwoot/ (git HEAD ed5a099425a55af1ab0ea9c5737e8521fabda306, v4.16.2) but no container has been built/run in this testbed yet. url_aliases uses the app's own docker-compose.yaml default (port 3000) and will need updating once actually deployed.",
   "endpoints_true": [],
   "endpoints_auth_gated": [
+    "/api/v1/widget/messages",
     "/api/v1/accounts/:account_id/captain/tasks/rewrite",
     "/api/v1/accounts/:account_id/captain/tasks/summarize",
     "/api/v1/accounts/:account_id/captain/tasks/reply_suggestion",

@@ -1,20 +1,4 @@
-"""Ownership / authorization scope for chatbot UI injection.
 
-Two axes are kept separate on purpose:
-
-1. Reachability (fact): can Playwright touch the surface?
-   Same-origin SOP blocks *page JS*, but Playwright drives CDP and can
-   read/type into cross-origin iframes via the frames API. Cross-origin
-   is therefore NOT a capability wall.
-
-2. Injection policy (decision): are we authorized to actively inject?
-   Default is conservative. Origin/eTLD+1 is a cheap ownership heuristic,
-   not a terminal law — overrides exist for authorized vendor / external
-   surfaces.
-
-Evidence tier (passive_hint / live_surface / …) stays on a third axis and
-must not be conflated with scope.
-"""
 from __future__ import annotations
 
 import re
@@ -24,8 +8,6 @@ from typing import Optional, Tuple
 from urllib.parse import urlparse
 
 
-# Multi-part public suffixes we care about for eTLD+1 without pulling a
-# full PSL dependency. Approximate but enough for product hosts.
 _MULTI_PART_SUFFIXES = frozenset({
     "co.uk", "org.uk", "ac.uk", "gov.uk",
     "com.au", "net.au", "org.au",

@@ -1,17 +1,4 @@
-"""Discover-first chatbot UI probe with falsifiable confirmation.
 
-Design contract (aligned with the API evidence taxonomy):
-
-1. Network-observational discovery first; action-triggering last.
-2. Side-effect gate before any submit (skip password/email/sensitive forms).
-3. Map surfaces onto ordinal tiers — no hand-weighted selector ranker.
-4. Injection confirmation is differential (control vs treatment).
-5. Scope policy (ownership + authorization) is separate from reachability:
-   Playwright can reach cross-origin iframes via CDP; skipping vendor
-   widgets is a policy default with overrides, not a capability wall.
-6. Persist behavioral/locator fingerprints, not brittle CSS paths.
-7. Reply capture uses a settle window (streaming-aware), not a single mutation.
-"""
 from __future__ import annotations
 
 import logging
@@ -631,6 +618,7 @@ class ChatbotUIProbe:
         settle_ms: int = 1200,
         max_discovery_submits: int = 1,
         scope_policy: Optional[ScopePolicy] = None,
+        auth_headers: Optional[Dict[str, str]] = None,
     ):
         self.timeout_ms = timeout_ms
         self.reply_wait_ms = reply_wait_ms
@@ -638,6 +626,9 @@ class ChatbotUIProbe:
         self.max_discovery_submits = max(0, max_discovery_submits)
         self.scope_policy = scope_policy or ScopePolicy()
         self.scorer = SemanticScorer(enable_embeddings=False)
+        # Applied to the Playwright browser context so the chat UI (and any
+        # XHR/fetch it issues) is reached as an authenticated session.
+        self.auth_headers = auth_headers or {}
 
     async def detect(
         self,
@@ -819,7 +810,9 @@ class ChatbotUIProbe:
             browser = await p.chromium.launch(
                 headless=True, args=["--no-sandbox", "--disable-gpu"],
             )
-            context = await browser.new_context()
+            context = await browser.new_context(
+                extra_http_headers=self.auth_headers or None,
+            )
             page = await context.new_page()
             net = _NetworkWatcher(page)
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
@@ -1611,7 +1604,9 @@ class ChatbotUIProbe:
             browser = await p.chromium.launch(
                 headless=True, args=["--no-sandbox", "--disable-gpu"],
             )
-            context = await browser.new_context()
+            context = await browser.new_context(
+                extra_http_headers=self.auth_headers or None,
+            )
             page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
             await page.wait_for_timeout(1000)

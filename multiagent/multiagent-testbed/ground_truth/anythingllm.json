@@ -7,7 +7,8 @@
   "extraction_note": "No source checked out on disk \u00e2\u20ac\u201d read directly from the running, healthy container benchmark-anythingllm (image mintplexlabs/anythingllm, v1.15.0) via docker exec: server/index.js, endpoints/chat.js, endpoints/workspaces.js, endpoints/embed/index.js, endpoints/api/openai/index.js, utils/middleware/validatedRequest.js, utils/middleware/validApiKey.js, models/systemSettings.js, plus a live query against the system_settings table (multi_user_mode unset) and env (no AUTH_TOKEN/JWT_SECRET set). Source- and runtime-verified, not documented-knowledge.",
   "endpoints_true": [],
   "endpoints_auth_gated": [
-    "/v1/openai/chat/completions"
+    "/v1/openai/chat/completions",
+    "/v1/openai/images/generations"
   ],
   "ai_surface": {
     "has_ai_surface": "yes",
