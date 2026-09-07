@@ -53,3 +53,12 @@ multi-agent-llm/.angular/
 # Misc
 *.log
 .cache/
+
+multiagent-testbed/benchmark-apps/*/data/
+multiagent-testbed/benchmark-apps/*/storage/
+multiagent-testbed/benchmark-apps/*/data-db/
+*.key
+*.pem
+*.sqlite
+*.sock
+
