@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(name)s — %(message)s")
 
-from ai_fingerprint import AIFingerprintAgent
+from ai_fingerprint import AIFingerprintAgent, should_run_ai_tests
 from Ai_Infra_agent       import AIInfraAgent
 from ai_vulnerability_test       import AIVulnerabilityTester
 from avid_lookup_agent    import AVIDLookupAgent
@@ -62,8 +62,18 @@ async def main():
     if args.agent == "fingerprint":
         return
 
-   
-    if args.agent in ("infra", "all"):
+    # Evidence gate: in auto ("all") mode, escalate to AI-specific modules only
+    # when a live, model-backed interface is confirmed. An explicit --agent choice
+    # is treated as an intentional developer override.
+    gate = should_run_ai_tests(ai_fingerprint)
+    print(f"\n  Live model-backed interface confirmed: {ai_fingerprint.get('model_backed_confirmed')}")
+    print(f"  Chat surfaces: {ai_fingerprint.get('chat_surface_summary', {})}")
+    print(f"  AI-escalation gate open: {gate}")
+    if args.agent == "all" and not gate:
+        print("  [gate] No live model-backed interface confirmed — skipping AI-specific modules.")
+        return
+
+    if args.agent == "infra" or (args.agent == "all" and gate):
         infra_agent = AIInfraAgent(openai_client=get_openai_client(), timeout=15)
         infra_result = await infra_agent.scan(
             target_url = target_url,
@@ -75,7 +85,7 @@ async def main():
         print(f"\n  Summary: {infra_result.summary}")
 
     
-    if args.agent in ("vuln", "all"):
+    if args.agent == "vuln" or (args.agent == "all" and gate):
         vuln_agent = AIVulnerabilityTester(timeout=10)
         vuln_result = await vuln_agent.test_all(
             ai_fingerprint = ai_fingerprint,

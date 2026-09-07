@@ -15,7 +15,7 @@ from .endpoint_discovery_agent  import EndpointDiscoveryAgent
 from .browser_controller        import BrowserController
 from .vulnerability_tester      import VulnerabilityTester
 from .attack_verification_agent import AttackVerificationAgent, VulnStatus
-from ..ai_agents.ai_fingerprint            import AIFingerprintAgent
+from ..ai_agents.ai_fingerprint            import AIFingerprintAgent, should_run_ai_tests
 from ..ai_agents.avid_lookup_agent         import AVIDLookupAgent
 from ..ai_agents.ai_vulnerability_test     import AIVulnerabilityTester
 from ..ai_agents.Ai_Infra_agent            import AIInfraAgent
@@ -308,12 +308,16 @@ class WebScannerAgent:
 
             raw_is_ai    = ai_fingerprint.get("is_ai_powered", False)
             confidence   = ai_fingerprint.get("confidence", "low")
-            has_concrete = bool(ai_fingerprint.get("ml_endpoints") or ai_fingerprint.get("ai_headers"))
-            is_ai_powered = raw_is_ai and (confidence == "high" or has_concrete)
+            # Evidence gate: escalate to AI-specific testing only after a live,
+            # model-backed interface (or an application-owned chat surface) is
+            # confirmed — not on passive signals alone.
+            is_ai_powered = should_run_ai_tests(ai_fingerprint)
 
             if is_ai_powered:
                 if verbose:
                     print(f"  AI-powered app detected [{confidence} confidence]")
+                    print(f"     Live model confirmed: {ai_fingerprint.get('model_backed_confirmed')}")
+                    print(f"     Chat surfaces: {ai_fingerprint.get('chat_surface_summary', {})}")
                     print(f"     ML endpoints: {ai_fingerprint.get('ml_endpoints',[])[:3]}")
                     print(f"     ML libraries: {ai_fingerprint.get('ml_libraries',[])[:3]}\n")
 
@@ -343,8 +347,9 @@ class WebScannerAgent:
                     print(f"   Strategic recommendations: {s} ATLAS-based\n")
             else:
                 if verbose:
-                    if raw_is_ai and not has_concrete:
-                        print(f"  Weak AI signals (confidence: {confidence}) — skipping AI escalation\n")
+                    if raw_is_ai:
+                        print(f"  AI signals present but no live model-backed interface "
+                              f"confirmed (confidence: {confidence}) — skipping AI escalation\n")
                     else:
                         print(f"  No AI/ML components detected — AI-specific tests skipped\n")
 
@@ -353,7 +358,7 @@ class WebScannerAgent:
 
         ai_infra_result = None
         try:
-            if ai_fingerprint and ai_fingerprint.get("is_ai_powered"):
+            if ai_fingerprint and should_run_ai_tests(ai_fingerprint):
                 if verbose:
                     print("  AI Infrastructure Build Attack Analysis...")
                 ai_infra_result = await self.ai_infra_agent.scan(

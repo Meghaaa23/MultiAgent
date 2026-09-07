@@ -11,7 +11,28 @@ import urllib.error
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+try:  # package-relative import (agents.ai_agents.*)
+    from .chat_surface import (
+        classify_chat_surfaces, extract_script_and_iframe_srcs,
+        summarize_ownership, OWNERSHIP_APPLICATION_OWNED,
+    )
+except ImportError:  # flat import fallback (tests / scripts adding the dir to sys.path)
+    from chat_surface import (  # type: ignore
+        classify_chat_surfaces, extract_script_and_iframe_srcs,
+        summarize_ownership, OWNERSHIP_APPLICATION_OWNED,
+    )
+
 logger = logging.getLogger(__name__)
+
+# Evidence keys that indicate a live, model-backed interface was actually
+# confirmed responding (not merely inferred from passive signals). Used to gate
+# AI-specific attack modules — see should_run_ai_tests().
+LIVE_MODEL_EVIDENCE_KEYS = {
+    "behavior_llm_response",
+    "behavior_model_reported",
+    "behavior_streaming",
+    "chat_endpoint_200",
+}
 
 
 EVIDENCE_WEIGHTS: Dict[str, int] = {
@@ -76,6 +97,32 @@ def score_to_confidence(score: int) -> str:
         if score >= threshold:
             return label
     return "none"
+
+
+def should_run_ai_tests(fingerprint: Dict) -> bool:
+    """
+    Evidence gate for AI-specific attack modules.
+
+    The abstract requires escalating to AI-specific testing "only after confirming
+    a live, model-backed interface". Passive signals alone (an OpenAPI path, a JS
+    SDK string, a 401 on /api/chat) are NOT sufficient. AI tests run only when one
+    of the following holds:
+
+      * a live model interface was confirmed responding (model_backed_confirmed), OR
+      * an application-owned conversational surface was discovered, OR
+      * concrete same-origin ML endpoints were found with high overall confidence.
+    """
+    if not fingerprint.get("is_ai_powered"):
+        return False
+    if fingerprint.get("model_backed_confirmed"):
+        return True
+    for c in fingerprint.get("chat_components", []):
+        if c.get("ownership") == OWNERSHIP_APPLICATION_OWNED:
+            return True
+    if fingerprint.get("ml_endpoints") and \
+            fingerprint.get("confidence") in ("high", "very_high"):
+        return True
+    return False
 
 
 FRAMEWORK_SIGNATURES: Dict[str, Dict] = {
@@ -442,6 +489,9 @@ class FingerprintReport:
     evidence_items:   List[EvidenceItem] = field(default_factory=list)
     atlas_techniques: List[str]          = field(default_factory=list)
 
+    chat_components:        List[Dict] = field(default_factory=list)
+    model_backed_confirmed: bool       = False
+
     def to_dict(self) -> Dict:
         return {
             "is_ai_powered":          self.is_ai_powered,
@@ -478,7 +528,9 @@ class FingerprintReport:
             "api_schema":          {"tools": [], "openapi": self.openapi_schema},
             "app_description":     "",
             "response_headers":    {},
-            "chat_components":     [],
+            "chat_components":     self.chat_components,
+            "chat_surface_summary": summarize_ownership(self.chat_components),
+            "model_backed_confirmed": self.model_backed_confirmed,
             "atlas_techniques":    self.atlas_techniques,
             "evidence_items": [
                 {"key": e.key, "detail": e.detail, "weight": e.weight,
@@ -699,6 +751,23 @@ class AIFingerprintAgent:
         infra_layer = detected_framework if detected_framework in INFRA_FRAMEWORKS else detected_infra
         app_layer   = detected_framework if detected_framework not in INFRA_FRAMEWORKS else ""
 
+        # Live, model-backed confirmation: at least one evidence item proving a
+        # model interface actually responded (behavioural probe / live chat 200).
+        model_backed_confirmed = any(
+            ev.key in LIVE_MODEL_EVIDENCE_KEYS for ev in all_evidence)
+
+        # Conversational-surface discovery + ownership classification from the
+        # rendered DOM (application_owned / third_party_widget / human_operated).
+        script_srcs = extract_script_and_iframe_srcs(page_html or "")
+        chat_components = classify_chat_surfaces(
+            page_html or "",
+            base,
+            script_srcs=script_srcs,
+            app_framework=app_layer,
+            ml_endpoints=ml_endpoints,
+            is_ai_powered=is_ai,
+        )
+
         return FingerprintReport(
             is_ai_powered         = is_ai,
             confidence            = confidence,
@@ -723,6 +792,8 @@ class AIFingerprintAgent:
             deployment_signals    = deployment,
             evidence_items        = all_evidence,
             atlas_techniques      = atlas,
+            chat_components        = chat_components,
+            model_backed_confirmed = model_backed_confirmed,
         )
 
     def _analyse_html(
