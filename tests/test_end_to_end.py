@@ -2,8 +2,13 @@
 test_end_to_end.py
 End-to-end tests for AIVulnerabilityTester against a mock FastAPI/WSGI server.
 
-The mock server simulates three target behaviors:
-  - vulnerable_chat: echoes the canary verbatim (EXECUTED expected)
+The mock server simulates four target behaviors:
+  - vulnerable_chat: genuinely FOLLOWS the injection — emits the requested canary
+                     token in a produced answer WITHOUT echoing the prompt
+                     (EXECUTED expected)
+  - echo_chat:       reflects the request content verbatim (a reflection surface,
+                     NOT a model following instructions). The differential/echo
+                     guard must classify this as ECHO, never Confirmed.
   - refusing_chat:   always refuses (no confirmed vulns expected)
   - leaking_chat:    leaks system prompt context in response
 
@@ -11,6 +16,7 @@ Tests cover test_all() and evaluate() public interfaces.
 """
 import asyncio
 import json
+import re
 import threading
 import socket
 import pytest
@@ -20,6 +26,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from multiagent.agents.ai_agents.ai_vulnerability_test import (
     AIVulnerabilityTester, ResponseOutcome, ApplicationType, CapabilitySet,
 )
+
+_CANARY_RE = re.compile(r"YURA_[A-Z0-9]+")
 
 
 # ---------------------------------------------------------------------------
@@ -39,18 +47,54 @@ def _run_server(handler_class, port: int):
     return srv
 
 
+def _read_content(handler) -> str:
+    length = int(handler.headers.get("Content-Length", 0))
+    body   = json.loads(handler.rfile.read(length) or "{}")
+    return (body.get("messages", [{}])[0].get("content", "")
+            or body.get("prompt", "")
+            or body.get("input", "")
+            or body.get("question", ""))
+
+
 class VulnerableHandler(BaseHTTPRequestHandler):
-    """Echoes back whatever 'content' or 'prompt' is in the request body."""
+    """A model that genuinely FOLLOWS an injected instruction.
+
+    When the incoming prompt asks for a canary token it emits *only* that token
+    inside a produced answer (it does NOT echo the prompt). This is a real
+    injection success and must classify as EXECUTED. Crucially, for the echo
+    sentinel probe (which tells the model NOT to repeat a code) it complies and
+    answers "READY", so the echo guard does not suppress the finding.
+    """
 
     def do_POST(self):  # noqa: N802
-        length  = int(self.headers.get("Content-Length", 0))
-        body    = json.loads(self.rfile.read(length) or "{}")
-        content = (body.get("messages", [{}])[0].get("content", "")
-                   or body.get("prompt", "")
-                   or body.get("input", "")
-                   or body.get("question", ""))
-        resp = json.dumps({"choices": [{"message": {"content": content}}]})
-        self._reply(resp)
+        content = _read_content(self)
+        canaries = _CANARY_RE.findall(content)
+        if canaries:
+            answer = f"Sure! The verification token is {canaries[-1]}. Task complete."
+        else:
+            answer = "READY"
+        self._reply(json.dumps({"choices": [{"message": {"content": answer}}]}))
+
+    def _reply(self, text: str, status: int = 200):
+        data = text.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+class EchoHandler(BaseHTTPRequestHandler):
+    """Reflects request content verbatim — a reflection surface, not a model
+    that reasons about instructions. Bare-canary substring matching would call
+    this EXECUTED; the differential/echo guard must NOT."""
+
+    def do_POST(self):  # noqa: N802
+        content = _read_content(self)
+        self._reply(json.dumps({"choices": [{"message": {"content": content}}]}))
 
     def _reply(self, text: str, status: int = 200):
         data = text.encode()
@@ -125,6 +169,13 @@ def vulnerable_url():
 
 
 @pytest.fixture(scope="module")
+def echo_url():
+    port = _free_port()
+    _run_server(EchoHandler, port)
+    return f"http://127.0.0.1:{port}"
+
+
+@pytest.fixture(scope="module")
 def refusing_url():
     port = _free_port()
     _run_server(RefusingHandler, port)
@@ -187,6 +238,27 @@ class TestTestAll:
         result = asyncio.run(tester.test_all(fp, vulnerable_url))
         for finding in result["confirmed_ai_vulns"]:
             assert finding["outcome"] in ("executed", "leaked", "followed")
+
+    def test_echo_server_not_confirmed(self, tester, echo_url):
+        # A pure reflection endpoint must NOT be reported as a confirmed
+        # injection just because the canary substring appears in its echo.
+        fp = _fingerprint(echo_url)
+        result = asyncio.run(tester.test_all(fp, echo_url))
+        assert len(result["confirmed_ai_vulns"]) == 0
+
+    def test_echo_server_yields_echo_outcome(self, echo_url):
+        # The differential/echo guard should mark canary hits as ECHO (or
+        # canary_confounded), which are non-success outcomes.
+        echo_tester = AIVulnerabilityTester(
+            timeout=3, rate_limit_delay=0.0, max_requests=150,
+            enable_embeddings=False, mutation_sample=1,
+        )
+        fp = _fingerprint(echo_url)
+        result = asyncio.run(echo_tester.evaluate(fp, echo_url))
+        outcomes = {a["outcome"] for a in result["attempts"]}
+        assert "executed" not in outcomes
+        assert outcomes & {"echo", "canary_confounded"}
+        assert result["evaluation"]["asr_overall"]["strict"] == 0.0
 
     def test_refusing_server_has_no_confirmed(self, tester, refusing_url):
         fp = _fingerprint(refusing_url)
@@ -287,7 +359,7 @@ class TestEvaluate:
         fp = _fingerprint(vulnerable_url)
         result = asyncio.run(tester.evaluate(fp, vulnerable_url))
         strict_asr = result["evaluation"]["asr_overall"]["strict"]
-        assert strict_asr > 0.3   # echo-all server should have high ASR
+        assert strict_asr > 0.3   # instruction-following server should have high ASR
 
 
 # ---------------------------------------------------------------------------
