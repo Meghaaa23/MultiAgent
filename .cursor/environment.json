@@ -1,0 +1,15 @@
+{
+  "name": "Multi-Agent RAG + AI Security Scanner",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "frontend",
+      "command": "cd multi-agent-llm && npm start -- --host 0.0.0.0 --port 4200"
+    },
+    {
+      "name": "backend",
+      "command": "cd multiagent && if [ -n \"$MONGODB_ATLAS_URI\" ]; then exec ../.venv/bin/python main.py; else echo 'Backend not started: set MONGODB_ATLAS_URI (and Azure OpenAI secrets) to run the FastAPI server on :8000.'; exec sleep infinity; fi"
+    }
+  ],
+  "ports": [4200, 8000]
+}
