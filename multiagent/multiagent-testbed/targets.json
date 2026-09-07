@@ -24,7 +24,12 @@
         "fileupload",
         "cmdi"
       ],
-      "notes": "Reset DB via http://localhost:8001/setup.php"
+      "notes": "Reset DB via http://localhost:8001/setup.php",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 2,
@@ -45,7 +50,12 @@
         "xss",
         "auth-bypass",
         "plugin-vulns"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 3,
@@ -65,7 +75,12 @@
         "sqli",
         "xss",
         "rce"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 4,
@@ -85,7 +100,12 @@
         "sqli",
         "rce",
         "open-redirect"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 5,
@@ -105,7 +125,12 @@
         "xss",
         "csrf",
         "sqli"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 6,
@@ -125,7 +150,12 @@
         "sqli",
         "xss",
         "idor"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 7,
@@ -145,7 +175,12 @@
         "sqli",
         "xss",
         "auth-bypass"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 8,
@@ -162,7 +197,12 @@
         "mass-assignment",
         "broken-auth"
       ],
-      "notes": "Endpoints: /users /products /orders /secrets"
+      "notes": "Endpoints: /users /products /orders /secrets",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 9,
@@ -181,7 +221,12 @@
       "known_vulns": [
         "graphql-injection",
         "broken-object-auth"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 10,
@@ -200,7 +245,12 @@
       "known_vulns": [
         "idor",
         "broken-auth"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 11,
@@ -220,7 +270,12 @@
         "oauth-misconfig",
         "token-forgery",
         "open-redirect"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 12,
@@ -239,7 +294,12 @@
         "ssrf",
         "anon-access",
         "plugin-rce"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 13,
@@ -259,7 +319,12 @@
         "repo-traversal",
         "webhook-ssrf",
         "token-leak"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 14,
@@ -279,7 +344,12 @@
         "path-traversal",
         "webdav-abuse",
         "idor"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 15,
@@ -300,7 +370,12 @@
         "xss",
         "idor",
         "auth-bypass"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 16,
@@ -323,7 +398,12 @@
         "ssrf",
         "jwt",
         "deserialization"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 17,
@@ -347,7 +427,12 @@
         "csrf",
         "jwt",
         "nosqli"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 18,
@@ -373,7 +458,12 @@
         "ssrf",
         "ssti",
         "csrf"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 19,
@@ -396,7 +486,12 @@
         "ssti",
         "idor",
         "regex-dos"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 20,
@@ -422,7 +517,12 @@
         "rfi",
         "cmdi",
         "xxe"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 21,
@@ -441,7 +541,12 @@
         "dos",
         "idor"
       ],
-      "notes": "GraphQL endpoint at /graphql"
+      "notes": "GraphQL endpoint at /graphql",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 22,
@@ -465,7 +570,12 @@
         "ssrf",
         "idor"
       ],
-      "notes": "Completely Ridiculous API \u2014 OWASP API Top 10 coverage"
+      "notes": "Completely Ridiculous API \u2014 OWASP API Top 10 coverage",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 23,
@@ -487,7 +597,12 @@
         "excessive-data-exposure",
         "mass-assignment",
         "idor"
-      ]
+      ],
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 24,
@@ -506,7 +621,12 @@
         "prompt-injection",
         "ssrf"
       ],
-      "notes": "REST API at /api/generate and /api/chat"
+      "notes": "REST API at /api/generate and /api/chat",
+      "ai_surface": {
+        "is_ai_app": true,
+        "expected_ownership": [],
+        "prompt_injection_expected": true
+      }
     },
     {
       "id": 25,
@@ -524,7 +644,12 @@
         "model-poisoning",
         "lfi"
       ],
-      "notes": "ML experiment tracking \u2014 no auth by default"
+      "notes": "ML experiment tracking \u2014 no auth by default",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 26,
@@ -544,7 +669,12 @@
         "token-exposure",
         "unauthenticated-access"
       ],
-      "notes": "No token auth in testbed config"
+      "notes": "No token auth in testbed config",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 27,
@@ -566,7 +696,12 @@
         "broken-auth",
         "sensitive-data"
       ],
-      "notes": "ML data labeling platform"
+      "notes": "ML data labeling platform",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 28,
@@ -584,7 +719,12 @@
         "log4shell",
         "unauthenticated-access"
       ],
-      "notes": "Admin UI at /solr \u2014 Log4Shell CVE-2021-44228 testbed"
+      "notes": "Admin UI at /solr \u2014 Log4Shell CVE-2021-44228 testbed",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 29,
@@ -602,7 +742,12 @@
         "s2-045",
         "s2-057"
       ],
-      "notes": "Struts2 showcase \u2014 Equifax-style RCE vulns"
+      "notes": "Struts2 showcase \u2014 Equifax-style RCE vulns",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 30,
@@ -624,7 +769,12 @@
         "credential-exposure",
         "csrf"
       ],
-      "notes": "Script console at /script \u2014 direct RCE"
+      "notes": "Script console at /script \u2014 direct RCE",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 31,
@@ -645,7 +795,12 @@
         "ssrf",
         "broken-auth"
       ],
-      "notes": "Docker management UI \u2014 container breakout risk"
+      "notes": "Docker management UI \u2014 container breakout risk",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 32,
@@ -666,7 +821,12 @@
         "path-traversal",
         "unauthenticated-access"
       ],
-      "notes": "S3-compatible object storage \u2014 public bucket misconfig"
+      "notes": "S3-compatible object storage \u2014 public bucket misconfig",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 33,
@@ -687,7 +847,12 @@
         "ssrf",
         "broken-auth"
       ],
-      "notes": "Management UI at /api \u2014 default guest:guest"
+      "notes": "Management UI at /api \u2014 default guest:guest",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 34,
@@ -704,7 +869,12 @@
         "ssrf",
         "sensitive-data-exposure"
       ],
-      "notes": "Metrics endpoint exposes internal service data"
+      "notes": "Metrics endpoint exposes internal service data",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 35,
@@ -724,7 +894,12 @@
         "broken-auth",
         "sensitive-data"
       ],
-      "notes": "Dev mode \u2014 root token enabled, all secrets exposed"
+      "notes": "Dev mode \u2014 root token enabled, all secrets exposed",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 36,
@@ -742,7 +917,12 @@
         "broken-auth",
         "excessive-data-exposure"
       ],
-      "notes": "Reference REST API \u2014 Swagger UI at /"
+      "notes": "Reference REST API \u2014 Swagger UI at /",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 37,
@@ -765,7 +945,12 @@
         "broken-auth",
         "mass-assignment"
       ],
-      "notes": "REST + SOAP + GraphQL vulnerable endpoints"
+      "notes": "REST + SOAP + GraphQL vulnerable endpoints",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 38,
@@ -789,7 +974,12 @@
         "path-traversal",
         "deserialization"
       ],
-      "notes": "Jinja2 SSTI and Flask debug mode RCE"
+      "notes": "Jinja2 SSTI and Flask debug mode RCE",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 39,
@@ -813,7 +1003,12 @@
         "idor",
         "broken-auth"
       ],
-      "notes": "DVNA \u2014 covers OWASP Top 10 Node.js specific"
+      "notes": "DVNA \u2014 covers OWASP Top 10 Node.js specific",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     },
     {
       "id": 40,
@@ -832,7 +1027,12 @@
         "broken-auth",
         "token-exposure"
       ],
-      "notes": "OWASP WrongSecrets \u2014 secrets management vulnerabilities"
+      "notes": "OWASP WrongSecrets \u2014 secrets management vulnerabilities",
+      "ai_surface": {
+        "is_ai_app": false,
+        "expected_ownership": [],
+        "prompt_injection_expected": false
+      }
     }
   ]
 }

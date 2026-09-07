@@ -1,0 +1,67 @@
+{
+  "testbed_version": "1.0-ai",
+  "description": "AI-enabled application testbed for SURFACE AI-surface discovery + prompt-injection evaluation. Bring these up with the compose files under multiagent-testbed/benchmark-apps/ (host ports below). Each target carries ground-truth ai_surface labels so accuracy_eval can compute AI-surface precision/recall, chat-ownership accuracy, and prompt-injection precision/recall/FP-rate.",
+  "base_url": "http://localhost",
+  "targets": [
+    {
+      "id": 101,
+      "name": "AnythingLLM",
+      "url": "http://localhost:3101",
+      "group": "ai-app",
+      "stack": ["Node.js", "LLM", "RAG"],
+      "default_creds": {},
+      "known_vulns": ["prompt-injection"],
+      "notes": "Self-hosted RAG chatbot. compose: benchmark-apps/anythingllm (3101:3001).",
+      "ai_surface": {
+        "is_ai_app": true,
+        "expected_ownership": ["application_owned"],
+        "prompt_injection_expected": true
+      }
+    },
+    {
+      "id": 102,
+      "name": "Flowise",
+      "url": "http://localhost:3100",
+      "group": "ai-app",
+      "stack": ["Node.js", "LLM", "agent-builder"],
+      "default_creds": {},
+      "known_vulns": ["prompt-injection"],
+      "notes": "Low-code LLM agent/chatflow builder. compose: benchmark-apps/flowise (3100:3000). Prediction API at /api/v1/prediction.",
+      "ai_surface": {
+        "is_ai_app": true,
+        "expected_ownership": ["application_owned"],
+        "prompt_injection_expected": true
+      }
+    },
+    {
+      "id": 103,
+      "name": "Langflow",
+      "url": "http://localhost:7860",
+      "group": "ai-app",
+      "stack": ["Python", "LLM", "agent-builder"],
+      "default_creds": {},
+      "known_vulns": ["prompt-injection"],
+      "notes": "Visual LangChain flow builder with chat. compose: benchmark-apps/langflow (7860:7860).",
+      "ai_surface": {
+        "is_ai_app": true,
+        "expected_ownership": ["application_owned"],
+        "prompt_injection_expected": true
+      }
+    },
+    {
+      "id": 104,
+      "name": "Ollama (AI Model Server)",
+      "url": "http://localhost:11434",
+      "group": "ai-app",
+      "stack": ["Go", "LLM"],
+      "default_creds": {},
+      "known_vulns": ["unauthenticated-api", "prompt-injection"],
+      "notes": "OpenAI-compatible/Ollama inference API (no chat UI). compose: benchmark-apps/ollama (11434:11434). Endpoints /api/generate, /api/chat.",
+      "ai_surface": {
+        "is_ai_app": true,
+        "expected_ownership": [],
+        "prompt_injection_expected": true
+      }
+    }
+  ]
+}

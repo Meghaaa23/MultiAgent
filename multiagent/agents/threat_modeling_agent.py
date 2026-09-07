@@ -1435,6 +1435,7 @@ Answer:"""
             return None
         vulns     = scan_results.get("vulnerabilities", [])
         endpoints = scan_results.get("endpoints_discovered", [])
+        ai_fp     = scan_results.get("ai_fingerprint", {}) or {}
         return {
             "stack":                     (scan_results.get("stack") or {}).get("stack_summary", "Unknown"),
             "endpoints_found":           len(endpoints),
@@ -1447,8 +1448,14 @@ Answer:"""
             "forms_discovered":          scan_results.get("forms_discovered", 0),
             "urls_discovered":           scan_results.get("urls_discovered",  0),
             "scan_duration":             scan_results.get("scan_duration",    0),
-            "is_ai_powered":             scan_results.get("is_ai_powered", False),
+            "is_ai_powered":             scan_results.get("is_ai_powered", ai_fp.get("is_ai_powered", False)),
             "avid_findings":             len(scan_results.get("avid_findings", [])),
             "strategic_recommendations": len(scan_results.get("strategic_recommendations", [])),
+            # AI-surface discovery signals (consumed by the evaluation harness).
+            "model_backed_confirmed":    ai_fp.get("model_backed_confirmed", False),
+            "chat_surface_summary":      ai_fp.get("chat_surface_summary", {}),
+            "chat_components":           ai_fp.get("chat_components", []),
+            "ml_endpoints":              ai_fp.get("ml_endpoints", []),
+            "discovered_paths":          ai_fp.get("discovered_paths", []),
             "vulnerabilities":           vulns,
         }

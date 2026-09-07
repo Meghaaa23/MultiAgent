@@ -13,8 +13,12 @@ RESULTS_DIR  = SCRIPT_DIR / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 
+TARGETS_OVERRIDE = None  # set from --targets-file
+
+
 def load_targets(group=None, target_id=None):
-    with open(TARGETS_FILE) as f:
+    path = TARGETS_OVERRIDE or TARGETS_FILE
+    with open(path) as f:
         manifest = json.load(f)
     targets = manifest["targets"]
     if target_id:
@@ -101,6 +105,9 @@ def run_scan(target, agent_cmd=None):
             "group": target["group"], "known_vulns": target.get("known_vulns", []),
             "session_id": session_id, "scan_time_s": elapsed,
             "status": "done", "findings": findings,
+            # Persist the AI-surface signals so accuracy_eval can compute
+            # AI-discovery / prompt-injection metrics from stored suites.
+            "scan_summary": scan_resp.get("scan_summary", {}),
         }
 
     except urllib.error.HTTPError as e:
@@ -168,7 +175,13 @@ def main():
     parser.add_argument("--reset-after",  action="store_true")
     parser.add_argument("--list",         action="store_true")
     parser.add_argument("--health-check", action="store_true")
+    parser.add_argument("--targets-file", type=str, help="Override targets manifest (e.g. targets_ai.json)")
     args = parser.parse_args()
+
+    global TARGETS_OVERRIDE
+    if args.targets_file:
+        tf = Path(args.targets_file)
+        TARGETS_OVERRIDE = tf if tf.is_absolute() else (SCRIPT_DIR / tf)
 
     if args.list:
         targets = load_targets()

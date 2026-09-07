@@ -1085,6 +1085,12 @@ async def scan_web_application(request: Request):
                 "is_ai_powered":      scan_data.get("is_ai_powered", False),
                 "avid_findings":      scan_data.get("avid_findings", 0),
                 "strategic_recs":     scan_data.get("strategic_recommendations", 0),
+                # AI-surface discovery signals (for the evaluation harness)
+                "model_backed_confirmed": scan_data.get("model_backed_confirmed", False),
+                "chat_surface_summary":   scan_data.get("chat_surface_summary", {}),
+                "chat_components":        scan_data.get("chat_components", []),
+                "ml_endpoints":           scan_data.get("ml_endpoints", []),
+                "discovered_paths":       scan_data.get("discovered_paths", []),
             },
             "vulnerabilities": scan_data.get("vulnerabilities", []),
             "session_id":      session_id,

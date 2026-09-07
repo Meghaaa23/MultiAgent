@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import json
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -34,6 +35,9 @@ SCRIPT_DIR   = Path(__file__).parent
 TARGETS_FILE = SCRIPT_DIR / "targets.json"
 RESULTS_DIR  = SCRIPT_DIR / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
+
+sys.path.insert(0, str(SCRIPT_DIR))
+import ai_metrics  # noqa: E402  (AI-specific discovery / prompt-injection metrics)
 
 # ---------------------------------------------------------------------------
 # Normalise vulnerability type strings → canonical known_vuln key
@@ -188,8 +192,12 @@ def aggregate_metrics(per_target: list) -> dict:
 # Scan helpers (reused from test_harness)
 # ---------------------------------------------------------------------------
 
+TARGETS_OVERRIDE = None  # set from --targets-file
+
+
 def load_targets(group=None, target_id=None):
-    with open(TARGETS_FILE) as f:
+    path = TARGETS_OVERRIDE or TARGETS_FILE
+    with open(path) as f:
         manifest = json.load(f)
     targets = manifest["targets"]
     if target_id:
@@ -342,6 +350,70 @@ def print_report(eval_results: list, agg: dict, suite_id: str):
 
 
 # ---------------------------------------------------------------------------
+# AI-specific evaluation (surface discovery + prompt injection)
+# ---------------------------------------------------------------------------
+
+def evaluate_ai(raw_results: list, target_map: dict) -> dict:
+    """Compute the abstract's AI-specific metrics for targets carrying labels."""
+    surface_entries = []
+    pairs           = []
+    labelled        = 0
+    done_results    = []
+
+    for r in raw_results:
+        tid   = r.get("target_id")
+        label = (target_map.get(tid, {}) or {}).get("ai_surface")
+        if label is None:
+            continue
+        labelled += 1
+        if r.get("status") == "done":
+            done_results.append(r)
+            surface_entries.append(ai_metrics.score_ai_surface_target(label, r))
+            pairs.append({"label": label, "result": r})
+
+    if not labelled:
+        return {}
+
+    return {
+        "labelled_targets":  labelled,
+        "scored_targets":    len(pairs),
+        "ai_surface":        ai_metrics.aggregate_ai_surface(surface_entries),
+        "ownership":         ai_metrics.ownership_classification_accuracy(pairs),
+        "prompt_injection":  ai_metrics.aggregate_prompt_injection(pairs),
+        "conventional_gap":  ai_metrics.aggregate_conventional_gap(done_results),
+    }
+
+
+def print_ai_report(ai_eval: dict):
+    if not ai_eval:
+        return
+    s  = ai_eval["ai_surface"]
+    pi = ai_eval["prompt_injection"]
+    ow = ai_eval["ownership"]
+    cg = ai_eval["conventional_gap"]
+
+    print("=" * 72)
+    print("  AI-SPECIFIC EVALUATION")
+    print("=" * 72)
+    print(f"  Labelled targets scored: {ai_eval['scored_targets']}/{ai_eval['labelled_targets']}")
+    print("\n  AI-surface discovery (app level):")
+    print(f"    Precision : {s['precision']:.3f}   Recall : {s['recall']:.3f}   F1 : {s['f1']:.3f}")
+    print(f"    TP={s['tp']}  FP={s['fp']}  FN={s['fn']}  TN={s['tn']}   Accuracy={s['accuracy']:.3f}")
+    print("\n  Chat-ownership classification:")
+    print(f"    Accuracy  : {ow['accuracy']:.3f} over {ow['targets_considered']} labelled surfaces")
+    print(f"    Per-class recall: {ow['per_class_recall']}")
+    print("\n  Prompt injection:")
+    print(f"    Confirmations : {pi['total_confirmations']}  across {pi['flagged_targets']} target(s)")
+    print(f"    Precision : {pi['precision']:.3f}   Recall : {pi['recall']:.3f}   "
+          f"FP-rate : {pi['false_positive_rate']:.3f}")
+    print(f"    (expected={pi['expected_targets']} tp={pi['tp_targets']} fp={pi['fp_targets']})")
+    print("\n  AI surfaces missed by a conventional scan:")
+    print(f"    {cg['total_ai_surfaces_missed_by_conventional']} surface(s) across "
+          f"{cg['targets_with_gap']} target(s)")
+    print("=" * 72 + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -352,7 +424,13 @@ def main():
     parser.add_argument("--group",      type=str,            help="Scan targets in group")
     parser.add_argument("--suite-file", type=str,            help="Load existing suite JSON instead of scanning")
     parser.add_argument("--save-suite", action="store_true", help="Save raw scan suite alongside accuracy report")
+    parser.add_argument("--targets-file", type=str,          help="Override targets manifest (e.g. targets_ai.json)")
     args = parser.parse_args()
+
+    global TARGETS_OVERRIDE
+    if args.targets_file:
+        tf = Path(args.targets_file)
+        TARGETS_OVERRIDE = tf if tf.is_absolute() else (SCRIPT_DIR / tf)
 
     suite_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -414,11 +492,17 @@ def main():
 
     print_report(eval_results, agg, suite_id)
 
+    # ── AI-specific evaluation (surface discovery + prompt injection) ───────
+    target_map = {t["id"]: t for t in load_targets()}
+    ai_eval    = evaluate_ai(raw_results, target_map)
+    print_ai_report(ai_eval)
+
     # ── Save accuracy report ───────────────────────────────────────────────
     report = {
         "suite_id":   suite_id,
         "run_at":     datetime.now().isoformat(),
         "aggregate":  agg,
+        "ai_evaluation": ai_eval,
         "per_target": eval_results,
     }
     report_path = RESULTS_DIR / f"accuracy_{suite_id}.json"
