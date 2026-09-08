@@ -1,0 +1,21 @@
+name: surface40
+
+# SURFACE 40-app evaluation testbed
+# ---------------------------------
+# Group 1 conventional  (ports 3001–3010)  --profile conventional
+# Group 2 AI apps       (ports 3011–3020)  --profile ai
+# Group 3 chatbot apps  (ports 3021–3030)  --profile chatbot
+# Group 4 fake-AI       (ports 3031–3040)  --profile fake-ai
+#
+# Bring everything up:
+#   docker compose --profile all up -d
+#
+# Shared infra (postgres / mysql / mongo / redis / ollama) has no profile
+# so it always starts. Ollama model pull runs only with --profile ai or all.
+
+include:
+  - path: compose/00-infra.yml
+  - path: compose/10-conventional.yml
+  - path: compose/20-ai.yml
+  - path: compose/30-chatbot.yml
+  - path: compose/40-fake-ai.yml

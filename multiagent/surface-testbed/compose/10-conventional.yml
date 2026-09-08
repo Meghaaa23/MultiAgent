@@ -1,0 +1,215 @@
+# Group 1 — Conventional web (AI-negative vuln targets). Ports 3001–3010.
+# True negatives for AI-surface precision + conventional detection.
+
+networks:
+  surface:
+
+x-g1: &g1
+  restart: unless-stopped
+  networks: [surface]
+  profiles: ["conventional", "all"]
+
+services:
+  # 1. DVWA — reset DB via /setup.php on first visit
+  dvwa:
+    <<: *g1
+    image: vulnerables/web-dvwa:latest
+    container_name: s40-dvwa
+    ports:
+      - "3001:80"
+    labels:
+      surface.id: "01"
+      surface.name: "DVWA"
+      surface.group: "conventional"
+      surface.port: "3001"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "reset DB on first visit (/setup.php)"
+
+  # 2. WebGoat — H2 embedded
+  webgoat:
+    <<: *g1
+    image: webgoat/webgoat:latest
+    container_name: s40-webgoat
+    environment:
+      WEBGOAT_HOST: 0.0.0.0
+      WEBGOAT_PORT: 8080
+      WEBWOLF_HOST: 0.0.0.0
+      WEBWOLF_PORT: 9090
+      TZ: UTC
+    ports:
+      - "3002:8080"
+    labels:
+      surface.id: "02"
+      surface.name: "WebGoat"
+      surface.group: "conventional"
+      surface.port: "3002"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "H2 embedded; UI at /WebGoat"
+
+  # 3. Damn Vulnerable GraphQL Application
+  dvga:
+    <<: *g1
+    image: dolevf/dvga:latest
+    container_name: s40-dvga
+    environment:
+      WEB_HOST: 0.0.0.0
+    ports:
+      - "3003:5013"
+    labels:
+      surface.id: "03"
+      surface.name: "Damn Vulnerable GraphQL"
+      surface.group: "conventional"
+      surface.port: "3003"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "self-contained GraphQL lab"
+
+  # 4. bWAPP — visit /install.php first
+  bwapp:
+    <<: *g1
+    image: raesene/bwapp:latest
+    container_name: s40-bwapp
+    ports:
+      - "3004:80"
+    labels:
+      surface.id: "04"
+      surface.name: "bWAPP"
+      surface.group: "conventional"
+      surface.port: "3004"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "/install.php first; bee / bug"
+
+  # 5. Mutillidae II — old, amd64-only
+  mutillidae:
+    <<: *g1
+    image: citizenstig/nowasp:latest
+    container_name: s40-mutillidae
+    platform: linux/amd64
+    ports:
+      - "3005:80"
+    labels:
+      surface.id: "05"
+      surface.name: "Mutillidae II"
+      surface.group: "conventional"
+      surface.port: "3005"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "amd64-only (~2015 image)"
+
+  # 6. VAmPI — REST API, SQLite
+  vampi:
+    <<: *g1
+    image: erev0s/vampi:latest
+    container_name: s40-vampi
+    ports:
+      - "3006:5000"
+    labels:
+      surface.id: "06"
+      surface.name: "VAmPI"
+      surface.group: "conventional"
+      surface.port: "3006"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "SQLite REST API"
+
+  # 7. WrongSecrets — no vault
+  wrongsecrets:
+    <<: *g1
+    image: jeroenwillemsen/wrongsecrets:latest-no-vault
+    container_name: s40-wrongsecrets
+    environment:
+      K8S_ENV: docker
+      SPRING_PROFILES_ACTIVE: without-vault
+    ports:
+      - "3007:8080"
+    labels:
+      surface.id: "07"
+      surface.name: "WrongSecrets"
+      surface.group: "conventional"
+      surface.port: "3007"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "self-contained secrets lab"
+
+  # 8. Hackazon — unofficial image, verify pull; amd64-only
+  hackazon:
+    <<: *g1
+    image: ianwijaya/hackazon:latest
+    container_name: s40-hackazon
+    platform: linux/amd64
+    ports:
+      - "3008:80"
+    labels:
+      surface.id: "08"
+      surface.name: "Hackazon"
+      surface.group: "conventional"
+      surface.port: "3008"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "unofficial image — verify pull; amd64-only"
+
+  # 9. DVNA (Damn Vulnerable NodeJS App) — NodeGoat replacement (no published owasp/nodegoat image)
+  dvna:
+    <<: *g1
+    image: appsecco/dvna:latest
+    container_name: s40-dvna
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER:-dvna}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-passw0rd}
+      MYSQL_DATABASE: dvna
+    ports:
+      - "3009:9090"
+    labels:
+      surface.id: "09"
+      surface.name: "DVNA"
+      surface.group: "conventional"
+      surface.port: "3009"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "NodeGoat replacement; needs MySQL. sqlite fallback: appsecco/dvna:sqlite"
+
+  # 10. BodgeIt Store — Java, self-contained (image expects a TTY)
+  bodgeit:
+    <<: *g1
+    image: psiinon/bodgeit:latest
+    container_name: s40-bodgeit
+    stdin_open: true
+    tty: true
+    ports:
+      - "3010:8080"
+    labels:
+      surface.id: "10"
+      surface.name: "BodgeIt Store"
+      surface.group: "conventional"
+      surface.port: "3010"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "Java, self-contained"

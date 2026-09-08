@@ -1,0 +1,550 @@
+# Group 3 — Chatbot platforms / support / widgets. Ports 3021–3030 (+ 3122, 3130).
+# Exercises ownership: app-owned bot vs third-party widget vs human-operated.
+
+networks:
+  surface:
+
+x-g3: &g3
+  restart: unless-stopped
+  networks: [surface]
+  profiles: ["chatbot", "all"]
+
+x-chatwoot-env: &chatwoot-env
+  RAILS_ENV: production
+  NODE_ENV: production
+  INSTALLATION_ENV: docker
+  SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY_BASE:-surface40chatwootsecretkeybasepleasechangeinproduction0000000000000000000000000001}
+  FRONTEND_URL: http://localhost:3024
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DATABASE: chatwoot_production
+  POSTGRES_USERNAME: ${POSTGRES_USER:-postgres}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-testbed_pass}
+  REDIS_URL: redis://redis:6379/1
+  RAILS_LOG_TO_STDOUT: "true"
+  ACTIVE_STORAGE_SERVICE: local
+  DEFAULT_LOCALE: en
+
+x-typebot-env: &typebot-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-testbed_pass}@postgres:5432/typebot
+  ENCRYPTION_SECRET: ${TYPEBOT_ENCRYPTION_SECRET:-Surface40TypebotEncryptKey32chr!}
+  NEXTAUTH_URL: http://localhost:3022
+  NEXTAUTH_URL_INTERNAL: http://typebot-builder:3000
+  NEXT_PUBLIC_VIEWER_URL: http://localhost:3122
+  ADMIN_EMAIL: ${TYPEBOT_ADMIN_EMAIL:-admin@testbed.local}
+  DISABLE_SIGNUP: "false"
+  SMTP_AUTH_DISABLED: "true"
+  DEFAULT_WORKSPACE_PLAN: UNLIMITED
+
+x-chaskiq-env: &chaskiq-env
+  RAILS_ENV: production
+  RACK_ENV: production
+  NODE_ENV: production
+  SECRET_KEY_BASE: ${CHASKIQ_SECRET_KEY_BASE:-surface40chaskiqsecretkeybasepleasechangeinproduction00000000000000000000000000001}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-testbed_pass}@postgres:5432/chaskiq
+  REDIS_URL: redis://redis:6379/2
+  HOST: http://localhost:3026
+  ASSET_HOST: http://localhost:3026
+  WS: ws://localhost:3026/cable
+  CABLE_URL: ws://localhost:3026/cable
+  RAILS_LOG_TO_STDOUT: "true"
+  RAILS_SERVE_STATIC_FILES: "true"
+  DISABLE_DATABASE_ENVIRONMENT_CHECK: "1"
+  ADMIN_EMAIL: admin@testbed.local
+  ADMIN_PASSWORD: admin123
+  DEFAULT_SENDER_EMAIL: admin@testbed.local
+  DEFAULT_GEOCODER_SERVICE: maxmind_local
+
+x-zammad-env: &zammad-env
+  POSTGRESQL_HOST: zammad-postgresql
+  POSTGRESQL_PORT: "5432"
+  POSTGRESQL_USER: zammad
+  POSTGRESQL_PASS: zammad
+  POSTGRESQL_DB: zammad_production
+  POSTGRESQL_DB_CREATE: "true"
+  REDIS_URL: redis://zammad-redis:6379
+  MEMCACHE_SERVERS: zammad-memcached:11211
+  ELASTICSEARCH_ENABLED: "false"
+  NGINX_SERVER_SCHEME: http
+  NGINX_PORT: "8080"
+  ZAMMAD_HTTP_TYPE: http
+  ZAMMAD_FQDN: localhost
+
+volumes:
+  rasa-models:
+
+services:
+  # 21. Botpress v12 — last OSS release; amd64
+  botpress:
+    <<: *g3
+    image: botpress/server:v12_31_10
+    container_name: s40-botpress
+    platform: linux/amd64
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-testbed_pass}@postgres:5432/botpress
+      BP_HOST: 0.0.0.0
+      BP_PRODUCTION: "true"
+      EXTERNAL_URL: http://localhost:3021
+    volumes:
+      - botpress-data:/botpress/data
+    ports:
+      - "3021:3000"
+    labels:
+      surface.id: "21"
+      surface.name: "Botpress v12"
+      surface.group: "chatbot"
+      surface.port: "3021"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "app-owned NLU bot (not an LLM); last OSS tag v12_31_10"
+
+  # 22. Typebot builder (viewer on 3122)
+  typebot-builder:
+    <<: *g3
+    image: baptistearno/typebot-builder:latest
+    container_name: s40-typebot-builder
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *typebot-env
+    ports:
+      - "3022:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      surface.id: "22"
+      surface.name: "Typebot"
+      surface.group: "chatbot"
+      surface.port: "3022"
+      surface.has_ai_surface: "partial"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "app-owned conversational builder; viewer at :3122"
+
+  typebot-viewer:
+    <<: *g3
+    image: baptistearno/typebot-viewer:latest
+    container_name: s40-typebot-viewer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      typebot-builder:
+        condition: service_started
+    environment:
+      <<: *typebot-env
+    ports:
+      - "3122:3000"
+
+  # 23. Rasa — train then serve REST + HTTP API
+  rasa-train:
+    image: rasa/rasa:3.6.21
+    container_name: s40-rasa-train
+    user: root
+    working_dir: /app
+    volumes:
+      - ../init/rasa:/app
+      - rasa-models:/app/models
+    entrypoint: ["rasa"]
+    command: ["train", "--fixed-model-name", "surface-bot"]
+    restart: on-failure
+    networks: [surface]
+    profiles: ["chatbot", "all"]
+
+  rasa:
+    <<: *g3
+    image: rasa/rasa:3.6.21
+    container_name: s40-rasa
+    user: root
+    working_dir: /app
+    depends_on:
+      rasa-train:
+        condition: service_completed_successfully
+    volumes:
+      - ../init/rasa:/app
+      - rasa-models:/app/models
+    entrypoint: ["rasa"]
+    command: ["run", "--enable-api", "--cors", "*", "--debug", "--port", "5005"]
+    ports:
+      - "3023:5005"
+    labels:
+      surface.id: "23"
+      surface.name: "Rasa"
+      surface.group: "chatbot"
+      surface.port: "3023"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "app-owned NLU bot; POST /webhooks/rest/webhook and /model/parse"
+
+  # 24. Chatwoot — human-operated support (+ optional AI copilot)
+  chatwoot-init:
+    image: chatwoot/chatwoot:latest
+    container_name: s40-chatwoot-init
+    command: bundle exec rails db:chatwoot_prepare
+    environment:
+      <<: *chatwoot-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: on-failure
+    networks: [surface]
+    profiles: ["chatbot", "all"]
+    volumes:
+      - chatwoot-storage:/app/storage
+
+  chatwoot:
+    <<: *g3
+    image: chatwoot/chatwoot:latest
+    container_name: s40-chatwoot
+    command: bundle exec rails s -p 3000 -b 0.0.0.0
+    depends_on:
+      chatwoot-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *chatwoot-env
+    volumes:
+      - chatwoot-storage:/app/storage
+    ports:
+      - "3024:3000"
+    labels:
+      surface.id: "24"
+      surface.name: "Chatwoot"
+      surface.group: "chatbot"
+      surface.port: "3024"
+      surface.has_ai_surface: "partial"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "human_operated"
+      surface.notes: "human support + Captain copilot (auth-gated, needs LLM key)"
+
+  chatwoot-worker:
+    <<: *g3
+    image: chatwoot/chatwoot:latest
+    container_name: s40-chatwoot-worker
+    command: bundle exec sidekiq -C config/sidekiq.yml
+    depends_on:
+      chatwoot-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *chatwoot-env
+    volumes:
+      - chatwoot-storage:/app/storage
+
+  # 25. Papercups — OSS Intercom, human-operated
+  papercups:
+    <<: *g3
+    image: papercups/papercups:latest
+    container_name: s40-papercups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: sh -c "sleep 8 && /entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
+    environment:
+      DATABASE_URL: ecto://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-testbed_pass}@postgres/papercups
+      SECRET_KEY_BASE: ${PAPERCUPS_SECRET_KEY_BASE:-Surface40PapercupsSecretKeyBaseMustBeAtLeastSixtyFourBytesLong!!}
+      BACKEND_URL: localhost
+      MIX_ENV: prod
+      REQUIRE_DB_SSL: "false"
+      REACT_APP_URL: http://localhost:3025
+    ports:
+      - "3025:4000"
+    labels:
+      surface.id: "25"
+      surface.name: "Papercups"
+      surface.group: "chatbot"
+      surface.port: "3025"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "human_operated"
+      surface.notes: "human-operated live chat (OSS Intercom)"
+
+  # 26. Chaskiq — human + bots
+  chaskiq-init:
+    image: chaskiq/chaskiq:latest
+    container_name: s40-chaskiq-init
+    entrypoint: ["/bin/bash", "-lc"]
+    command: "bundle exec rails db:migrate || bundle exec rails db:setup"
+    environment:
+      <<: *chaskiq-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "on-failure:5"
+    networks: [surface]
+    profiles: ["chatbot", "all"]
+
+  chaskiq:
+    <<: *g3
+    image: chaskiq/chaskiq:latest
+    container_name: s40-chaskiq
+    entrypoint: ["/bin/bash", "-lc"]
+    command: "rm -f tmp/pids/server.pid && bundle exec rails s -b 0.0.0.0 -p 3000"
+    depends_on:
+      chaskiq-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *chaskiq-env
+    ports:
+      - "3026:3000"
+    labels:
+      surface.id: "26"
+      surface.name: "Chaskiq"
+      surface.group: "chatbot"
+      surface.port: "3026"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "human_plus_bots"
+      surface.notes: "human agents + bot campaigns"
+
+  chaskiq-worker:
+    <<: *g3
+    image: chaskiq/chaskiq:latest
+    container_name: s40-chaskiq-worker
+    entrypoint: ["/bin/bash", "-lc"]
+    command: "bundle exec sidekiq -C config/sidekiq.yml"
+    depends_on:
+      chaskiq-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *chaskiq-env
+
+  # 27. Zammad — human helpdesk chat (ES off to save RAM)
+  zammad-postgresql:
+    <<: *g3
+    image: postgres:16-alpine
+    container_name: s40-zammad-pg
+    environment:
+      POSTGRES_DB: zammad_production
+      POSTGRES_USER: zammad
+      POSTGRES_PASSWORD: zammad
+    volumes:
+      - zammad-postgresql:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zammad -d zammad_production"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  zammad-redis:
+    <<: *g3
+    image: redis:7-alpine
+    container_name: s40-zammad-redis
+    volumes:
+      - zammad-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  zammad-memcached:
+    <<: *g3
+    image: memcached:1.6-alpine
+    container_name: s40-zammad-memcached
+    command: memcached -m 64
+
+  zammad-init:
+    image: ghcr.io/zammad/zammad:latest
+    container_name: s40-zammad-init
+    command: ["zammad-init"]
+    environment:
+      <<: *zammad-env
+    depends_on:
+      zammad-postgresql:
+        condition: service_healthy
+      zammad-redis:
+        condition: service_healthy
+    volumes:
+      - zammad-storage:/opt/zammad/storage
+    restart: on-failure
+    networks: [surface]
+    profiles: ["chatbot", "all"]
+    user: "0:0"
+
+  zammad-railsserver:
+    <<: *g3
+    image: ghcr.io/zammad/zammad:latest
+    container_name: s40-zammad-rails
+    command: ["zammad-railsserver"]
+    environment:
+      <<: *zammad-env
+    depends_on:
+      zammad-init:
+        condition: service_completed_successfully
+    volumes:
+      - zammad-storage:/opt/zammad/storage
+
+  zammad-websocket:
+    <<: *g3
+    image: ghcr.io/zammad/zammad:latest
+    container_name: s40-zammad-websocket
+    command: ["zammad-websocket"]
+    environment:
+      <<: *zammad-env
+    depends_on:
+      zammad-railsserver:
+        condition: service_started
+    volumes:
+      - zammad-storage:/opt/zammad/storage
+
+  zammad-scheduler:
+    <<: *g3
+    image: ghcr.io/zammad/zammad:latest
+    container_name: s40-zammad-scheduler
+    command: ["zammad-scheduler"]
+    environment:
+      <<: *zammad-env
+    depends_on:
+      zammad-railsserver:
+        condition: service_started
+    volumes:
+      - zammad-storage:/opt/zammad/storage
+
+  zammad:
+    <<: *g3
+    image: ghcr.io/zammad/zammad:latest
+    container_name: s40-zammad
+    command: ["zammad-nginx"]
+    environment:
+      <<: *zammad-env
+    depends_on:
+      zammad-railsserver:
+        condition: service_started
+    volumes:
+      - zammad-storage:/opt/zammad/storage
+    ports:
+      - "3027:8080"
+    labels:
+      surface.id: "27"
+      surface.name: "Zammad"
+      surface.group: "chatbot"
+      surface.port: "3027"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "human_operated"
+      surface.notes: "human helpdesk chat; Elasticsearch disabled"
+
+  # 28. Rocket.Chat — team chat + bot/omnichannel capability
+  # directConnection is required for a single-node Mongo replica set in Docker.
+  # TCP_PORT pins the Moleculer P2P broker so 7.7+ does not pick a colliding port.
+  rocketchat:
+    <<: *g3
+    image: registry.rocket.chat/rocketchat/rocket.chat:latest
+    container_name: s40-rocketchat
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URL: mongodb://mongo:27017/rocketchat?replicaSet=rs0&directConnection=true
+      MONGO_OPLOG_URL: mongodb://mongo:27017/local?replicaSet=rs0&directConnection=true
+      ROOT_URL: http://localhost:3028
+      PORT: "3000"
+      BIND_IP: 0.0.0.0
+      DEPLOY_METHOD: docker
+      TCP_PORT: "42000"
+      OVERWRITE_SETTING_Accounts_AllowAnonymousRead: "true"
+      OVERWRITE_SETTING_Show_Setup_Wizard: completed
+    ports:
+      - "3028:3000"
+    labels:
+      surface.id: "28"
+      surface.name: "Rocket.Chat"
+      surface.group: "chatbot"
+      surface.port: "3028"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "human_plus_bots"
+      surface.notes: "team chat + bot/omnichannel; Mongo replica set required"
+
+  # 29. First-party store page that loads a chat widget from a different eTLD+1
+  widget-store:
+    <<: *g3
+    image: nginx:1.27-alpine
+    container_name: s40-widget-store
+    hostname: store.testbed.local
+    volumes:
+      - ../widgets/store:/usr/share/nginx/html:ro
+      - ../widgets/store.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "3029:80"
+    networks:
+      surface:
+        aliases:
+          - store.testbed.local
+    labels:
+      surface.id: "29"
+      surface.name: "Third-party widget site"
+      surface.group: "chatbot"
+      surface.port: "3029"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "third_party_widget"
+      surface.notes: "scan http://store.testbed.local:3029 (not localhost) so eTLD+1 differs from vendor.chat.local"
+
+  widget-vendor:
+    <<: *g3
+    image: nginx:1.27-alpine
+    container_name: s40-widget-vendor
+    hostname: vendor.chat.local
+    volumes:
+      - ../widgets/vendor:/usr/share/nginx/html:ro
+      - ../widgets/vendor.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "3130:80"
+    networks:
+      surface:
+        aliases:
+          - vendor.chat.local
+    labels:
+      surface.id: "29b"
+      surface.name: "Widget vendor host"
+      surface.group: "chatbot"
+      surface.port: "3130"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "third_party_widget"
+      surface.notes: "widget origin vendor.chat.local — different eTLD+1 from store.testbed.local"
+
+  # 30. HubSpot-style embed — static lookalike; real HubSpot needs an account + egress
+  hubspot-embed:
+    <<: *g3
+    image: nginx:1.27-alpine
+    container_name: s40-hubspot-embed
+    hostname: hubspot-embed.testbed.local
+    volumes:
+      - ../widgets/hubspot-embed:/usr/share/nginx/html:ro
+    ports:
+      - "3030:80"
+    networks:
+      surface:
+        aliases:
+          - hubspot-embed.testbed.local
+    labels:
+      surface.id: "30"
+      surface.name: "HubSpot-style embed"
+      surface.group: "chatbot"
+      surface.port: "3030"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "third_party_widget"
+      surface.notes: "lookalike embed from vendor.chat.local; not a live HubSpot account"
