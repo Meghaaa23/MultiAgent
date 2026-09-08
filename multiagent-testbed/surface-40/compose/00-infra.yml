@@ -1,0 +1,155 @@
+# Shared backing services. Always started (no profiles) except ollama-pull.
+
+networks:
+  surface:
+    name: surface40
+    driver: bridge
+
+volumes:
+  postgres-data:
+  mysql-data:
+  mongo-data:
+  redis-data:
+  ollama-data:
+  zammad-postgresql:
+  zammad-redis:
+  zammad-storage:
+  zammad-elasticsearch:
+  chatwoot-storage:
+  n8n-data:
+  kuma-data:
+  metabase-data:
+  anythingllm-storage:
+  flowise-data:
+  langflow-data:
+  botpress-data:
+  openwebui-data:
+  sillytavern-data:
+  localai-models:
+  uptime-kuma-data:
+
+x-restart: &restart
+  restart: unless-stopped
+  networks: [surface]
+
+services:
+  postgres:
+    <<: *restart
+    image: pgvector/pgvector:pg16
+    container_name: s40-postgres
+    command: postgres -c shared_preload_libraries=pg_stat_statements
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-testbed_pass}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../init/postgres:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mysql:
+    <<: *restart
+    image: mysql:8.0
+    container_name: s40-mysql
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-testbed_root}
+      MYSQL_DATABASE: dvna
+      MYSQL_USER: ${MYSQL_USER:-dvna}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-passw0rd}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ../init/mysql:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-testbed_root}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  mongo:
+    <<: *restart
+    image: mongo:7.0
+    container_name: s40-mongo
+    # Rocket.Chat needs a replica set (oplog). LibreChat is fine with rs0 too.
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - "27019:27017"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id:\"rs0\", members:[{_id:0, host:\"mongo:27017\"}]}) }'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    container_name: s40-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    <<: *restart
+    image: ollama/ollama:latest
+    container_name: s40-ollama
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_ORIGINS: "*"
+      OLLAMA_KEEP_ALIVE: "24h"
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "3019:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    labels:
+      surface.id: "19"
+      surface.name: "Ollama"
+      surface.group: "ai"
+      surface.port: "3019"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "app_owned"
+      surface.notes: "inference API, no UI; also the shared LLM backend"
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: s40-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["sh", "-c"]
+    command: "ollama pull ${OLLAMA_MODEL:-qwen2.5:0.5b}"
+    restart: on-failure
+    networks: [surface]
+    profiles: ["ai", "all"]

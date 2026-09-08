@@ -1,0 +1,7 @@
+# Runtime / local-only
+.env.local
+/data/
+*.log
+
+# Named-volume leftovers if someone bind-mounts
+decoys/sites/**/*.tmp

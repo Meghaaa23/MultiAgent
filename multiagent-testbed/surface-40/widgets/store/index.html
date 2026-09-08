@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Harbor Shop — checkout help</title>
+  <meta name="description" content="Harbor Shop storefront. Chat with support.">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; }
+    header { background: #0f766e; color: #fff; padding: 1rem 2rem; }
+    main { padding: 2rem; max-width: 800px; }
+  </style>
+</head>
+<body>
+  <header><strong>Harbor Shop</strong> · store.testbed.local</header>
+  <main>
+    <h1>First-party storefront</h1>
+    <p>This page is served from <code>store.testbed.local</code>. The chat bubble is loaded from <code>vendor.chat.local</code> (different eTLD+1).</p>
+    <p>Scan <strong>http://store.testbed.local:3029</strong> — not localhost — so SURFACE can classify the widget as third-party.</p>
+  </main>
+  <script src="http://vendor.chat.local:3130/widget.js" data-vendor="vendor.chat.local"></script>
+</body>
+</html>

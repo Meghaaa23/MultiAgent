@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Acme Cloud — HubSpot-style messenger</title>
+  <meta name="description" content="Acme Cloud marketing site with an embedded conversations widget.">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; }
+    header { padding: 1.5rem 2rem; border-bottom: 1px solid #eee; }
+    main { padding: 2rem; max-width: 720px; }
+    .warn { background: #fff7ed; border: 1px solid #fdba74; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <header><strong>Acme Cloud</strong></header>
+  <main>
+    <h1>Talk to our team</h1>
+    <p class="warn">
+      Real HubSpot Conversations needs a HubSpot account and internet egress
+      (<code>js.hs-scripts.com</code> / <code>js.usemessages.com</code>).
+      This testbed serves a lookalike embed from <code>vendor.chat.local</code>
+      so the ownership taxonomy can still be exercised offline.
+    </p>
+    <p>Scan <strong>http://hubspot-embed.testbed.local:3030</strong>.</p>
+  </main>
+  <!-- Lookalike of a HubSpot conversations embed: third-party script + global. -->
+  <script>
+    window.HubSpotConversations = window.HubSpotConversations || {
+      widget: { status: function () { return { loaded: true, vendor: "vendor.chat.local" }; } }
+    };
+    window.hsConversationsSettings = { loadImmediately: true };
+  </script>
+  <script src="http://vendor.chat.local:3130/widget.js" id="hs-script-loader"></script>
+</body>
+</html>

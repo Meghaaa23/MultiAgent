@@ -1,0 +1,16 @@
+recipe: default.v1
+assistant_id: surface-40-rasa
+language: en
+pipeline:
+  - name: WhitespaceTokenizer
+  - name: RegexFeaturizer
+  - name: LexicalSyntacticFeaturizer
+  - name: CountVectorsFeaturizer
+  - name: DIETClassifier
+    epochs: 20
+    constrain_similarities: true
+  - name: FallbackClassifier
+    threshold: 0.3
+policies:
+  - name: MemoizationPolicy
+  - name: RulePolicy
