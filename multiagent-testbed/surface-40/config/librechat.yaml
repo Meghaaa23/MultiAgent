@@ -1,0 +1,18 @@
+# LibreChat custom endpoint → shared Ollama (OpenAI-compatible).
+# https://www.librechat.ai/docs/quick_start/custom_endpoints
+version: 1.2.1
+cache: true
+interface:
+  customWelcome: "SURFACE testbed LibreChat (Ollama backend)"
+endpoints:
+  custom:
+    - name: "Ollama"
+      apiKey: "ollama"
+      baseURL: "http://ollama:11434/v1/"
+      models:
+        default:
+          - "qwen2.5:0.5b"
+        fetch: true
+      titleConvo: true
+      titleModel: "qwen2.5:0.5b"
+      modelDisplayLabel: "Ollama"

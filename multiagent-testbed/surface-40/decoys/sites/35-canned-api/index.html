@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>EchoLLM API</title>
+  <meta name="description" content="OpenAI-compatible /api/chat and /v1/chat/completions.">
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 3rem auto; }
+    code { background: #eee; padding: .1rem .3rem; }
+  </style>
+</head>
+<body>
+  <h1>EchoLLM</h1>
+  <p>Drop-in OpenAI-compatible routes. They always return the same JSON string. No model is loaded.</p>
+  <ul>
+    <li><code>POST /api/chat</code></li>
+    <li><code>POST /v1/chat/completions</code></li>
+    <li><code>GET /v1/models</code></li>
+  </ul>
+  <p>Use this as a hard negative: a chat-shaped route that is not a live model surface.</p>
+</body>
+</html>

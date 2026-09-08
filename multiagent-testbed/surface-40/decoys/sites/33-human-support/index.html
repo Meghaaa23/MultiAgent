@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Northwind Support — talk to a human assistant</title>
+  <meta name="description" content="Contact our support assistant. We will reply by email.">
+  <style>
+    body { font-family: "Helvetica Neue", sans-serif; max-width: 640px; margin: 3rem auto; }
+    label { display: block; margin: .8rem 0 .2rem; }
+    input, textarea { width: 100%; padding: .5rem; }
+    button { margin-top: 1rem; padding: .6rem 1rem; }
+    .note { background: #fef9c3; padding: .8rem; }
+  </style>
+</head>
+<body>
+  <h1>Talk to an assistant</h1>
+  <p class="note">A human on the support team will reply within one business day. There is no chatbot and no AI.</p>
+  <form action="mailto:support@northwind.testbed.local" method="get" enctype="text/plain">
+    <label for="name">Your name</label>
+    <input id="name" name="name" required>
+    <label for="email">Your email</label>
+    <input id="email" name="email" type="email" required>
+    <label for="body">How can our assistant help?</label>
+    <textarea id="body" name="body" rows="6" required></textarea>
+    <button type="submit">Email the human team</button>
+  </form>
+  <p>Or write <a href="mailto:support@northwind.testbed.local">support@northwind.testbed.local</a>.</p>
+</body>
+</html>
