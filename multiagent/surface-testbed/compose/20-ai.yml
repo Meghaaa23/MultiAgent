@@ -228,23 +228,37 @@ services:
       surface.notes: "builder + /api/v1/run"
 
   # 18. Flowise — builder + /api/v1/prediction
+  # Latest image crash-loops with mkdir '' unless path env vars are set, and
+  # runs as uid 1000. Force root + explicit dirs so an existing volume still works.
   flowise:
     <<: *g2
     image: flowiseai/flowise:latest
     container_name: s40-flowise
+    user: "0"
     depends_on:
       ollama:
         condition: service_healthy
     environment:
       PORT: "3000"
+      DATABASE_PATH: /root/.flowise
+      SECRETKEY_PATH: /root/.flowise
+      APIKEY_PATH: /root/.flowise
+      LOG_PATH: /root/.flowise/logs
+      BLOB_STORAGE_PATH: /root/.flowise/storage
+      DATABASE_TYPE: sqlite
+      STORAGE_TYPE: local
+      SECRETKEY_STORAGE_TYPE: local
       FLOWISE_USERNAME: admin
       FLOWISE_PASSWORD: admin123
+      DISABLE_FLOWISE_TELEMETRY: "true"
     volumes:
       - flowise-data:/root/.flowise
     ports:
       - "3018:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    entrypoint: ["/bin/sh", "-c"]
+    command: "mkdir -p /root/.flowise/logs /root/.flowise/storage && flowise start"
     labels:
       surface.id: "18"
       surface.name: "Flowise"

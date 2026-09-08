@@ -38,9 +38,10 @@ x-typebot-env: &typebot-env
 
 x-chaskiq-env: &chaskiq-env
   RAILS_ENV: production
+  RACK_ENV: production
   NODE_ENV: production
   SECRET_KEY_BASE: ${CHASKIQ_SECRET_KEY_BASE:-surface40chaskiqsecretkeybasepleasechangeinproduction00000000000000000000000000001}
-  DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-testbed_pass}@postgres:5432/chaskiq
+  DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-testbed_pass}@postgres:5432/chaskiq
   REDIS_URL: redis://redis:6379/2
   HOST: http://localhost:3026
   ASSET_HOST: http://localhost:3026
@@ -48,6 +49,11 @@ x-chaskiq-env: &chaskiq-env
   CABLE_URL: ws://localhost:3026/cable
   RAILS_LOG_TO_STDOUT: "true"
   RAILS_SERVE_STATIC_FILES: "true"
+  DISABLE_DATABASE_ENVIRONMENT_CHECK: "1"
+  ADMIN_EMAIL: admin@testbed.local
+  ADMIN_PASSWORD: admin123
+  DEFAULT_SENDER_EMAIL: admin@testbed.local
+  DEFAULT_GEOCODER_SERVICE: maxmind_local
 
 x-zammad-env: &zammad-env
   POSTGRESQL_HOST: zammad-postgresql
@@ -267,7 +273,8 @@ services:
   chaskiq-init:
     image: chaskiq/chaskiq:latest
     container_name: s40-chaskiq-init
-    command: bash -c "bundle exec rails db:prepare"
+    entrypoint: ["/bin/bash", "-lc"]
+    command: "bundle exec rails db:migrate || bundle exec rails db:setup"
     environment:
       <<: *chaskiq-env
     depends_on:
@@ -275,7 +282,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    restart: on-failure
+    restart: "on-failure:5"
     networks: [surface]
     profiles: ["chatbot", "all"]
 
@@ -283,7 +290,8 @@ services:
     <<: *g3
     image: chaskiq/chaskiq:latest
     container_name: s40-chaskiq
-    command: bash -c "bundle exec rails s -b 0.0.0.0 -p 3000"
+    entrypoint: ["/bin/bash", "-lc"]
+    command: "rm -f tmp/pids/server.pid && bundle exec rails s -b 0.0.0.0 -p 3000"
     depends_on:
       chaskiq-init:
         condition: service_completed_successfully
@@ -306,7 +314,8 @@ services:
     <<: *g3
     image: chaskiq/chaskiq:latest
     container_name: s40-chaskiq-worker
-    command: bash -c "bundle exec sidekiq -C config/sidekiq.yml"
+    entrypoint: ["/bin/bash", "-lc"]
+    command: "bundle exec sidekiq -C config/sidekiq.yml"
     depends_on:
       chaskiq-init:
         condition: service_completed_successfully
@@ -432,6 +441,8 @@ services:
       surface.notes: "human helpdesk chat; Elasticsearch disabled"
 
   # 28. Rocket.Chat — team chat + bot/omnichannel capability
+  # directConnection is required for a single-node Mongo replica set in Docker.
+  # TCP_PORT pins the Moleculer P2P broker so 7.7+ does not pick a colliding port.
   rocketchat:
     <<: *g3
     image: registry.rocket.chat/rocketchat/rocket.chat:latest
@@ -440,10 +451,13 @@ services:
       mongo:
         condition: service_healthy
     environment:
-      MONGO_URL: mongodb://mongo:27017/rocketchat?replicaSet=rs0
-      MONGO_OPLOG_URL: mongodb://mongo:27017/local?replicaSet=rs0
+      MONGO_URL: mongodb://mongo:27017/rocketchat?replicaSet=rs0&directConnection=true
+      MONGO_OPLOG_URL: mongodb://mongo:27017/local?replicaSet=rs0&directConnection=true
       ROOT_URL: http://localhost:3028
       PORT: "3000"
+      BIND_IP: 0.0.0.0
+      DEPLOY_METHOD: docker
+      TCP_PORT: "42000"
       OVERWRITE_SETTING_Accounts_AllowAnonymousRead: "true"
       OVERWRITE_SETTING_Show_Setup_Wizard: completed
     ports:

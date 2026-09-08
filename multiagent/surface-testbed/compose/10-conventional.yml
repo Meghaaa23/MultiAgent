@@ -194,11 +194,13 @@ services:
       surface.ownership: "none"
       surface.notes: "NodeGoat replacement; needs MySQL. sqlite fallback: appsecco/dvna:sqlite"
 
-  # 10. BodgeIt Store — Java, self-contained
+  # 10. BodgeIt Store — Java, self-contained (image expects a TTY)
   bodgeit:
     <<: *g1
     image: psiinon/bodgeit:latest
     container_name: s40-bodgeit
+    stdin_open: true
+    tty: true
     ports:
       - "3010:8080"
     labels:

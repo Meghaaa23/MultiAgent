@@ -76,6 +76,31 @@ docker compose --profile all up -d
 
 Wrappers: `bash scripts/up.sh conventional` (or `ai` / `chatbot` / `fake-ai` / `all` / `infra`). Probe: `bash scripts/healthcheck.sh`.
 
+## If four apps stay DOWN after first boot
+
+`listening=36 down=4` is the usual first-boot shape. Recreate only the flaky services (do not `down -v`):
+
+```bash
+cd multiagent/surface-testbed
+sudo docker compose --profile all up -d --force-recreate bodgeit flowise chaskiq-init chaskiq chaskiq-worker rocketchat
+# wait ~2 minutes for Rocket.Chat / Chaskiq migrate, then:
+bash scripts/healthcheck.sh
+```
+
+| App | Typical cause | What the compose file now does |
+| --- | --- | --- |
+| BodgeIt (3010) | `psiinon/bodgeit` exits 255 unless given a TTY | `stdin_open: true` and `tty: true` (same as Hub's `docker run -i -t`) |
+| Flowise (3018) | latest image `mkdir ''` when path env vars are empty; also runs as uid 1000 | explicit `/root/.flowise` paths, `user: "0"`, mkdir then `flowise start` |
+| Chaskiq (3026) | `chaskiq-init` crash-loops so the web container never starts | override entrypoint, `db:migrate` or `db:setup`, `DISABLE_DATABASE_ENVIRONMENT_CHECK=1` |
+| Rocket.Chat (3028) | Meteor `ConnectionResetError` while Mongo rs0 is reached via topology discovery | `directConnection=true`, `BIND_IP=0.0.0.0`, fixed `TCP_PORT=42000` |
+
+Rocket.Chat can take 1–2 minutes after recreate before HTTP 200. If Chaskiq is still DOWN:
+
+```bash
+sudo docker compose logs --tail=80 chaskiq-init
+sudo docker compose logs --tail=80 chaskiq
+```
+
 Labels for scoring: [`ground_truth/targets.json`](ground_truth/targets.json).
 
 ## Hostname aliases (third-party widgets)
@@ -113,7 +138,7 @@ LocalAI (3020) is a separate OpenAI-compatible API. Drop a GGUF into the `locala
 | bWAPP (3004) | Open `/install.php` |
 | Chatwoot | `chatwoot-init` runs `rails db:chatwoot_prepare` |
 | Papercups | entrypoint `db createdb` + `db migrate` |
-| Chaskiq | `chaskiq-init` runs `rails db:prepare` |
+| Chaskiq | `chaskiq-init` runs `rails db:migrate` (falls back to `db:setup`) |
 | Rasa | `rasa-train` trains a tiny NLU model, then the API starts |
 | Zammad | `zammad-init` then nginx on 3027 (Elasticsearch **off**) |
 | Typebot | builder 3022 + viewer 3122 share Postgres |
@@ -133,7 +158,7 @@ LocalAI (3020) is a separate OpenAI-compatible API. Drop a GGUF into the `locala
 | 7 | WrongSecrets | `jeroenwillemsen/wrongsecrets:latest-no-vault` | 3007 | self-contained |
 | 8 | Hackazon | `ianwijaya/hackazon` | 3008 | unofficial — verify pull; amd64 |
 | 9 | DVNA | `appsecco/dvna` | 3009 | NodeGoat replacement; MySQL |
-| 10 | BodgeIt Store | `psiinon/bodgeit` | 3010 | Java, self-contained |
+| 10 | BodgeIt Store | `psiinon/bodgeit` | 3010 | Java; image needs a TTY (`stdin_open` + `tty`) |
 
 ### Group 2 — AI apps (LLM / model-backed)
 

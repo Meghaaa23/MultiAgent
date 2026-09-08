@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - <<'PY'
-import json, sys, urllib.error, urllib.request
+import json, sys, time, urllib.error, urllib.request
 from pathlib import Path
 
 targets = json.loads(Path("ground_truth/targets.json").read_text())["targets"]
@@ -14,14 +14,19 @@ print(f"{'#':>3}  {'app':<{width}}  {'code':<6}  url")
 for t in targets:
     url = t["url"]
     code = "ERR"
-    try:
-        req = urllib.request.Request(url, method="GET", headers={"User-Agent": "surface-testbed-healthcheck"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            code = str(resp.status)
-    except urllib.error.HTTPError as e:
-        code = str(e.code)  # 401/403/404 still means the app is listening
-    except Exception as e:
-        code = type(e).__name__
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, method="GET", headers={"User-Agent": "surface-testbed-healthcheck"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                code = str(resp.status)
+            break
+        except urllib.error.HTTPError as e:
+            code = str(e.code)  # 401/403/404 still means the app is listening
+            break
+        except Exception as e:
+            code = type(e).__name__
+            if attempt < 2:
+                time.sleep(2)
     listening = code.isdigit()
     flag = "OK" if listening else "DOWN"
     if listening:
