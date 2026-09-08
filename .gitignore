@@ -39,12 +39,6 @@ uploads/*
 *.wav
 *.mp3
 
-# Testbed runtime artifacts
-multiagent/multiagent-testbed/snapshots/
-multiagent/multiagent-testbed/results/
-**/multiagent-testbed/results/
-**/multiagent-testbed/snapshots/
-
 # Node (frontend)
 node_modules/
 multi-agent-llm/dist/
@@ -54,9 +48,7 @@ multi-agent-llm/.angular/
 *.log
 .cache/
 
-multiagent-testbed/benchmark-apps/*/data/
-multiagent-testbed/benchmark-apps/*/storage/
-multiagent-testbed/benchmark-apps/*/data-db/
+# Secrets / local runtime artifacts
 *.key
 *.pem
 *.sqlite
