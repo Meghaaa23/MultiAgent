@@ -141,7 +141,7 @@ LocalAI (3020) is a separate OpenAI-compatible API. Drop a GGUF into the `locala
 | --- | --- | --- | --- | --- |
 | 11 | Open WebUI | `ghcr.io/open-webui/open-webui:main` | 3011 | Ollama |
 | 12 | LibreChat | `ghcr.io/danny-avila/librechat` | 3012 | Mongo rs0 + Ollama |
-| 13 | AnythingLLM | `mintplexlabs/anything-llm` | 3013 | Ollama |
+| 13 | AnythingLLM | `mintplexlabs/anythingllm` | 3013 | Ollama |
 | 14 | Lobe Chat | `lobehub/lobe-chat` | 3014 | Ollama |
 | 15 | NextChat | `yidadaa/chatgpt-next-web` | 3015 | Ollama; amd64 |
 | 16 | SillyTavern | `ghcr.io/sillytavern/sillytavern` | 3016 | Ollama |

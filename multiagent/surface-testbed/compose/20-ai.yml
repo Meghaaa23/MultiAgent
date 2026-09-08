@@ -83,8 +83,10 @@ services:
   # 13. AnythingLLM (RAG)
   anythingllm:
     <<: *g2
-    image: mintplexlabs/anything-llm:latest
+    image: mintplexlabs/anythingllm:latest
     container_name: s40-anythingllm
+    cap_add:
+      - SYS_ADMIN
     depends_on:
       ollama:
         condition: service_healthy

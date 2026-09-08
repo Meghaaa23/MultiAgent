@@ -231,7 +231,7 @@
       "slug": "anythingllm",
       "group": "ai",
       "url": "http://localhost:3013",
-      "image": "mintplexlabs/anything-llm:latest",
+      "image": "mintplexlabs/anythingllm:latest",
       "has_ai_surface": "yes",
       "chat_ui_present": true,
       "chatbot_present": true,
