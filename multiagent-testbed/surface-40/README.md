@@ -1,5 +1,23 @@
 # SURFACE-40 evaluation testbed
 
+Run this **on Ubuntu** (22.04/24.04 x86_64) with Docker Engine. Containers are processes on that host. **No VM, Vagrant, or nested hypervisor** is required.
+
+```bash
+cd multiagent-testbed/surface-40
+sudo bash sandbox-setup.sh                 # install Docker if needed, /etc/hosts, start all 40
+# or one group:
+sudo bash sandbox-setup.sh --profile conventional
+sudo bash sandbox-setup.sh --install-only  # Docker + host aliases only; start later yourself
+bash scripts/healthcheck.sh
+```
+
+If Docker is already installed and your user is in the `docker` group:
+
+```bash
+sudo bash scripts/install-hosts.sh
+bash scripts/up.sh all          # or: conventional | ai | chatbot | fake-ai | infra
+```
+
 Four groups of ten apps for SURFACE scoring:
 
 | Group | Profile | Ports | What it measures |
@@ -12,6 +30,7 @@ Four groups of ten apps for SURFACE scoring:
 Requires **Docker Compose v2.24+** (`include`). Compose is split so you can bring up one group without booting all 40:
 
 ```
+sandbox-setup.sh            # Ubuntu host: install Docker if needed, /etc/hosts, compose up
 docker-compose.yml          # includes the four group files + infra
 compose/00-infra.yml        # postgres, mysql, mongo (rs0), redis, ollama
 compose/10-conventional.yml
@@ -22,7 +41,19 @@ compose/40-fake-ai.yml
 
 NodeGoat is **not** in this stack: `owasp/nodegoat` has no published image. Slot 9 is **DVNA** (`appsecco/dvna`) plus the shared MySQL.
 
-## Quick start
+## Ubuntu host requirements
+
+| | |
+| --- | --- |
+| OS | Ubuntu 22.04 or 24.04 |
+| Arch | x86_64 (four old images are amd64-only) |
+| Disk | ~80 GB free for images + volumes |
+| RAM | 16 GB can run groups one at a time; **32 GB+** for `--profile all` |
+| Software | Docker Engine + Compose v2.24+ (`sandbox-setup.sh` will install these) |
+
+Do **not** wrap this in VirtualBox/VMware/QEMU. `sandbox-setup.sh` talks to the Ubuntu Docker daemon on the same machine you will point SURFACE at (`http://localhost:30xx` and the `*.testbed.local` aliases).
+
+## Quick start (Docker already installed)
 
 ```bash
 cd multiagent-testbed/surface-40
@@ -33,7 +64,7 @@ sudo bash scripts/install-hosts.sh
 # 2. Shared infra only (DBs + Ollama, no apps)
 docker compose up -d
 
-# 3. One group at a time (recommended)
+# 3. One group at a time (fits a 16 GB Ubuntu box)
 docker compose --profile conventional up -d
 docker compose --profile ai up -d          # also pulls qwen2.5:0.5b
 docker compose --profile chatbot up -d
@@ -43,7 +74,7 @@ docker compose --profile fake-ai up -d
 docker compose --profile all up -d
 ```
 
-Wrappers: `bash scripts/up.sh conventional` (or `ai` / `chatbot` / `fake-ai` / `all` / `infra`).
+Wrappers: `bash scripts/up.sh conventional` (or `ai` / `chatbot` / `fake-ai` / `all` / `infra`). Probe: `bash scripts/healthcheck.sh`.
 
 Labels for scoring: [`ground_truth/targets.json`](ground_truth/targets.json).
 

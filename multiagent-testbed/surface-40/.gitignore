@@ -1,6 +1,6 @@
 # Runtime / local-only
 .env.local
-data/
+/data/
 *.log
 
 # Named-volume leftovers if someone bind-mounts
