@@ -1,0 +1,281 @@
+# Group 2 — AI apps (LLM / model-backed). Ports 3011–3020.
+# Ollama is defined in 00-infra.yml (host port 3019) and is the shared backend.
+
+networks:
+  surface:
+
+x-g2: &g2
+  restart: unless-stopped
+  networks: [surface]
+  profiles: ["ai", "all"]
+
+services:
+  # 11. Open WebUI
+  open-webui:
+    <<: *g2
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: s40-open-webui
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_AUTH: "false"
+      ENABLE_SIGNUP: "true"
+      DEFAULT_MODELS: ${OLLAMA_MODEL:-qwen2.5:0.5b}
+    volumes:
+      - openwebui-data:/app/backend/data
+    ports:
+      - "3011:8080"
+    labels:
+      surface.id: "11"
+      surface.name: "Open WebUI"
+      surface.group: "ai"
+      surface.port: "3011"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "WEBUI_AUTH=false for unauth PI confirmation"
+
+  # 12. LibreChat — Mongo + Ollama via librechat.yaml
+  librechat:
+    <<: *g2
+    image: ghcr.io/danny-avila/librechat:latest
+    container_name: s40-librechat
+    depends_on:
+      mongo:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3080
+      MONGO_URI: mongodb://mongo:27017/LibreChat?replicaSet=rs0
+      ENDPOINTS: custom
+      SEARCH: "false"
+      ALLOW_EMAIL_LOGIN: "true"
+      ALLOW_REGISTRATION: "true"
+      ALLOW_UNVERIFIED_EMAIL_LOGIN: "true"
+      DOMAIN_CLIENT: http://localhost:3012
+      DOMAIN_SERVER: http://localhost:3012
+      CREDS_KEY: "surface40librechatcredskey32byte"
+      CREDS_IV: "surface40credsiv"
+      JWT_SECRET: surface40librechatjwtsecretpleasechange
+      JWT_REFRESH_SECRET: surface40librechatjwtrefreshpleasechange
+    volumes:
+      - ../config/librechat.yaml:/app/librechat.yaml:ro
+    ports:
+      - "3012:3080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      surface.id: "12"
+      surface.name: "LibreChat"
+      surface.group: "ai"
+      surface.port: "3012"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "Mongo replica set + custom Ollama endpoint"
+
+  # 13. AnythingLLM (RAG)
+  anythingllm:
+    <<: *g2
+    image: mintplexlabs/anything-llm:latest
+    container_name: s40-anythingllm
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      STORAGE_DIR: /app/server/storage
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_PATH: http://ollama:11434
+      OLLAMA_MODEL_PREF: ${OLLAMA_MODEL:-qwen2.5:0.5b}
+      EMBEDDING_ENGINE: native
+      VECTOR_DB: lancedb
+      DISABLE_TELEMETRY: "true"
+      SIG_KEY: "passphrase"
+      SIG_SALT: "salt"
+      JWT_SECRET: "surface-40-anythingllm-jwt"
+    volumes:
+      - anythingllm-storage:/app/server/storage
+    ports:
+      - "3013:3001"
+    labels:
+      surface.id: "13"
+      surface.name: "AnythingLLM"
+      surface.group: "ai"
+      surface.port: "3013"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "RAG workspace UI on Ollama"
+
+  # 14. Lobe Chat
+  lobe-chat:
+    <<: *g2
+    image: lobehub/lobe-chat:latest
+    container_name: s40-lobe-chat
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_PROXY_URL: http://ollama:11434
+      OPENAI_API_KEY: ollama
+      OPENAI_PROXY_URL: http://ollama:11434/v1
+      ACCESS_CODE: ""
+    ports:
+      - "3014:3210"
+    labels:
+      surface.id: "14"
+      surface.name: "Lobe Chat"
+      surface.group: "ai"
+      surface.port: "3014"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "Ollama via OLLAMA_PROXY_URL"
+
+  # 15. NextChat (chatgpt-next-web) — stale image, amd64-leaning
+  nextchat:
+    <<: *g2
+    image: yidadaa/chatgpt-next-web:latest
+    container_name: s40-nextchat
+    platform: linux/amd64
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OPENAI_API_KEY: ollama
+      BASE_URL: http://ollama:11434/v1
+      DEFAULT_MODEL: ${OLLAMA_MODEL:-qwen2.5:0.5b}
+      CUSTOM_MODELS: "+qwen2.5:0.5b"
+      HIDE_BALANCE_QUERY: "1"
+    ports:
+      - "3015:3000"
+    labels:
+      surface.id: "15"
+      surface.name: "NextChat"
+      surface.group: "ai"
+      surface.port: "3015"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "yidadaa/chatgpt-next-web; stale, treat as amd64"
+
+  # 16. SillyTavern
+  sillytavern:
+    <<: *g2
+    image: ghcr.io/sillytavern/sillytavern:latest
+    container_name: s40-sillytavern
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      FORCE_COLOR: "0"
+    volumes:
+      - sillytavern-data:/home/node/app/data
+    ports:
+      - "3016:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      surface.id: "16"
+      surface.name: "SillyTavern"
+      surface.group: "ai"
+      surface.port: "3016"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "point API at http://ollama:11434 in the UI if not auto-detected"
+
+  # 17. Langflow — builder + /api/v1/run
+  langflow:
+    <<: *g2
+    image: langflowai/langflow:latest
+    container_name: s40-langflow
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      LANGFLOW_AUTO_LOGIN: "true"
+      LANGFLOW_SUPERUSER: admin
+      LANGFLOW_SUPERUSER_PASSWORD: admin123
+      DO_NOT_TRACK: "true"
+    volumes:
+      - langflow-data:/app/langflow
+    ports:
+      - "3017:7860"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      surface.id: "17"
+      surface.name: "Langflow"
+      surface.group: "ai"
+      surface.port: "3017"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "builder + /api/v1/run"
+
+  # 18. Flowise — builder + /api/v1/prediction
+  flowise:
+    <<: *g2
+    image: flowiseai/flowise:latest
+    container_name: s40-flowise
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      PORT: "3000"
+      FLOWISE_USERNAME: admin
+      FLOWISE_PASSWORD: admin123
+    volumes:
+      - flowise-data:/root/.flowise
+    ports:
+      - "3018:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      surface.id: "18"
+      surface.name: "Flowise"
+      surface.group: "ai"
+      surface.port: "3018"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "true"
+      surface.chatbot_present: "true"
+      surface.ownership: "app_owned"
+      surface.notes: "builder + /api/v1/prediction"
+
+  # 19. Ollama — defined in 00-infra.yml (port 3019) so Group 3/host tooling can reuse it.
+
+  # 20. LocalAI — OpenAI-compatible API, CPU
+  localai:
+    <<: *g2
+    image: localai/localai:latest-cpu
+    container_name: s40-localai
+    environment:
+      DEBUG: "true"
+      THREADS: "2"
+      MODELS_PATH: /models
+    volumes:
+      - localai-models:/models
+    ports:
+      - "3020:8080"
+    labels:
+      surface.id: "20"
+      surface.name: "LocalAI"
+      surface.group: "ai"
+      surface.port: "3020"
+      surface.has_ai_surface: "yes"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "app_owned"
+      surface.notes: "OpenAI-compatible API; load a GGUF into /models for completions"

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SmartBot — rule-based helper</title>
+  <meta name="description" content="SmartBot live chat widget. Instant replies.">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f4f4f5; }
+    header { background: #18181b; color: #fff; padding: 1rem 1.5rem; }
+    main { max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    #chat {
+      background: #fff; border: 1px solid #ddd; border-radius: 8px;
+      height: 320px; overflow-y: auto; padding: 1rem;
+    }
+    .msg { margin: .4rem 0; }
+    .bot { color: #1d4ed8; }
+    .you { color: #111; text-align: right; }
+    form { display: flex; gap: .5rem; margin-top: .75rem; }
+    input { flex: 1; padding: .6rem; }
+  </style>
+</head>
+<body>
+  <header><strong>SmartBot</strong> · always-on chat</header>
+  <main>
+    <p>Customer-support chat widget. Replies are hardcoded JavaScript — not a model.</p>
+    <div id="chat" role="log" aria-label="SmartBot chat"></div>
+    <form id="f">
+      <input id="q" autocomplete="off" placeholder="Say hello…">
+      <button type="submit">Send</button>
+    </form>
+  </main>
+  <script>
+    const REPLIES = [
+      { re: /hello|hi|hey/i, text: "Hi! I am SmartBot, a rule-based script. I am not a language model." },
+      { re: /help|price|pricing/i, text: "Pricing is $0 because this is a testbed decoy. No agent will join." },
+      { re: /human|agent|operator/i, text: "No humans and no models. Only if/else." },
+      { re: /gpt|llm|openai|ai/i, text: "I do not call GPT, OpenAI, or any inference API." }
+    ];
+    const FALLBACK = "I only know a few phrases (hello, help, human, gpt). Nothing is generated.";
+    const log = document.getElementById("chat");
+    function add(cls, text) {
+      const p = document.createElement("div");
+      p.className = "msg " + cls;
+      p.textContent = (cls === "bot" ? "SmartBot: " : "You: ") + text;
+      log.appendChild(p);
+      log.scrollTop = log.scrollHeight;
+    }
+    add("bot", "Welcome. Ask me anything — I will match a regex and return a canned string.");
+    document.getElementById("f").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const q = document.getElementById("q").value.trim();
+      if (!q) return;
+      add("you", q);
+      document.getElementById("q").value = "";
+      const hit = REPLIES.find((r) => r.re.test(q));
+      add("bot", hit ? hit.text : FALLBACK);
+    });
+  </script>
+</body>
+</html>

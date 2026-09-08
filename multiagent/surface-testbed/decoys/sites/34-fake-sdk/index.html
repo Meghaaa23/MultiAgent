@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ForgeLLM — drop-in OpenAI &amp; LangChain snippets</title>
+  <meta name="description" content="Copy-paste OpenAI and LangChain SDK examples. No hosted inference.">
+  <style>
+    body { font-family: ui-monospace, monospace; max-width: 800px; margin: 2rem auto; background: #0b1020; color: #d6e0ff; }
+    pre { background: #111827; padding: 1rem; overflow-x: auto; border: 1px solid #334155; }
+    h1 { font-family: system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <h1>ForgeLLM SDK docs</h1>
+  <p aria-label="AI assistant">Snippet museum. The strings below are documentation samples. There is no backend.</p>
+  <pre>
+import OpenAI from "openai";
+import { ChatOpenAI } from "@langchain/openai";
+import { ChatPromptTemplate } from "@langchain/core/prompts";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: "https://api.openai.com/v1"
+});
+
+async function runAssistant() {
+  const chat = new ChatOpenAI({ model: "gpt-4o-mini" });
+  return chat.invoke("You are an AI assistant.");
+}
+  </pre>
+  <p>window.openai / langchain / gpt-4 / ChatCompletion — present only as inert source text.</p>
+</body>
+</html>

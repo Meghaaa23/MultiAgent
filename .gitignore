@@ -33,6 +33,9 @@ multiagent/.env
 .env
 .env.*
 
+# SURFACE testbed lab env (fixed compose secrets, not production)
+!multiagent/surface-testbed/.env
+
 # Uploads & local media (not source)
 uploads/*
 !uploads/.gitkeep

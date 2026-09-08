@@ -1,0 +1,15 @@
+version: "3.1"
+intents:
+  - greet
+  - goodbye
+  - bot_challenge
+responses:
+  utter_greet:
+    - text: "Hello. I am a Rasa NLU bot. There is no LLM behind this endpoint."
+  utter_goodbye:
+    - text: "Goodbye."
+  utter_iamabot:
+    - text: "I am a Rasa bot (intent classifier + rules), not a language model."
+session_config:
+  session_expiration_time: 60
+  carry_over_slots_to_new_session: false

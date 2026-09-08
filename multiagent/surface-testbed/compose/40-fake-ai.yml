@@ -1,0 +1,124 @@
+# Group 4 — Pretending to be AI (hard negatives). Ports 3031–3040.
+# Brand-only / canned / human-form decoys plus apps that market "AI" without a model surface.
+
+networks:
+  surface:
+
+x-g4: &g4
+  restart: unless-stopped
+  networks: [surface]
+  profiles: ["fake-ai", "all"]
+
+services:
+  # 31–36. Static decoys (one nginx, six listen ports)
+  decoys:
+    <<: *g4
+    image: nginx:1.27-alpine
+    container_name: s40-decoys
+    volumes:
+      - ../decoys/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../decoys/sites:/sites:ro
+    ports:
+      - "3031:3031"
+      - "3032:3032"
+      - "3033:3033"
+      - "3034:3034"
+      - "3035:3035"
+      - "3036:3036"
+    labels:
+      surface.id: "31-36"
+      surface.name: "Fake-AI decoys"
+      surface.group: "fake-ai"
+      surface.port: "3031-3036"
+      surface.has_ai_surface: "no"
+      surface.notes: "six hard-negative sites; see ground_truth.json"
+
+  # 37. n8n — markets "AI workflows"; default app is not a model surface
+  n8n:
+    <<: *g4
+    image: n8nio/n8n:latest
+    container_name: s40-n8n
+    environment:
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: "false"
+      WEBHOOK_URL: http://localhost:3037/
+      GENERIC_TIMEZONE: UTC
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+    volumes:
+      - n8n-data:/home/node/.n8n
+    ports:
+      - "3037:5678"
+    labels:
+      surface.id: "37"
+      surface.name: "n8n"
+      surface.group: "fake-ai"
+      surface.port: "3037"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "AI-workflow marketing; no live model unless an OpenAI node is configured"
+
+  # 38. Metabase — "smart"/X-ray analytics, no chatbot
+  metabase:
+    <<: *g4
+    image: metabase/metabase:latest
+    container_name: s40-metabase
+    environment:
+      MB_JETTY_PORT: "3000"
+      JAVA_TIMEZONE: UTC
+    volumes:
+      - metabase-data:/metabase-data
+    ports:
+      - "3038:3000"
+    labels:
+      surface.id: "38"
+      surface.name: "Metabase"
+      surface.group: "fake-ai"
+      surface.port: "3038"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "X-ray/smart analytics branding, no chatbot"
+
+  # 39. Uptime Kuma — dashboard, zero AI
+  uptime-kuma:
+    <<: *g4
+    image: louislam/uptime-kuma:1
+    container_name: s40-uptime-kuma
+    volumes:
+      - uptime-kuma-data:/app/data
+    ports:
+      - "3039:3001"
+    labels:
+      surface.id: "39"
+      surface.name: "Uptime Kuma"
+      surface.group: "fake-ai"
+      surface.port: "3039"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "control-group dashboard with zero AI branding"
+
+  # 40. Excalidraw — cloud markets "AI diagram"; OSS image has none
+  excalidraw:
+    <<: *g4
+    image: excalidraw/excalidraw:latest
+    container_name: s40-excalidraw
+    ports:
+      - "3040:80"
+    labels:
+      surface.id: "40"
+      surface.name: "Excalidraw"
+      surface.group: "fake-ai"
+      surface.port: "3040"
+      surface.has_ai_surface: "no"
+      surface.chat_ui_present: "false"
+      surface.chatbot_present: "false"
+      surface.ownership: "none"
+      surface.notes: "OSS build has no AI diagram feature"

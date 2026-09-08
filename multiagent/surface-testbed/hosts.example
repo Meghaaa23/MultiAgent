@@ -1,0 +1,5 @@
+# Add to /etc/hosts (or run scripts/install-hosts.sh)
+
+127.0.0.1 store.testbed.local
+127.0.0.1 vendor.chat.local
+127.0.0.1 hubspot-embed.testbed.local
