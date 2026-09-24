@@ -24,13 +24,11 @@ from multiagent.agents.webappscanner.web_scanner_agent import (
 )
 from multiagent.agents.threat_modeling_agent import _build_section_2
 
-
 SPA_SHELL = (
     '<!DOCTYPE html><html><head><title>LibreChat</title></head>'
     '<body><div id="root"></div><script src="/assets/index.js"></script>'
     '<nav>admin dashboard manage</nav></body></html>'
 )
-
 
 class TestSpaShellDetection:
     def test_spa_shell_detection(self):
@@ -41,7 +39,6 @@ class TestSpaShellDetection:
         assert has_strong_admin_content("Welcome to the admin panel") is True
         assert has_strong_admin_content("<html>nav: admin</html>") is False
         assert has_strong_admin_content("management console login") is True
-
 
 class TestHstsAndDeprecatedHeaders:
     def test_hsts_skipped_on_http_localhost(self):
@@ -59,14 +56,12 @@ class TestHstsAndDeprecatedHeaders:
         ) is True
         assert "X-XSS-Protection" in DEPRECATED_SECURITY_HEADERS
 
-
 class TestGraphqlPathHelper:
     def test_graphql_is_api_surface(self):
         assert _is_api_surface_path("/graphql") is True
         assert _is_api_surface_path("http://localhost:3080/graphql") is True
         assert _is_api_surface_path("/api/user") is True
         assert _is_api_surface_path("/admin") is False
-
 
 class TestCorsWildcardPotential:
     def test_wildcard_is_potential_low_not_confirmed(self):
@@ -78,12 +73,11 @@ class TestCorsWildcardPotential:
                 "Access-Control-Allow-Credentials": "false",
             }
 
-        vt._sync_headers = fake_headers  # type: ignore
+        vt._sync_headers = fake_headers
         findings = asyncio.run(vt.test_cors("http://localhost:3080"))
         assert findings
         assert findings[0]["severity"] == "Low"
         assert findings[0]["status"] == "Potential"
-
 
 class TestCorsStrideNoSeverityFallback:
     def test_wildcard_omitted(self):
@@ -91,7 +85,6 @@ class TestCorsStrideNoSeverityFallback:
             "http://x", {}, set(), [], "wildcard", {},
         )
         assert not any(t.get("threat") == "CORS Misconfiguration" for t in threats)
-
 
 class TestEvidencePocs:
     def test_clickjacking_uses_response_headers(self):
@@ -127,7 +120,6 @@ class TestEvidencePocs:
         )
         assert out["evidence_captured"] is True
         assert "NO EVIDENCE CAPTURED" not in out["attack_poc"]
-
 
 class TestSection2SpaExclusion:
     def test_spa_admin_not_in_administrative(self):
@@ -169,7 +161,6 @@ class TestSection2SpaExclusion:
         assert "Excluded endpoints" in text
         assert "/admin" in text
         assert "/api/user" in text
-
 
 if __name__ == "__main__":
     fails = 0

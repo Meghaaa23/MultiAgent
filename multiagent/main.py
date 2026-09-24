@@ -1,4 +1,3 @@
-# main.py
 
 
 import os
@@ -34,10 +33,6 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
 class FinishReason(str, Enum):
     STOP           = "stop"
     LENGTH         = "length"
@@ -48,10 +43,8 @@ class FinishReason(str, Enum):
     def __str__(self):
         return self.value
 
-
 from openai import AzureOpenAI
 
-# ── Local llama.cpp config ─────────────────────────────────────
 llama_base_url = os.getenv("LLAMA_BASE_URL", "http://localhost:8080")
 llama_model    = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
 
@@ -62,7 +55,6 @@ local_client = OpenAI(
     max_retries=0,
 )
 
-# ── Azure OpenAI config ────────────────────────────────────────
 azure_api_key    = os.getenv("AZURE_OPENAI_API_KEY")
 azure_endpoint   = os.getenv("AZURE_OPENAI_ENDPOINT")
 azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
@@ -74,15 +66,13 @@ azure_client = AzureOpenAI(
     api_version=azure_api_version,
 ) if azure_api_key and azure_endpoint else None
 
-# ── Active provide ─────────────────────────
-active_provider = os.getenv("ACTIVE_MODEL_PROVIDER", "azure")  # "local" or "azure"
+active_provider = os.getenv("ACTIVE_MODEL_PROVIDER", "azure")
 
 def get_active_client():
     if active_provider == "azure" and azure_client:
         return azure_client, azure_deployment
     return local_client, llama_model
 
-# ── config_list for AutoGen (rebuilt dynamically) ─────────────
 def get_config_list():
     if active_provider == "azure" and azure_api_key:
         return [{
@@ -99,13 +89,8 @@ def get_config_list():
         "base_url":       f"{llama_base_url}/v1",
     }]
 
-# Keep backward compat
 client      = local_client
 config_list = get_config_list()
-
-# ============================================================================
-# FASTAPI SETUP
-# ============================================================================
 
 app = FastAPI(
     title="Multi-Agent Threat Modeling System with Web Scanning + AI Backdoor Detection",
@@ -126,17 +111,9 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-# ============================================================================
-# AGENT INITIALIZATION
-# ============================================================================
-
 from agents.qa_agent import set_config
 
 set_config(config_list)
-
-# ============================================================================
-# WEB SEARCH
-# ============================================================================
 
 async def web_search_wrapper(query: str) -> List[Dict]:
     try:
@@ -156,10 +133,6 @@ async def web_search_wrapper(query: str) -> List[Dict]:
         logger.error(f"Web search failed: {e}")
         return []
 
-# ============================================================================
-# THREAT MODELING AGENT
-# ============================================================================
-
 try:
     active_client, active_model = get_active_client()
     threat_modeling_agent = ThreatModelingAgent(
@@ -173,10 +146,6 @@ except Exception as e:
     threat_modeling_agent = None
 
 logger.info("All agents initialized")
-
-# ============================================================================
-# AUTOGEN LLM CLIENT
-# ============================================================================
 
 def message_to_openai_format(message):
     if isinstance(message, (UserMessage, TextMessage)):
@@ -192,7 +161,6 @@ def message_to_openai_format(message):
                 return {"role": "assistant", "content": message.content}
         return {"role": "user", "content": str(message.content)}
     return {"role": "user", "content": str(message)}
-
 
 def clean_message_history(messages):
     cleaned   = []
@@ -210,7 +178,6 @@ def clean_message_history(messages):
     if cleaned and cleaned[0].get("role") == "assistant":
         cleaned = cleaned[1:]
     return cleaned or [{"role": "user", "content": "Hello"}]
-
 
 class LocalLlamaChatCompletionClient:
 
@@ -281,13 +248,8 @@ class LocalLlamaChatCompletionClient:
     async def create_stream(self, messages, **kwargs):
         raise NotImplementedError("Streaming not implemented")
 
-
 _init_client, _init_model = get_active_client()
 model_client = LocalLlamaChatCompletionClient(_init_client, _init_model)
-
-# ============================================================================
-# AUTOGEN SESSION MANAGEMENT
-# ============================================================================
 
 session_teams: Dict[str, RoundRobinGroupChat] = {}
 session_histories: Dict[str, List[Dict[str, str]]] = {}
@@ -299,14 +261,13 @@ SYSTEM_PROMPT = (
     "Be conversational and practical."
 )
 
-
 async def answer_with_llm(question: str, session_id: str) -> str:
     """Direct LLM answer with simple session memory (no AutoGen dependency)."""
     client, model_name = get_active_client()
     history = session_histories.setdefault(session_id, [])
 
     messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(history[-12:])  # keep recent turns
+    messages.extend(history[-12:])
     messages.append({"role": "user", "content": question})
 
     loop = asyncio.get_event_loop()
@@ -330,7 +291,6 @@ async def answer_with_llm(question: str, session_id: str) -> str:
     session_histories[session_id] = history[-20:]
     return answer
 
-
 async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
     if session_id in session_teams:
         return session_teams[session_id]
@@ -346,11 +306,9 @@ async def get_or_create_team(session_id: str) -> RoundRobinGroupChat:
     session_teams[session_id] = team
     return team
 
-
 def clear_session_team(session_id: str):
     session_teams.pop(session_id, None)
     session_histories.pop(session_id, None)
-
 
 async def get_team_history(session_id: str) -> List[Dict]:
     if session_id in session_histories:
@@ -368,16 +326,8 @@ async def get_team_history(session_id: str) -> List[Dict]:
                 })
     return history
 
-# =============================================================================
-# UTILITIES
-# =============================================================================
-
 def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
-
-# ============================================================================
-# ROOT / HEALTH
-# ============================================================================
 
 @app.get("/")
 async def root():
@@ -406,7 +356,6 @@ async def root():
         },
     }
 
-
 @app.get("/health")
 async def health_check():
     scanner_ok = bool(
@@ -423,10 +372,6 @@ async def health_check():
         "avid_lookup":     "enabled",
         "active_sessions": len(session_teams),
     }
-
-# =============================================================================
-# /query/ ENDPOINT
-# =============================================================================
 
 @app.post("/query/")
 async def query_with_full_autogen(request: Request):
@@ -519,12 +464,10 @@ async def query_with_full_autogen(request: Request):
                         "error": str(e),
                     }, status_code=200)
 
-        # General / security Q&A via direct LLM (more reliable than AutoGen alone)
         try:
             final_answer = await answer_with_llm(question, session_id)
         except Exception as e:
             logger.error(f"LLM answer failed: {e}\n{traceback.format_exc()}")
-            # Last resort: try AutoGen team
             try:
                 team = await get_or_create_team(session_id)
                 result = await team.run(
@@ -571,15 +514,9 @@ async def query_with_full_autogen(request: Request):
         logger.error(f"QUERY FAILED: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# ============================================================================
-# STREAMING ENDPOINT
-# ============================================================================
-
 class StreamQueryRequest(BaseModel):
     question:   str
     session_id: Optional[str] = None
-
 
 @app.post("/query/stream")
 async def query_stream(request: StreamQueryRequest):
@@ -612,7 +549,6 @@ async def query_stream(request: StreamQueryRequest):
             })
             await asyncio.sleep(0)
 
-            # ── Non-web-scan question ─────────────────────────────────
             if not is_security or (is_security and not is_web_scan):
                 yield _format_sse("progress", {
                     "phase": "report_generation", "step": 2, "total_steps": 3,
@@ -641,7 +577,6 @@ async def query_stream(request: StreamQueryRequest):
                 })
                 return
 
-            # ── Security + web scan path ───────────────────────────────
             yield _format_sse("progress", {
                 "phase": "knowledge_gathering", "step": 2, "total_steps": 6,
                 "message": "Decomposing security question...", "percent": 15,
@@ -676,7 +611,6 @@ async def query_stream(request: StreamQueryRequest):
             })
             await asyncio.sleep(0)
 
-            # Active scanning
             scan_results = None
             if is_web_scan and target_url:
                 scanner = threat_modeling_agent.ensure_web_scanner()
@@ -740,7 +674,6 @@ async def query_stream(request: StreamQueryRequest):
                     })
                     await asyncio.sleep(0)
 
-            # Report generation
             formatted_research = threat_modeling_agent.format_research_hybrid(research)
 
             yield _format_sse("progress", {
@@ -795,19 +728,12 @@ async def query_stream(request: StreamQueryRequest):
         },
     )
 
-# ============================================================================
-# DEDICATED SCAN ENDPOINT
-# ============================================================================
-
 @app.post("/scan/")
 async def scan_web_application(request: Request):
     try:
         body          = await request.json()
         target_url    = body.get("target_url")
         session_id    = body.get("session_id", "scan-default")
-        # Used ONLY for the AI/prompt-injection pipeline (chat/inference
-        # surfaces that only appear post-authentication) — the general
-        # web-vulnerability scan stays black-box unauthenticated regardless.
         ai_auth_token = body.get("ai_auth_token") or body.get("auth_token")
 
         if not target_url:
@@ -842,7 +768,6 @@ async def scan_web_application(request: Request):
                 "not_assessed_count": len(scan_data.get("not_assessed_endpoints") or []),
                 "scan_duration":      scan_data.get("scan_duration", 0),
                 "coverage_assessment": scan_data.get("coverage_assessment") or {},
-                # Table II eval columns (AI surfaces / PI / coverage)
                 "eval_metrics":       scan_data.get("eval_metrics") or {},
                 "ai_surfaces_discovered": (
                     (scan_data.get("eval_metrics") or {}).get("ai_surfaces_discovered", 0)
@@ -870,7 +795,6 @@ async def scan_web_application(request: Request):
                         ),
                     )
                 ),
-                # AI backdoor fields
                 "is_ai_powered":      scan_data.get("is_ai_powered", False),
                 "ai_scan_authenticated": scan_data.get("ai_scan_authenticated", False),
                 "avid_findings":      scan_data.get("avid_findings", 0),
@@ -890,10 +814,6 @@ async def scan_web_application(request: Request):
     except Exception as e:
         logger.error(f"SCAN FAILED: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# THREAT MODELING ENDPOINT
-# ============================================================================
 
 @app.post("/threat-modeling/")
 async def threat_modeling_query(request: Request):
@@ -929,10 +849,6 @@ async def threat_modeling_query(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============================================================================
-# SESSION ENDPOINTS
-# ============================================================================
-
 @app.get("/session/{session_id}/history")
 async def get_session_history(session_id: str):
     history  = await get_team_history(session_id)
@@ -950,12 +866,10 @@ async def get_session_history(session_id: str):
         "history":       qa_pairs,
     }
 
-
 @app.post("/clear-session/{session_id}")
 async def clear_session(session_id: str):
     clear_session_team(session_id)
     return {"message": f"Session {session_id} cleared", "success": True}
-
 
 @app.get("/sessions")
 async def list_active_sessions():
@@ -969,15 +883,8 @@ async def list_active_sessions():
         })
     return {"total_sessions": len(sessions), "sessions": sessions}
 
-
-
-
-# ============================================================================
-# MODEL SETTINGS ENDPOINT
-# ============================================================================
-
 class ModelSettingsUpdate(BaseModel):
-    provider: str  # "local" or "azure"
+    provider: str
 
 @app.get("/settings/model")
 async def get_model_settings():
@@ -1013,11 +920,9 @@ async def update_model_settings(body: ModelSettingsUpdate):
     active_provider = body.provider
     config_list     = get_config_list()
 
-    # Rebuild the AutoGen model client
     active_client, active_model = get_active_client()
     model_client = LocalLlamaChatCompletionClient(active_client, active_model)
 
-    # Clear all sessions so they use the new model
     session_teams.clear()
 
     logger.info(f"Model provider switched to: {active_provider}")
@@ -1027,7 +932,6 @@ async def update_model_settings(body: ModelSettingsUpdate):
         "model_name":      active_model,
         "sessions_cleared": True,
     }
-
 
 if __name__ == "__main__":
     import uvicorn

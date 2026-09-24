@@ -36,8 +36,6 @@ except Exception as _e:
     logger.warning(f"SPAScanner import failed: {_e}")
     _spa_scanner_instance = None
 
-
-
 def _validate_stack(stack, response_headers, body):
     if not stack:
         return {"stack_summary": "Unknown", "technologies": [],
@@ -59,8 +57,6 @@ def _validate_stack(stack, response_headers, body):
         return stack
 
     return stack
-
-
 
 def _build_evidence_gated_stride(target_url, response_headers,
                                   discovered_params, discovered_forms,
@@ -123,16 +119,11 @@ def _build_evidence_gated_stride(target_url, response_headers,
             "mitigation": "Restrict ACAO to trusted origins; remove origin reflection",
             "confirmed":  True,
         })
-    # cors_mode == "wildcard" (ACAO=* without ACAC): omit from STRIDE — Low only
 
     def _inputs(form):
         return form.get("inputs") or form.get("fields") or []
 
-    # Speculative SQLi/XSS from field existence alone is excluded from
-    # publisher-facing STRIDE (not evidence of a vulnerability).
-
     return threats
-
 
 class WebScannerAgent:
 
@@ -149,14 +140,11 @@ class WebScannerAgent:
 
         self.ai_fingerprinter = AIFingerprintAgent(timeout=8)
         self.avid_lookup      = AVIDLookupAgent(timeout=15)
-        # AIVulnerabilityTester does not take openai_client; disable heavy
-        # embedding load at startup so scanner init stays reliable.
         self.ai_vuln_tester   = AIVulnerabilityTester(
             timeout=10,
             llm_model=self.llm_model,
             enable_embeddings=False,
         )
-        self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client, llm_model=self.llm_model)
         self.ai_infra_agent   = AIInfraAgent(openai_client=self.openai_client, llm_model=self.llm_model)
 
         print(" WebScannerAgent initialized ")
@@ -167,11 +155,6 @@ class WebScannerAgent:
                                ai_auth_token: Optional[str] = None) -> Dict:
         start = datetime.now()
 
-        # Auth token, if provided, is used ONLY for the AI/prompt-injection
-        # pipeline below — the general web-vuln crawl/test/verify path stays
-        # black-box unauthenticated. Fresh agent instances are built per-call
-        # (rather than mutating the shared self.ai_* singletons) so concurrent
-        # scans for different callers never leak each other's tokens.
         ai_auth_headers = (
             {"Authorization": f"Bearer {ai_auth_token}"} if ai_auth_token else None
         )
@@ -253,7 +236,6 @@ class WebScannerAgent:
                 if app_identity and app_identity.name:
                     from .app_identity import _is_infra_or_framework_name
                     product_name = app_identity.name
-                    # Stack/runtime names must not become product identity.
                     if _is_infra_or_framework_name(product_name):
                         product_name = None
                     if product_name:
@@ -305,15 +287,12 @@ class WebScannerAgent:
                    
                     if ep.get("category") != "discovered_protected":
                         all_urls.append(ep["url"])
-            # Promote bare paths into parametrized URLs for active testing
             from .vulnerability_tester import synthesize_injectable_urls
             all_urls.extend(synthesize_injectable_urls(
                 target_url,
                 [ep.get("url", "") for ep in discovered_endpoints if ep.get("url")],
                 page_html=html or "",
             ))
-            # Re-merge URL stack signals from discovered paths (e.g. start.mvc)
-            # so Spring/Java/Tomcat are not left as unverified hints.
             disco_urls = [
                 ep.get("url", "") for ep in discovered_endpoints if ep.get("url")
             ]
@@ -360,10 +339,6 @@ class WebScannerAgent:
                 verbose              = verbose,
             )
 
-            # Taxonomy gate: escalate to CRITICAL/is_ai_powered only on an
-            # actually-observed live inference surface (model-shaped output).
-            # A structured 4xx or a discovered endpoint URL is route
-            # existence, not proof of live inference — it must not escalate.
             has_live_surface = bool(ai_fingerprint.get("has_live_surface"))
             has_route_confirmed = bool(ai_fingerprint.get("has_route_confirmed"))
             brand_only_ai = (
@@ -373,11 +348,6 @@ class WebScannerAgent:
             is_ai_powered = bool(
                 ai_fingerprint.get("is_ai_powered") and has_live_surface
             )
-            # Route exists (401/403/405/validation error) but never returned
-            # model output — e.g. an endpoint disabled by config, or gated
-            # behind auth we don't hold. Worth classifying (infra/vuln
-            # agents already report this honestly as auth-gated / untested),
-            # but never as a live, CRITICAL surface.
             route_confirmed_only_ai = has_route_confirmed and not has_live_surface
 
             if is_ai_powered or route_confirmed_only_ai:
@@ -451,8 +421,6 @@ class WebScannerAgent:
         except Exception as e:
             logger.warning(f"AI detection failed: {e}")
 
-        # CVE mapping disabled for now — fingerprint / stack only.
-        # Orphan NVD rows were drowning Section 2 (e.g. LibreChat CVE dumps).
         verified_cves = []
         if verbose:
             print(" CVE Lookup — skipped (fingerprint-only mode)\n")
@@ -460,9 +428,6 @@ class WebScannerAgent:
         if verbose:
             print("Deep Browser Crawl (Yura-style shared session)...")
 
-        # Seed surface from the initial page capture BEFORE LLM crawl.
-        # Classic SSR apps expose login/setup forms on the first HTML response;
-        # waiting for task execution alone was starving the tester.
         for el in elements or []:
             if el.get("type") == "form":
                 action = el.get("action") or target_url
@@ -488,12 +453,14 @@ class WebScannerAgent:
             deep=True,
         )
 
-        # Deep crawl gets most of the time budget — discovery already ran
         elapsed_so_far = (datetime.now() - start).total_seconds()
         crawl_budget_s = max(
             60.0,
             (max_time_minutes * 60.0) * 0.70 - elapsed_so_far,
         )
+        nav_graph: Dict = {}
+        interstate: Dict = {}
+        interstate_flows: List = []
         crawl = await self.browser.deep_crawl(
             tasks=tasks,
             base_url=target_url,
@@ -508,8 +475,11 @@ class WebScannerAgent:
         all_urls.extend(crawl.get("urls") or [])
         crawl_apis = list(crawl.get("api_urls") or [])
         all_urls.extend(crawl_apis)
+        nav_graph = crawl.get("nav_graph") or {}
+        interstate = crawl.get("interstate") or {}
+        interstate_flows = interstate.get("flows") or []
+        crawl_findings = list(crawl.get("crawl_findings") or [])
 
-        # Promote network-harvested APIs into injectable seeds immediately
         if crawl_apis:
             from .vulnerability_tester import synthesize_injectable_urls
             all_urls.extend(synthesize_injectable_urls(
@@ -539,7 +509,6 @@ class WebScannerAgent:
             if spa_forms or spa_urls:
                 all_forms.extend(spa_forms)
                 all_urls.extend(spa_urls)
-                # Re-seed injectables from SPA/JS API surfaces (fixes thin SPA FN)
                 from .vulnerability_tester import synthesize_injectable_urls
                 all_urls.extend(synthesize_injectable_urls(
                     target_url,
@@ -564,7 +533,7 @@ class WebScannerAgent:
        
         if verbose:
             print("Vulnerability Testing...")
-        raw_findings: List[Dict] = []
+        raw_findings: List[Dict] = list(crawl_findings)
         forms_exercised: List[Dict] = []
         try:
             disco_paths = [
@@ -585,13 +554,14 @@ class WebScannerAgent:
                 target_url=target_url,
                 discovered_paths=disco_paths,
                 shared_headers=initial_headers,
+                interstate_flows=interstate_flows,
                 verbose=verbose,
             )
             if isinstance(vuln_bundle, dict):
-                raw_findings = vuln_bundle.get("findings") or []
+                raw_findings.extend(vuln_bundle.get("findings") or [])
                 forms_exercised = vuln_bundle.get("forms_exercised") or []
             else:
-                raw_findings = vuln_bundle or []
+                raw_findings.extend(vuln_bundle or [])
                 forms_exercised = getattr(
                     self.vuln_tester, "last_forms_exercised", None
                 ) or []
@@ -599,7 +569,6 @@ class WebScannerAgent:
             logger.error(f"Vuln testing failed: {e}")
             forms_exercised = []
 
-        # Form testing denominator for Section 2 (never silent when forms exist).
         per_form = list(forms_exercised or [])
         with_findings = sum(1 for r in per_form if r.get("outcome") == "finding")
         forms_testing = {
@@ -619,12 +588,9 @@ class WebScannerAgent:
         if verbose:
             print(" Attack Verification...")
         verified_findings: List[Dict] = []
-        cors_mode = None  # None | wildcard | reflected | credentialed
+        cors_mode = None
 
         def _cors_mode_from_finding(f: Dict) -> Optional[str]:
-            # Only Confirmed CORS with a concrete ACAO drives STRIDE.
-            # Never infer "reflected" from severity alone — that produced
-            # High STRIDE while Section 4 showed wildcard Low/Potential.
             if "CORS" not in (f.get("type") or "") or f.get("status") != "Confirmed":
                 return None
             ev = f.get("evidence") or {}
@@ -680,7 +646,6 @@ class WebScannerAgent:
         except Exception as e:
             logger.error(f"Attack verification failed: {e}")
 
-        # Also consider CORS from active vuln tester (may run before AV)
         for f in raw_findings:
             mode = _cors_mode_from_finding(f if isinstance(f, dict) else {})
             if mode and _CORS_RANK.get(mode, 0) > _CORS_RANK.get(cors_mode or "", 0):
@@ -705,8 +670,6 @@ class WebScannerAgent:
         for f in raw_findings + verified_findings:
             ftype    = f.get("type", "")
             location = f.get("location", "").rstrip("/")
-            # XFO absence folds into clickjacking; STRIDE cites that finding
-            # (Section 3 ↔ Section 5 corroboration via shared finding name).
             if has_clickjacking and "X-Frame-Options" in ftype and "Missing Security Header" in ftype:
                 continue
             key = (ftype.lower(), location)
@@ -762,15 +725,14 @@ class WebScannerAgent:
         try:
             from .endpoint_discovery_agent import is_static_asset as _is_static
         except Exception:
-            def _is_static(url="", content_type=""):  # type: ignore
+            def _is_static(url="", content_type=""):
                 return False
         for ep in discovered_endpoints:
             if ep.get("static_asset") or _is_static(
                 ep.get("url", ""), ep.get("content_type", "")
             ):
-                continue  # CSS/fonts/images never enter the endpoint table
+                continue
             if ep.get("spa_catch_all") or ep.get("excluded"):
-                # Keep for Section 2 exclusion list, not as attack surface
                 report_endpoints.append(dict(ep, interesting=False))
                 continue
             if ep.get("access_controlled") or ep.get("auth_required") or ep.get(
@@ -792,7 +754,6 @@ class WebScannerAgent:
             elif ep.get("interesting"):
                 report_endpoints.append(ep)
 
-        # Coverage honesty: how much surface was actually assessed pre-auth
         assessed_count = sum(
             1 for ep in report_endpoints
             if ep.get("interesting")
@@ -827,7 +788,6 @@ class WebScannerAgent:
             ),
         }
 
-        # Table II-style eval columns (surfaces / PI / coverage)
         ai_fp = ai_fingerprint or {}
         ml_eps = list(ai_fp.get("ml_endpoints") or [])
         auth_req = ai_fp.get("auth_required_paths") or []
@@ -869,8 +829,16 @@ class WebScannerAgent:
             "has_live_surface": bool(ai_fp.get("has_live_surface")),
             "ai_brand_only": bool(brand_only_ai),
         }
+        from .interstate_tracker import class_coverage_metrics
+        nav_summary = (nav_graph or {}).get("summary") or {}
+        inter_summary = (interstate or {}).get("summary") or {}
+        eval_metrics.update(class_coverage_metrics(
+            all_findings,
+            forms_exercised,
+            nav_summary,
+            inter_summary,
+        ))
 
-        # Align STRIDE clickjacking evidence with Section 3 finding name
         clickjacking_type = next(
             (
                 f.get("type") for f in all_findings
@@ -898,6 +866,8 @@ class WebScannerAgent:
             "not_assessed_endpoints": not_assessed_endpoints,
             "coverage_assessment":    coverage_assessment,
             "eval_metrics":           eval_metrics,
+            "nav_graph":              nav_graph,
+            "interstate":             interstate,
             "vulnerabilities":        all_findings,
             "stride_threats":         stride_threats,
             "confirmed_count":        sum(1 for f in all_findings if f.get("status") == "Confirmed"),
@@ -911,9 +881,6 @@ class WebScannerAgent:
             "scan_scope":             "blackbox_unauth",
             "ai_scan_authenticated":  bool(ai_auth_headers),
             "timestamp":              datetime.now().isoformat(),
-            # Report may note brand-only/route-confirmed AI surface identity;
-            # escalation above (CRITICAL, is_ai_powered) already required an
-            # actually-observed live surface, never route existence alone.
             "is_ai_powered":          is_ai_powered or brand_only_ai or route_confirmed_only_ai,
             "ai_brand_only":          brand_only_ai,
             "ai_route_confirmed_only": route_confirmed_only_ai,
@@ -971,16 +938,11 @@ class WebScannerAgent:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return {k.lower(): v for k, v in resp.headers.items()}, None
         except urllib.error.HTTPError as e:
-            # An HTTP error still carries real headers (e.g. a 403 from a WAF) —
-            # this is captured evidence, not a failure.
             if e.headers:
                 return {k.lower(): v for k, v in e.headers.items()}, None
             return {}, f"HTTPError {e.code} with no headers"
         except Exception as e:
             return {}, f"{type(e).__name__}: {e}"
-
-
-
 
 async def _scan_spa_routes(base_url: str, verbose: bool = False):
     if _spa_scanner_instance is None:
@@ -991,7 +953,6 @@ async def _scan_spa_routes(base_url: str, verbose: bool = False):
     except Exception as e:
         logger.warning(f"SPA scan failed: {e}")
         return [], []
-
 
 def _resolve_docker_url(url: str, verbose: bool = False) -> str:
     import socket, os
@@ -1034,7 +995,6 @@ def _resolve_docker_url(url: str, verbose: bool = False) -> str:
             continue
     return url
 
-
 def _normalise_url(url: str) -> str:
     try:
         p = urllib.parse.urlparse(url)
@@ -1046,7 +1006,6 @@ def _normalise_url(url: str) -> str:
     except Exception:
         return url.rstrip("/")
 
-
 def _dedup_urls(urls: List[str]) -> List[str]:
     seen, result = set(), []
     for url in urls:
@@ -1055,7 +1014,6 @@ def _dedup_urls(urls: List[str]) -> List[str]:
             seen.add(norm)
             result.append(url)
     return result
-
 
 def _dedup_forms(forms: List[Dict]) -> List[Dict]:
     seen, result = set(), []

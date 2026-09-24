@@ -16,7 +16,6 @@ from multiagent.agents.ai_agents.ai_evidence_scoring import (
     classify_evidence,
 )
 
-
 def test_detect_intercom_is_third_party_out_of_scope():
     html = '<script src="https://widget.intercom.io/widget/abc"></script>'
     widgets = detect_chatbot_from_html(html, "https://example.com")
@@ -26,18 +25,15 @@ def test_detect_intercom_is_third_party_out_of_scope():
     assert w.submit_allowed is False
     assert w.tier == EvidenceClass.PASSIVE_HINT.value
 
-
 def test_bare_hubspot_brand_is_not_a_widget_marker():
     """www.hubspot.com HTML contains 'hubspot' everywhere — must not FP."""
     html = "<html><title>HubSpot | Software & Tools</title><p>HubSpot CRM</p></html>"
     assert detect_chatbot_from_html(html, "https://www.hubspot.com/") == []
 
-
 def test_hubspot_conversations_script_is_third_party():
     html = '<script src="https://js.hs-scripts.com/123.js"></script>'
     widgets = detect_chatbot_from_html(html, "https://example.com")
     assert any(w.provider == "HubSpot" and w.scope == "third_party" for w in widgets)
-
 
 def test_detect_structural_chat_surface():
     html = '''
@@ -52,20 +48,17 @@ def test_detect_structural_chat_surface():
     structural = next(
         w for w in widgets if w.tier == EvidenceClass.PASSIVE_STRUCTURAL.value
     )
-    assert structural.submit_allowed is False  # static path never gates submit
+    assert structural.submit_allowed is False
     assert structural.locator.get("tag") == "textarea"
-
 
 def test_detect_hint_only_textarea():
     html = '<textarea placeholder="Type a message"></textarea><button>Send</button>'
     widgets = detect_chatbot_from_html(html)
     assert any(w.tier == EvidenceClass.PASSIVE_HINT.value for w in widgets)
 
-
 def test_plain_marketing_page_no_widget():
     html = "<html><title>AI Writing Tool</title><p>Our AI helps you write.</p></html>"
     assert detect_chatbot_from_html(html) == []
-
 
 def test_evidence_keys_map_to_taxonomy():
     assert evidence_key_for_tier("behavioral") == "behavior_chatbot_ui_confirmed"
@@ -80,11 +73,10 @@ def test_evidence_keys_map_to_taxonomy():
     assert classify_evidence("chatbot_ui_hint") == EvidenceClass.PASSIVE_HINT
     assert classify_evidence("chatbot_ui_third_party") == EvidenceClass.PASSIVE_HINT
 
-
 def test_widgets_persist_locator_not_as_primary_contract():
     widgets = [
         ChatWidget(
-            input_selector="#root > div.chat > textarea",  # brittle — ephemeral
+            input_selector="#root > div.chat > textarea",
             locator={"tag": "textarea", "test_id": "chat-input", "role": "textbox"},
             network_signature={"conversational": True, "urls": ["/api/chat"]},
             tier="live_surface",
@@ -102,9 +94,7 @@ def test_widgets_persist_locator_not_as_primary_contract():
     assert comps[0]["locator"]["test_id"] == "chat-input"
     assert comps[0]["network_signature"]["conversational"] is True
     assert comps[0]["tier"] == "live_surface"
-    # Ephemeral selector may be present for same-process use, but locator is the contract.
     assert "locator" in comps[0]
-
 
 def test_stable_locator_prefers_testid_and_role():
     loc = StableLocator(test_id="composer", role="textbox", tag="textarea")
@@ -112,7 +102,6 @@ def test_stable_locator_prefers_testid_and_role():
     assert cands[0] == '[data-testid="composer"]'
     assert any("role=" in c for c in cands)
     assert "#root" not in "".join(cands)
-
 
 def test_differential_echo_confirms_low_severity():
     canary = "YURARAG_CANARY_7F3A"
@@ -126,7 +115,6 @@ def test_differential_echo_confirms_low_severity():
     assert outcome == "echo"
     assert sev == InjectionSeverity.ECHO
 
-
 def test_canary_in_both_is_confounded():
     canary = "YURARAG_CANARY_7F3A"
     ok, outcome, sev = classify_injection_severity(
@@ -138,7 +126,6 @@ def test_canary_in_both_is_confounded():
     assert ok is False
     assert outcome == "canary_confounded"
     assert sev == InjectionSeverity.NONE
-
 
 def test_differential_system_prompt_medium():
     canary = "YURARAG_CANARY_7F3A"
@@ -152,7 +139,6 @@ def test_differential_system_prompt_medium():
     assert outcome == "system_prompt"
     assert sev == InjectionSeverity.SYSTEM_PROMPT
 
-
 def test_differential_tool_egress_high():
     canary = "YURARAG_CANARY_7F3A"
     ok, outcome, sev = classify_injection_severity(
@@ -164,7 +150,6 @@ def test_differential_tool_egress_high():
     assert ok is True
     assert outcome == "tool_egress"
     assert sev == InjectionSeverity.TOOL_EGRESS
-
 
 def test_ui_result_confirmed_requires_differential():
     result = ChatbotUIProbeResult(
@@ -186,7 +171,6 @@ def test_ui_result_confirmed_requires_differential():
     assert confirmed[0]["evidence"]["differential"] is True
     assert confirmed[0]["evidence"]["severity"] == "echo"
     assert potential == []
-
 
 def test_third_party_plus_weak_hint_is_not_medium_pi():
     """Vendor widget on a different eTLD+1 must not become Medium PI by default."""
@@ -230,9 +214,7 @@ def test_third_party_plus_weak_hint_is_not_medium_pi():
     )
     assert not any("Potential Prompt Injection" in p["type"] for p in potential)
     comps = [w.to_dict() for w in result.widgets]
-    # Weak DOM hint alone does not warrant vuln; vendor is policy-skipped.
     assert ui_warrants_vuln(comps) is False
-
 
 def test_ui_result_detected_only_is_potential():
     result = ChatbotUIProbeResult(

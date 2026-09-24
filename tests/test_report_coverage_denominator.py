@@ -27,7 +27,6 @@ from multiagent.agents.webappscanner.endpoint_discovery_agent import (
     EndpointDiscoveryAgent,
 )
 
-
 def _scan(**kwargs):
     base = {
         "endpoints_discovered": [
@@ -93,7 +92,6 @@ def _scan(**kwargs):
     base.update(kwargs)
     return base
 
-
 class TestSection4Denominator:
     def test_zero_potentials_includes_coverage(self):
         text = _build_section_4([], _scan())
@@ -109,7 +107,6 @@ class TestSection4Denominator:
         assert "2 functional" in t or "2 functional endpoint" in t
         assert "1 form" in t
         assert "1 candidate" in t or "excluded" in t
-
 
 class TestSection2IdentityAndForms:
     def test_identity_not_determined(self):
@@ -151,9 +148,6 @@ class TestSection2IdentityAndForms:
         assert "Prompt injection attempted:" in text
 
     def test_excluded_list_reconciles_with_denominator_when_over_ten(self):
-        # Section 2's enumerated excluded list truncates at 10 for readability;
-        # Section 4's coverage line reports the true total (e.g. 24). The two
-        # must reconcile in the same section rather than silently disagreeing.
         excluded = [
             {
                 "url": f"http://localhost:3101/api/path{i}",
@@ -204,14 +198,12 @@ class TestSection2IdentityAndForms:
         assert "OpenAPI-enumerated endpoints" in text
         assert "/api/v1/workspaces" in text
 
-
 class TestAiNegativeSection:
     def test_negative_ai_note_has_denominator(self):
         text = _build_section_8_ai_negative(_scan())
         assert "8. AI/ML BACKDOOR VULNERABILITY ANALYSIS" in text
         assert "No AI/ML attack surface" in text
         assert "Coverage:" in text
-        # Full §8 builder still returns empty when not is_ai_powered
         assert _build_section_8_ai_backdoor(_scan()) == ""
 
     def test_brand_only_top_level_still_gets_negative_note(self):
@@ -230,7 +222,6 @@ class TestAiNegativeSection:
         assert full == ""
         neg = _build_section_8_ai_negative(sr)
         assert "not applicable" in neg.lower() or "branding" in neg.lower()
-
 
 class TestAppIdentityNotStack:
     def test_express_is_infra(self):
@@ -288,7 +279,6 @@ class TestAppIdentityNotStack:
         assert "OpenAPI/Swagger: docs UI found" in text
         assert "no machine-readable" in text
 
-
 class TestClickjackingFixDialect:
     def test_express_csp_alt_is_javascript(self):
         agent = ActionAgent()
@@ -306,10 +296,8 @@ class TestClickjackingFixDialect:
         snip = out["fix_snippet"]
         assert "helmet.frameguard" in snip
         assert "frameAncestors" in snip or "frame-ancestors" in snip
-        # Must not splice a raw HTTP header into the JS fence
         assert "\nContent-Security-Policy: frame-ancestors" not in snip
         assert "# OR use CSP" not in snip
-
 
 class TestOpenApiHelpers:
     def test_extract_refs_from_swagger_ui_html(self):
@@ -344,7 +332,6 @@ class TestOpenApiHelpers:
         disco._soft_mode = True
         disco._soft404_bodies = ["<!doctype html><html><body><div id='app'></div></body></html>"]
         assert disco._matches_spa_shell('{"openapi":"3.0.0","paths":{}}', "application/json") is False
-
 
 if __name__ == "__main__":
     fails = 0

@@ -20,7 +20,6 @@ from multiagent.agents.threat_modeling_agent import (
     _build_section_2,
 )
 
-
 SPA_SHELL = (
     "<!doctype html><html><head><title>OWASP Juice Shop</title></head>"
     "<body><app-root></app-root><script src=\"main.js\"></script>"
@@ -28,7 +27,6 @@ SPA_SHELL = (
     "<div id=\"app\">Juice Shop SPA shell content for soft-404 baseline matching tests.</div>"
     "</body></html>"
 )
-
 
 class TestSpaShellGate:
     def test_matches_baseline_shell(self):
@@ -49,7 +47,6 @@ class TestSpaShellGate:
         disco._soft_mode = False
         disco._soft404_bodies = [SPA_SHELL]
         assert disco._matches_spa_shell(SPA_SHELL, "text/html") is False
-
 
 class TestEvidenceSubstanceGate:
     def test_rejects_empty_evidence(self):
@@ -99,7 +96,6 @@ class TestEvidenceSubstanceGate:
             "location": "http://x/q=", "evidence": ev,
         }) is False
 
-
 class TestLocalhostFingerprint:
     def test_private_hosts(self):
         assert _is_private_or_local_host("http://localhost:3141") is True
@@ -116,7 +112,6 @@ class TestLocalhostFingerprint:
         )
         assert "CDN/WAF" not in text
         assert "Unidentified" in text or "local/private" in text
-
 
 class TestActionAgentEvidenceKeys:
     def test_cors_uses_response_headers(self):
@@ -171,7 +166,6 @@ class TestActionAgentEvidenceKeys:
             stack={},
         )
         assert actions == []
-
 
 if __name__ == "__main__":
     fails = 0

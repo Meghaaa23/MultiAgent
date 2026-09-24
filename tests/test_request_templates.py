@@ -8,11 +8,6 @@ from multiagent.agents.ai_agents.ai_vulnerability_test import (
     REQUEST_TEMPLATES, _select_template, _template_name, _extract_by_path,
 )
 
-
-# ---------------------------------------------------------------------------
-# _select_template
-# ---------------------------------------------------------------------------
-
 class TestSelectTemplate:
 
     def test_openai_chat_path(self):
@@ -63,11 +58,6 @@ class TestSelectTemplate:
         tmpl = _select_template("/v1/chat/completions?stream=false")
         assert _template_name(tmpl) == "openai_chat"
 
-
-# ---------------------------------------------------------------------------
-# Template body builders
-# ---------------------------------------------------------------------------
-
 class TestTemplateBodies:
 
     def test_openai_chat_body_structure(self):
@@ -113,11 +103,6 @@ class TestTemplateBodies:
         assert "prompt" in body
         assert "input" in body
         assert "query" in body
-
-
-# ---------------------------------------------------------------------------
-# _extract_by_path
-# ---------------------------------------------------------------------------
 
 class TestExtractByPath:
 

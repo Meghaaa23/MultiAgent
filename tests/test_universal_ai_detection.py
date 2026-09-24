@@ -24,19 +24,16 @@ from multiagent.agents.ai_agents.ai_vulnerability_test import (
     detect_application_type,
 )
 
-
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("", 0))
         return s.getsockname()[1]
-
 
 def _run_server(handler_class, port: int):
     srv = HTTPServer(("127.0.0.1", port), handler_class)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv
-
 
 class SpaOpenWebUIHandler(BaseHTTPRequestHandler):
     """Simulates Open WebUI: SPA catch-all HTML + auth-gated JSON APIs."""
@@ -64,7 +61,7 @@ class SpaOpenWebUIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         path = self.path.split("?")[0]
         if path.startswith("/assets/"):
             body = b'const WEBUI_NAME="Open WebUI"; fetch("/api/chat");'
@@ -78,10 +75,9 @@ class SpaOpenWebUIHandler(BaseHTTPRequestHandler):
                     "/api/chat/completions", "/ollama/api/tags"):
             self._json(401, {"detail": "Not authenticated"})
             return
-        # Catch-all SPA shell
         self._html()
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         path = self.path.split("?")[0]
@@ -96,7 +92,6 @@ class SpaOpenWebUIHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
-
 
 class SpaLangflowHandler(BaseHTTPRequestHandler):
     """Simulates Langflow-style UI with JS-declared API paths."""
@@ -122,7 +117,7 @@ class SpaLangflowHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         path = self.path.split("?")[0]
         if path.startswith("/assets/"):
             body = (
@@ -149,7 +144,7 @@ class SpaLangflowHandler(BaseHTTPRequestHandler):
             return
         self._html()
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         path = self.path.split("?")[0]
@@ -161,11 +156,6 @@ class SpaLangflowHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-
-# ---------------------------------------------------------------------------
-# Unit: HTML / SPA helpers
-# ---------------------------------------------------------------------------
-
 def test_html_generic_ai_title():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     js_urls, ev, links, title = agent._analyse_html(
@@ -174,7 +164,6 @@ def test_html_generic_ai_title():
     )
     assert title == "AI Chat Assistant"
     assert any(e.key == "page_title_ai" for e in ev)
-
 
 def test_meta_ai_tag_ignores_url_and_domain_noise():
     from multiagent.agents.ai_agents.ai_fingerprint import _is_meaningful_ai_meta_content
@@ -210,7 +199,6 @@ def test_meta_ai_tag_ignores_url_and_domain_noise():
     assert any("video enhancer" in e.detail.lower() or "video editor" in e.detail.lower()
                for e in meta)
 
-
 def test_html_no_product_brand_matching():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     _, ev, _, title = agent._analyse_html(
@@ -220,12 +208,10 @@ def test_html_no_product_brand_matching():
     assert title.startswith("Flowise")
     assert not any(e.key == "html_brand_signal" for e in ev)
 
-
 def test_looks_html_body():
     assert _looks_html_body("text/html", "<html></html>")
     assert _looks_html_body("", "<!DOCTYPE html><html>")
     assert not _looks_html_body("application/json", '{"models":[]}')
-
 
 def test_auth_gated_probe_counts_as_endpoint():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
@@ -238,7 +224,6 @@ def test_auth_gated_probe_counts_as_endpoint():
     assert r["endpoints"] == ["http://x/api/v1/prediction"]
     assert any(e.key == "ml_endpoint_401_403" for e in r["evidence"])
     assert len(auth) == 1
-
 
 def test_spa_405_ignored():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
@@ -255,7 +240,6 @@ def test_spa_405_ignored():
     )
     assert r2["endpoints"] == []
 
-
 def test_html_probe_response_ignored():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     r = agent._evaluate_probe_response(
@@ -264,7 +248,6 @@ def test_html_probe_response_ignored():
         "<!DOCTYPE html><html><body>spa</body></html>", [],
     )
     assert r == {}
-
 
 def test_injection_capable_requires_inference_segment():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
@@ -275,12 +258,10 @@ def test_injection_capable_requires_inference_segment():
     assert not t._is_injection_capable("http://x/api/v1/chatflows")
     assert not t._is_injection_capable("http://x/openapi.json")
     assert not t._is_injection_capable("http://x/api/models")
-    # Control-plane chat suffixes are not prompt-injection surfaces.
     assert not t._is_injection_capable("http://x/api/chat/abort")
     assert not t._is_injection_capable("http://x/api/chat/active")
     assert not t._is_injection_capable("http://x/api/chat/status")
     assert not t._is_injection_capable("http://x/api/messages/cancel")
-
 
 def test_classify_endpoint_segment_boundaries():
     chatflows = classify_endpoint("http://x/api/v1/chatflows")
@@ -297,7 +278,6 @@ def test_classify_endpoint_segment_boundaries():
     agents = classify_endpoint("http://x/api/agents")
     assert agents.endpoint_type == "agentic"
 
-
 def test_discovery_extracts_js_routes_without_catalog():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     paths = agent._extract_api_paths_from_js(
@@ -305,7 +285,6 @@ def test_discovery_extracts_js_routes_without_catalog():
     )
     assert "/api/chat" in paths
     assert "/api/models" in paths
-
 
 def test_discovery_extracts_base_url_template_and_concat_paths():
     """SPA bundles often build URLs as `${BASE_URL}/api/...` (LibreChat-style)."""
@@ -325,7 +304,7 @@ def test_discovery_extracts_base_url_template_and_concat_paths():
     assert "/api/messages" in paths
     assert "/api/ask" in paths
     assert "/v1/chat/completions" in paths
-    assert "/api/agents" in paths  # discovered; probe gate is separate
+    assert "/api/agents" in paths
     assert "/api/chat" in paths
     assert "/api/stream" in paths
     assert all(
@@ -337,10 +316,8 @@ def test_discovery_extracts_base_url_template_and_concat_paths():
             "/api/chat",
         )
     )
-    # Must not invent catalog endpoints that were never in the bundle.
     assert "/api/tags" not in paths
     assert "/ollama/api/generate" not in paths
-
 
 def test_discovery_extracts_escaped_and_split_api_paths():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
@@ -354,7 +331,6 @@ def test_discovery_extracts_escaped_and_split_api_paths():
     assert "/api/messages" in split_paths
     assert "/api/ask" in split_paths
 
-
 def test_js_chunk_url_extraction_follows_vite_assets():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
     js = r'''
@@ -364,7 +340,6 @@ def test_js_chunk_url_extraction_follows_vite_assets():
     chunks = agent._extract_js_chunk_urls(js, "http://localhost:3080")
     assert any("data-provider.AbCdEf.js" in c for c in chunks)
     assert any("Messages.xyz.js" in c for c in chunks)
-
 
 def test_js_chunk_priority_skips_vendor_ui_and_prefers_api():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
@@ -386,11 +361,6 @@ def test_js_chunk_priority_skips_vendor_ui_and_prefers_api():
     assert http_pri > vendor_pri
     assert index_pri > http_pri
 
-
-# ---------------------------------------------------------------------------
-# Unit: infra classify / k8s
-# ---------------------------------------------------------------------------
-
 def test_infra_classify_spa_and_auth():
     agent = AIInfraAgent()
     assert agent._classify(
@@ -409,12 +379,10 @@ def test_infra_classify_spa_and_auth():
         200, "Welcome", "text/plain", "/api/pull", False, True
     ) == "skip"
 
-
 def test_k8s_body_strict():
     assert not _is_k8s_body('{"error":"no"}')
     assert not _is_k8s_body('{"apiVersion":"v1"}')
     assert _is_k8s_body('{"kind":"PodList","apiVersion":"v1","items":[]}')
-
 
 def test_infra_select_paths_spa_avoids_k8s():
     agent = AIInfraAgent()
@@ -427,11 +395,6 @@ def test_infra_select_paths_spa_avoids_k8s():
     assert "/api/v1/pods" not in paths
     assert "/api/v1/prediction" in paths
 
-
-# ---------------------------------------------------------------------------
-# Unit: vuln tester universal fallbacks
-# ---------------------------------------------------------------------------
-
 def test_vuln_uses_discovered_paths_only():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
     eps = t._build_endpoint_list(
@@ -443,9 +406,7 @@ def test_vuln_uses_discovered_paths_only():
     path_list = [e[len("http://localhost:3100"):] for e in eps]
     assert "/api/v1/prediction" in path_list
     assert "/api/v1/run" in path_list
-    # Catalog spray must not invent paths the app never exposed.
     assert "/v1/chat/completions" not in path_list
-
 
 def test_normalize_derives_live_surface_from_endpoints():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
@@ -455,7 +416,6 @@ def test_normalize_derives_live_surface_from_endpoints():
     })
     assert fp["has_live_surface"] is True
     assert fp["is_ai_powered"] is True
-
 
 def test_normalize_brand_only_clears_ai_flag():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
@@ -467,7 +427,6 @@ def test_normalize_brand_only_clears_ai_flag():
     })
     assert fp["has_live_surface"] is False
     assert fp["is_ai_powered"] is False
-
 
 @pytest.mark.asyncio
 async def test_vuln_tester_skips_brand_only_framework():
@@ -485,7 +444,6 @@ async def test_vuln_tester_skips_brand_only_framework():
     assert result["confirmed_ai_vulns"] == []
     assert result["potential_ai_vulns"] == []
     assert result["requests_sent"] == 0
-
 
 @pytest.mark.asyncio
 async def test_vuln_tester_auth_gated_still_reported():
@@ -505,7 +463,6 @@ async def test_vuln_tester_auth_gated_still_reported():
     assert result["confirmed_ai_vulns"] == []
     assert len(result["potential_ai_vulns"]) == 1
     assert "auth-gated" in result["potential_ai_vulns"][0]["type"]
-
 
 @pytest.mark.asyncio
 async def test_vuln_tester_auth_gated_collapsed_not_spammed():
@@ -542,26 +499,18 @@ async def test_vuln_tester_auth_gated_collapsed_not_spammed():
     assert finding.get("category") == "ai_vulnerability"
     related = finding.get("related_endpoints") or []
     assert finding["location"] in related
-    # Control-plane suffixes must not appear.
     related_l = " ".join(related).lower()
     assert "/abort" not in related_l
     assert "/active" not in related_l
     assert "/status" not in related_l
-    # Real inference surfaces remain.
     assert any(p.endswith("/api/chat") or p.endswith("/api/messages")
                or p.endswith("/api/ask") for p in related)
     assert finding["evidence"].get("auth_gated_count") == len(related)
-
 
 def test_app_detect_from_inference_paths():
     assert detect_application_type(
         {"framework": "", "ml_endpoints": ["http://x/api/tags", "http://x/api/generate"]}
     ).value == "inference_server"
-
-
-# ---------------------------------------------------------------------------
-# Integration: fingerprint against mock SPA apps
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_fingerprint_openwebui_spa():
@@ -571,12 +520,12 @@ async def test_fingerprint_openwebui_spa():
         agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
         result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
         assert result["spa_catch_all"] is True
-        assert result["is_ai_powered"] is True
-        assert result["has_live_surface"] is True
+        assert result["is_ai_powered"] is False
+        assert result["has_live_surface"] is False
+        assert result["has_route_confirmed"] is True
         assert result["ai_brand_only"] is False
-        assert result["detection"] == "confirmed"
-        assert result["confidence"] == "high"
-        # Protocol label only — never a product brand.
+        assert result["detection"] == "route_confirmed"
+        assert result["confidence"] == "medium"
         assert result["framework"] in (
             "", "OpenAI-compatible", "chat_api",
         )
@@ -590,7 +539,6 @@ async def test_fingerprint_openwebui_spa():
     finally:
         srv.shutdown()
 
-
 @pytest.mark.asyncio
 async def test_fingerprint_langflow_spa():
     port = _free_port()
@@ -598,15 +546,15 @@ async def test_fingerprint_langflow_spa():
     try:
         agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
         result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
-        assert result["is_ai_powered"] is True
-        assert result["has_live_surface"] is True
-        assert result["detection"] == "confirmed"
+        assert result["is_ai_powered"] is False
+        assert result["has_live_surface"] is False
+        assert result["has_route_confirmed"] is True
+        assert result["detection"] == "route_confirmed"
         assert "Langflow" not in (result["framework"], *result.get("frameworks_detected", []))
         assert any("/api/v1/flows" in e or "/api/v1/run" in e
                    for e in result["ml_endpoints"])
     finally:
         srv.shutdown()
-
 
 @pytest.mark.asyncio
 async def test_infra_no_false_k8s_on_spa_flowise():
@@ -632,7 +580,6 @@ async def test_infra_no_false_k8s_on_spa_flowise():
     finally:
         srv.shutdown()
 
-
 class MarketingBrandHandler(BaseHTTPRequestHandler):
     PAGE = (
         "<!DOCTYPE html><html><head><title>Open WebUI — The best AI interface</title>"
@@ -641,7 +588,7 @@ class MarketingBrandHandler(BaseHTTPRequestHandler):
         "</body></html>"
     )
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         data = self.PAGE.encode()
         self.send_response(200 if self.path in ("/", "/index.html") else 404)
         self.send_header("Content-Type", "text/html")
@@ -649,7 +596,7 @@ class MarketingBrandHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         data = b"Not Found"
@@ -661,7 +608,6 @@ class MarketingBrandHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
-
 
 @pytest.mark.asyncio
 async def test_brand_only_marketing_site_not_ai_powered():
@@ -679,11 +625,6 @@ async def test_brand_only_marketing_site_not_ai_powered():
         assert "brand" in result.get("evidence_classes", {})
     finally:
         srv.shutdown()
-
-
-# ---------------------------------------------------------------------------
-# Regression: status-code-only must not confirm AI (Canva / LibreChat)
-# ---------------------------------------------------------------------------
 
 class CanvaStyleMarketingHandler(BaseHTTPRequestHandler):
     """Non-AI marketing site: AI-heavy copy + robots spray + 405/403 noise."""
@@ -720,7 +661,7 @@ class CanvaStyleMarketingHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         path = self.path.split("?")[0]
         port = self.server.server_address[1]
         if path == "/robots.txt":
@@ -736,7 +677,7 @@ class CanvaStyleMarketingHandler(BaseHTTPRequestHandler):
             return self._send(200, self.PAGE.encode(), "text/html")
         return self._send(404, b"not found", "text/plain")
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         path = self.path.split("?")[0]
@@ -747,7 +688,6 @@ class CanvaStyleMarketingHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
-
 
 class LibreChatStyleHandler(BaseHTTPRequestHandler):
     """Auth-gated inference surfaces must still confirm."""
@@ -774,7 +714,7 @@ class LibreChatStyleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         path = self.path.split("?")[0]
         if path.startswith("/assets/"):
             body = (
@@ -792,7 +732,7 @@ class LibreChatStyleHandler(BaseHTTPRequestHandler):
             return
         self._html()
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         path = self.path.split("?")[0]
@@ -803,7 +743,6 @@ class LibreChatStyleHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
-
 
 @pytest.mark.asyncio
 async def test_marketing_site_status_codes_do_not_confirm_ai():
@@ -820,18 +759,15 @@ async def test_marketing_site_status_codes_do_not_confirm_ai():
         assert result["detection"] in ("possible", "probable")
         assert result["detection"] != "confirmed"
         assert result["ml_endpoints"] == []
-        # Junk robots/marketing paths must not emit AI hint evidence.
         keys = {e.get("key") for e in (result.get("evidence_items") or [])
                 if isinstance(e, dict)}
         assert "ml_endpoint_405" not in keys
         assert "ml_endpoint_401_403" not in keys
         assert "robots_ai_path" not in keys
         assert "sitemap_ai_path" not in keys
-        # Brand/meta only → brand-only marketing site.
         assert result["ai_brand_only"] is True
     finally:
         srv.shutdown()
-
 
 class LibreChatChunkedBundleHandler(BaseHTTPRequestHandler):
     """Entry bundle has no API strings; Vite chunk holds escaped LibreChat paths."""
@@ -859,7 +795,7 @@ class LibreChatChunkedBundleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         path = self.path.split("?")[0]
         if path.endswith("/assets/index.BSLuV95c.js"):
             return self._send(200, self.ENTRY, "application/javascript")
@@ -876,7 +812,7 @@ class LibreChatChunkedBundleHandler(BaseHTTPRequestHandler):
             return self._send(401, b'{"detail":"Unauthorized"}', "application/json")
         return self._send(200, self.PAGE.encode(), "text/html")
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         path = self.path.split("?")[0]
@@ -887,18 +823,20 @@ class LibreChatChunkedBundleHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-
 @pytest.mark.asyncio
-async def test_auth_gated_inference_still_confirms():
-    """LibreChat regression: 401 on inference paths must still confirm AI."""
+async def test_auth_gated_inference_is_route_confirmed():
+    """A 401 on inference paths confirms the routes exist but observes no model
+    output — route-confirmed, not a live (is_ai) surface. The endpoints must
+    still be discovered and tracked as auth-gated."""
     port = _free_port()
     srv = _run_server(LibreChatStyleHandler, port)
     try:
         agent = AIFingerprintAgent(timeout=3, run_behavioral_probes=False)
         result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
-        assert result["has_live_surface"] is True
-        assert result["is_ai_powered"] is True
-        assert result["detection"] == "confirmed"
+        assert result["has_live_surface"] is False
+        assert result["is_ai_powered"] is False
+        assert result["has_route_confirmed"] is True
+        assert result["detection"] == "route_confirmed"
         auth_eps = [a["endpoint"] for a in (result.get("auth_required_paths") or [])]
         all_eps = list(result.get("ml_endpoints") or []) + auth_eps
         assert any(
@@ -907,7 +845,6 @@ async def test_auth_gated_inference_still_confirms():
         )
     finally:
         srv.shutdown()
-
 
 @pytest.mark.asyncio
 async def test_follows_vite_chunk_for_librechat_api_paths():
@@ -921,11 +858,11 @@ async def test_follows_vite_chunk_for_librechat_api_paths():
         assert "/api/messages" in paths
         assert any("/api/agents/chat" in p for p in paths)
         assert "/api/ask" in paths
-        assert result["has_live_surface"] is True
-        assert result["is_ai_powered"] is True
+        assert result["has_live_surface"] is False
+        assert result["is_ai_powered"] is False
+        assert result["has_route_confirmed"] is True
     finally:
         srv.shutdown()
-
 
 class LibreChatCrowdedChunkHandler(LibreChatChunkedBundleHandler):
     """API chunk buried behind mermaid/vendor noise in the import graph."""
@@ -938,17 +875,15 @@ class LibreChatCrowdedChunkHandler(LibreChatChunkedBundleHandler):
         b'import("./assets/data-provider.OK.js");'
     )
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         path = self.path.split("?")[0]
         if path.endswith("/assets/index.BSLuV95c.js"):
             return self._send(200, self.ENTRY, "application/javascript")
         if path.endswith("/assets/data-provider.OK.js"):
             return self._send(200, self.CHUNK, "application/javascript")
         if path.endswith(".js"):
-            # Vendor noise — must not block discovery of data-provider.
             return self._send(200, b'console.log("vendor");', "application/javascript")
         return super().do_GET()
-
 
 @pytest.mark.asyncio
 async def test_skips_vendor_chunks_to_reach_api_routes():
@@ -961,10 +896,10 @@ async def test_skips_vendor_chunks_to_reach_api_routes():
         result = await agent.fingerprint(f"http://127.0.0.1:{port}", verbose=False)
         paths = result.get("discovered_paths") or []
         assert "/api/messages" in paths
-        assert result["has_live_surface"] is True
+        assert result["has_live_surface"] is False
+        assert result["has_route_confirmed"] is True
     finally:
         srv.shutdown()
-
 
 def test_cross_origin_app_js_allowed_trackers_rejected():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
@@ -974,7 +909,6 @@ def test_cross_origin_app_js_allowed_trackers_rejected():
     assert agent._looks_js_asset_url(cdn, page, allow_cross_origin=True) is True
     assert agent._looks_js_asset_url(cdn, page, allow_cross_origin=False) is False
     assert agent._looks_js_asset_url(tracker, page, allow_cross_origin=True) is False
-
 
 def test_extract_api_bases_and_absolute_urls_from_js():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
@@ -995,10 +929,11 @@ def test_extract_api_bases_and_absolute_urls_from_js():
     assert not any("w3.org" in p for p in paths)
     assert not any("reactjs.org" in p for p in paths)
 
-
 @pytest.mark.asyncio
-async def test_related_host_product_api_confirms_live_surface():
-    """Grammarly-style: CDN JS exposes product API URL (no chat/messages segments)."""
+async def test_related_host_product_api_is_discovered_and_probed():
+    """Grammarly-style: CDN JS exposes product API URL (no chat/messages segments).
+    The related-host route is discovered and probed; a 401 makes it
+    route-confirmed, not a live surface."""
     api_port = _free_port()
     cdn_port = _free_port()
     page_port = _free_port()
@@ -1012,12 +947,12 @@ async def test_related_host_product_api_confirms_live_surface():
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             if self.path.startswith(api_path):
                 return self._send(401, b'{"detail":"Unauthorized"}', "application/json")
             return self._send(404, b"no", "text/plain")
 
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             self.rfile.read(length)
             return self.do_GET()
@@ -1026,7 +961,7 @@ async def test_related_host_product_api_confirms_live_surface():
             pass
 
     class CdnHandler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             body = (
                 f'const API="http://127.0.0.1:{api_port}{api_path}";'
                 f'fetch(API);'
@@ -1041,7 +976,7 @@ async def test_related_host_product_api_confirms_live_surface():
             pass
 
     class PageHandler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             page = (
                 "<!DOCTYPE html><html><head><title>Writing Assistant</title>"
                 '<meta name="description" content="AI writing assistant"/>'
@@ -1068,8 +1003,8 @@ async def test_related_host_product_api_confirms_live_surface():
         result = await agent.fingerprint(
             f"http://127.0.0.1:{page_port}", verbose=False,
         )
-        assert result["has_live_surface"] is True
-        assert result["is_ai_powered"] is True
+        assert result["has_live_surface"] is False
+        assert result["has_route_confirmed"] is True
         eps = " ".join(result.get("ml_endpoints") or [])
         assert f"127.0.0.1:{api_port}{api_path}" in eps
         allowed = result.get("allowed_api_hosts") or []
@@ -1078,7 +1013,6 @@ async def test_related_host_product_api_confirms_live_surface():
         api_srv.shutdown()
         cdn_srv.shutdown()
         page_srv.shutdown()
-
 
 def test_related_host_api_candidate_selection():
     agent = AIFingerprintAgent(run_behavioral_probes=False)
@@ -1099,7 +1033,6 @@ def test_related_host_api_candidate_selection():
     assert not any("/analytics/" in u for u in out)
     assert not any("www.example.com" in u for u in out)
 
-
 @pytest.mark.asyncio
 async def test_cdn_js_absolute_api_url_is_probed():
     """qwen.ai-style: page loads CDN JS that references an absolute API URL."""
@@ -1115,12 +1048,12 @@ async def test_cdn_js_absolute_api_url_is_probed():
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             if self.path.startswith("/api/agents/chat"):
                 return self._send(401, b'{"detail":"auth"}', "application/json")
             return self._send(404, b"no", "text/plain")
 
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             self.rfile.read(length)
             return self.do_GET()
@@ -1129,7 +1062,7 @@ async def test_cdn_js_absolute_api_url_is_probed():
             pass
 
     class CdnHandler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             body = (
                 f'fetch("http://127.0.0.1:{api_port}/api/agents/chat");'
             ).encode()
@@ -1143,7 +1076,7 @@ async def test_cdn_js_absolute_api_url_is_probed():
             pass
 
     class PageHandler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             page = (
                 "<!DOCTYPE html><html><head><title>Qwen</title>"
                 '<meta name="description" content="Qwen Studio chatbot AI models"/>'
@@ -1170,8 +1103,8 @@ async def test_cdn_js_absolute_api_url_is_probed():
         result = await agent.fingerprint(
             f"http://127.0.0.1:{page_port}", verbose=False,
         )
-        assert result["has_live_surface"] is True
-        assert result["is_ai_powered"] is True
+        assert result["has_live_surface"] is False
+        assert result["has_route_confirmed"] is True
         eps = " ".join(result.get("ml_endpoints") or [])
         assert f"127.0.0.1:{api_port}/api/agents/chat" in eps
         allowed = result.get("allowed_api_hosts") or []
@@ -1180,7 +1113,6 @@ async def test_cdn_js_absolute_api_url_is_probed():
         api_srv.shutdown()
         cdn_srv.shutdown()
         page_srv.shutdown()
-
 
 def test_vuln_scope_allows_fingerprint_related_hosts():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
@@ -1196,13 +1128,11 @@ def test_vuln_scope_allows_fingerprint_related_hosts():
     t._scope_host = "qwen.ai"
     assert t._in_scope("https://www.qwencloud.com/try-ai/chat") is True
     assert t._in_scope("https://evil.example/api/chat") is False
-    # Foreign ml_endpoints without allowlist must not expand scope.
     hosts2 = t._build_scope_hosts(
         "https://qwen.ai",
         {"ml_endpoints": ["https://evil.example/api/chat"]},
     )
     assert "evil.example" not in hosts2
-
 
 @pytest.mark.asyncio
 async def test_infra_probes_allowlisted_cross_origin_url():
@@ -1212,7 +1142,7 @@ async def test_infra_probes_allowlisted_cross_origin_url():
     hit = {"urls": []}
 
     class ApiHandler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             self.rfile.read(length)
             hit["urls"].append(self.path)
@@ -1223,14 +1153,14 @@ async def test_infra_probes_allowlisted_cross_origin_url():
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             return self.do_POST()
 
         def log_message(self, *args):
             pass
 
     class PageHandler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             body = b"<html><title>Qwen</title></html>"
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
@@ -1257,7 +1187,6 @@ async def test_infra_probes_allowlisted_cross_origin_url():
         result = await agent.scan(f"http://127.0.0.1:{page_port}", ai_stack=fp)
         assert "/try-ai/chat" in hit["urls"]
         assert any(cross in e for e in (result.auth_protected_endpoints or []))
-        # Must not invent the path on the page origin as exposed.
         assert not any(
             f"127.0.0.1:{page_port}/try-ai/chat" in e
             for e in (result.exposed_endpoints or [])
@@ -1265,7 +1194,6 @@ async def test_infra_probes_allowlisted_cross_origin_url():
     finally:
         api_srv.shutdown()
         page_srv.shutdown()
-
 
 def test_normalize_ignores_non_inference_endpoints():
     t = AIVulnerabilityTester(enable_embeddings=False, max_requests=5)
@@ -1280,7 +1208,6 @@ def test_normalize_ignores_non_inference_endpoints():
     })
     assert fp["has_live_surface"] is False
     assert fp["is_ai_powered"] is False
-
 
 @pytest.mark.asyncio
 async def test_robots_junk_path_not_hint_evidence():
@@ -1308,7 +1235,6 @@ async def test_robots_junk_path_not_hint_evidence():
     assert "/api/chat" in result["paths"]
     assert _is_inference_path("/api/chat")
 
-
 def test_js_path_evidence_requires_inference_shape():
     from multiagent.agents.ai_agents.ai_fingerprint import _is_inference_path
 
@@ -1325,7 +1251,6 @@ def test_js_path_evidence_requires_inference_shape():
     assert any(_is_inference_path(p) for p in mixed)
     assert "/api/chat" in mixed
 
-
 def test_inference_path_segment_not_substring():
     """Shape gate: segment match only — no endpoint catalog, no substring FPs."""
     from multiagent.agents.ai_agents.ai_fingerprint import (
@@ -1333,7 +1258,6 @@ def test_inference_path_segment_not_substring():
         _looks_non_api_document,
     )
 
-    # App-discovered inference handlers (must keep working).
     assert _is_inference_path("/api/chat")
     assert _is_inference_path("/api/messages")
     assert _is_inference_path("/v1/chat/completions")
@@ -1341,7 +1265,6 @@ def test_inference_path_segment_not_substring():
     assert _is_inference_path("/api/v1/prediction")
     assert _is_inference_path("/ollama/api/generate")
 
-    # Marketing / SEO substrings must not count (Picsart-style).
     assert not _is_inference_path("/llms.txt")
     assert not _is_inference_path("/compare-models/kling-vs-runway/")
     assert not _is_inference_path("/compare-models/runway-gen-4-vs-veo-3/")
@@ -1353,7 +1276,6 @@ def test_inference_path_segment_not_substring():
     assert _looks_non_api_document("/llms.txt")
     assert _looks_non_api_document("/sitemap.xml")
     assert not _looks_non_api_document("/api/chat")
-
 
 def test_chunked_transfer_alone_does_not_confirm():
     """Bare Transfer-Encoding: chunked must not create live-surface / confirm."""
@@ -1386,7 +1308,6 @@ def test_chunked_transfer_alone_does_not_confirm():
     assert "sse_chunked_transfer" not in keys
     assert r.get("endpoints", []) == []
 
-
 @pytest.mark.asyncio
 async def test_picsart_style_marketing_not_confirmed():
     """Chunked /llms.txt + runway sitemap noise must not confirm AI."""
@@ -1404,14 +1325,12 @@ async def test_picsart_style_marketing_not_confirmed():
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Transfer-Encoding", "chunked")
-            # Avoid real chunk framing complexity — body as Content-Length instead
-            # when not using chunk encoder; header alone is what we used to mis-key on.
             data = body if isinstance(body, bytes) else body.encode()
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
 
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             path = self.path.split("?")[0]
             if path == "/robots.txt":
                 body = (
@@ -1436,7 +1355,7 @@ async def test_picsart_style_marketing_not_confirmed():
                 return self._send(200, self.PAGE, "text/html")
             return self._send(404, "no", "text/plain")
 
-        def do_POST(self):  # noqa: N802
+        def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             self.rfile.read(length)
             return self._send(404, "no", "text/plain")
@@ -1455,6 +1374,6 @@ async def test_picsart_style_marketing_not_confirmed():
         keys = {e.get("key") for e in (result.get("evidence_items") or [])
                 if isinstance(e, dict)}
         assert "sse_chunked_transfer" not in keys
-        assert "robots_ai_path" not in keys  # /llms.txt not inference-shaped
+        assert "robots_ai_path" not in keys
     finally:
         srv.shutdown()

@@ -18,15 +18,12 @@ from .schema import (
     SUCCESS_OUTCOMES,
 )
 
-
 class AdaptiveAction(str, Enum):
     TRY_PAYLOAD = "try_payload"
     TRY_MUTATIONS = "try_mutations"
     FOLLOWUP = "followup"
     STOP = "stop"
 
-
-# Preferred next techniques when the model refuses.
 _REFUSAL_JUMPS = (
     "persona_override_dan",
     "fictional_no_sysprompt",
@@ -36,7 +33,6 @@ _REFUSAL_JUMPS = (
     "translation_wrapper",
 )
 
-# Preferred next techniques when the model ignores / stays on baseline.
 _IGNORE_JUMPS = (
     "instruction_reset",
     "priority_claim",
@@ -46,7 +42,6 @@ _IGNORE_JUMPS = (
     "task_substitution",
 )
 
-# After a partial hit, stay on echo-style direct techniques then escalate.
 _PARTIAL_JUMPS = (
     "priority_claim",
     "debug_mode_trigger",
@@ -55,7 +50,6 @@ _PARTIAL_JUMPS = (
     "json_field_split",
 )
 
-# After success in evaluation mode, escalate objectives.
 _ESCALATION_OBJECTIVES = (
     Objective.REVEAL_SYSPROMPT,
     Objective.ROLE_TAKEOVER,
@@ -63,13 +57,11 @@ _ESCALATION_OBJECTIVES = (
     Objective.CALL_TOOL,
 )
 
-
 @dataclass
 class AdaptiveDecision:
     action: AdaptiveAction
     payload: Optional[Dict] = None
     reason: str = ""
-
 
 @dataclass
 class ResponseAdaptivePolicy:
@@ -113,7 +105,6 @@ class ResponseAdaptivePolicy:
         for p in direct_echo:
             self._enqueue(p["technique"], front=False)
 
-        # Then other directs, then agentic — still catalog-only.
         others = [
             p for p in self.payloads
             if p.get("technique") not in self._queue
@@ -135,7 +126,6 @@ class ResponseAdaptivePolicy:
         if technique in self._queue:
             if not front:
                 return
-            # Promote an already-queued jump target to the front.
             try:
                 self._queue.remove(technique)
             except ValueError:
@@ -146,7 +136,6 @@ class ResponseAdaptivePolicy:
             self._queue.append(technique)
 
     def _enqueue_jumps(self, names: Iterable[str]) -> None:
-        # Front of queue, reverse so first listed is tried first.
         for name in reversed(list(names)):
             self._enqueue(name, front=True)
 
@@ -155,7 +144,6 @@ class ResponseAdaptivePolicy:
             tech = self._pending_mutations_for
             self._pending_mutations_for = None
             pdef = self._by_technique.get(tech)
-            # Technique may already be in _tried after the base attempt.
             if pdef:
                 return AdaptiveDecision(
                     AdaptiveAction.TRY_MUTATIONS, pdef, "partial -> mutate same technique"

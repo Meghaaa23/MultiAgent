@@ -1,4 +1,3 @@
-# agents/redis_manager.py
 """
 Redis Manager - Handles state management, caching, and pub/sub messaging
 Features:
@@ -18,7 +17,6 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Redis client (initialized below)
 redis_client = None
 
 def initialize_redis() -> bool:
@@ -40,7 +38,6 @@ def initialize_redis() -> bool:
         REDIS_URL = os.getenv("REDIS_URL")
         
         if REDIS_URL:
-            # Use full connection URL (e.g., Redis Cloud)
             redis_client = redis.Redis.from_url(
                 REDIS_URL, 
                 decode_responses=True,
@@ -49,7 +46,6 @@ def initialize_redis() -> bool:
             )
             connection_info = REDIS_URL.split('@')[-1] if '@' in REDIS_URL else "Redis Cloud"
         else:
-            # Use individual connection parameters
             host = os.getenv("REDIS_HOST", "localhost")
             port = int(os.getenv("REDIS_PORT", 6379))
             password = os.getenv("REDIS_PASSWORD", None)
@@ -66,7 +62,6 @@ def initialize_redis() -> bool:
             )
             connection_info = f"{host}:{port}"
         
-        # Test connection
         redis_client.ping()
         logger.info(f" Redis connected successfully to {connection_info}")
         return True
@@ -82,7 +77,6 @@ def initialize_redis() -> bool:
         redis_client = None
         return False
 
-# Initialize on module load
 initialize_redis()
 
 def is_redis_available() -> bool:
@@ -97,12 +91,8 @@ def is_redis_available() -> bool:
     try:
         redis_client.ping()
         return True
-    except:
+    except Exception:
         return False
-
-# ============================================================================
-# STATE MANAGEMENT
-# ============================================================================
 
 def set_agent_state(agent_name: str, state: Dict[str, Any]) -> bool:
     """
@@ -152,10 +142,6 @@ def get_agent_state(agent_name: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Failed to get state for {agent_name}: {e}")
         return None
 
-# ============================================================================
-# PUB/SUB MESSAGING
-# ============================================================================
-
 def publish_event(channel: str, message: str) -> bool:
     """
     Publish a message to a Redis Pub/Sub channel.
@@ -181,10 +167,6 @@ def publish_event(channel: str, message: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to publish event to {channel}: {e}")
         return False
-
-# ============================================================================
-# CACHING
-# ============================================================================
 
 def cache_result(key: str, value: str, ttl: int = 3600) -> bool:
     """
@@ -281,10 +263,6 @@ def clear_all_cache(pattern: str = "*") -> int:
     except Exception as e:
         logger.error(f"Failed to clear cache with pattern '{pattern}': {e}")
         return 0
-
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
 
 def get_cache_stats() -> Dict[str, Any]:
     """

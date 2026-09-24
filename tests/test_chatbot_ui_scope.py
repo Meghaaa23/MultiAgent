@@ -15,13 +15,11 @@ from multiagent.agents.ai_agents.chatbot_ui_probe import (
     ui_warrants_vuln,
 )
 
-
 def test_registrable_domain_strips_subdomain():
     assert registrable_domain("https://www.hubspot.com/") == "hubspot.com"
     assert registrable_domain("https://app.hubspot.com/conversations") == "hubspot.com"
     assert registrable_domain("https://chat.myapp.com") == "myapp.com"
     assert registrable_domain("https://foo.example.co.uk/x") == "example.co.uk"
-
 
 def test_same_etld1_is_in_scope_even_if_cross_origin():
     """Own LLM on product subdomain must not be skipped for being cross-origin."""
@@ -38,7 +36,6 @@ def test_same_etld1_is_in_scope_even_if_cross_origin():
         "https://www.myapp.com/", "https://chat.myapp.com/widget",
     )
 
-
 def test_hubspot_iframe_on_hubspot_is_same_site_inject():
     d = classify_injection_scope(
         "https://www.hubspot.com/",
@@ -48,9 +45,7 @@ def test_hubspot_iframe_on_hubspot_is_same_site_inject():
     )
     assert d.ownership == OwnershipClass.SAME_SITE.value
     assert d.injection_policy == InjectionPolicy.INJECT.value
-    # Reachability is a fact; policy is the decision.
     assert d.reachability == Reachability.CROSS_ORIGIN_FRAME.value
-
 
 def test_hubspot_widget_on_klarna_defaults_to_skip():
     d = classify_injection_scope(
@@ -63,7 +58,6 @@ def test_hubspot_widget_on_klarna_defaults_to_skip():
     assert d.injection_policy == InjectionPolicy.SKIP_INJECT.value
     assert d.reason == "vendor_widget_default_skip"
 
-
 def test_include_thirdparty_overrides_vendor_skip():
     d = classify_injection_scope(
         "https://www.klarna.com/",
@@ -75,7 +69,6 @@ def test_include_thirdparty_overrides_vendor_skip():
     assert d.ownership == OwnershipClass.VENDOR_WIDGET.value
     assert d.injection_policy == InjectionPolicy.INJECT.value
     assert d.reason == "vendor_widget_explicitly_authorized"
-
 
 def test_external_surface_detect_only_until_authorized():
     d = classify_injection_scope(
@@ -92,7 +85,6 @@ def test_external_surface_detect_only_until_authorized():
     )
     assert d2.injection_policy == InjectionPolicy.INJECT.value
 
-
 def test_reachability_is_independent_of_policy():
     assert classify_reachability(
         "https://www.klarna.com/",
@@ -103,9 +95,7 @@ def test_reachability_is_independent_of_policy():
         "https://www.klarna.com/chat",
     ) == Reachability.SAME_ORIGIN.value
 
-
 def test_component_injectable_respects_policy_not_origin_alone():
-    # Hint-tier iframe alone is NOT injectable — need behavioral/structural evidence.
     same_site_iframe_hint = ChatWidget(
         tier="passive_hint",
         scope="app_owned",
@@ -157,7 +147,6 @@ def test_component_injectable_respects_policy_not_origin_alone():
     vendor_auth["submit_allowed"] = True
     assert component_is_injectable(vendor_auth) is True
 
-
 def test_feedback_iframe_not_chat_and_not_injectable():
     from multiagent.agents.ai_agents.chatbot_ui_scope import classify_surface_kind
     assert classify_surface_kind(
@@ -180,7 +169,6 @@ def test_feedback_iframe_not_chat_and_not_injectable():
         url="https://www.hubspot.com/",
     ).to_dict()
     assert component_is_injectable(feedback) is False
-
 
 def test_support_queue_blocked_until_authorized():
     from multiagent.agents.ai_agents.chatbot_ui_scope import (

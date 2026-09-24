@@ -9,11 +9,6 @@ from multiagent.agents.ai_agents.ai_vulnerability_test import (
     TECHNIQUE_FAMILY,
 )
 
-
-# ---------------------------------------------------------------------------
-# Static corpus integrity
-# ---------------------------------------------------------------------------
-
 class TestStaticCorpusIntegrity:
 
     def test_no_indirect_payloads_in_static(self):
@@ -86,17 +81,11 @@ class TestStaticCorpusIntegrity:
 
     def test_objective_diversity(self):
         objectives = {p["objective"] for p in STATIC_PAYLOADS}
-        # Should have more than just echo_token
         assert len(objectives) >= 8
 
     def test_all_difficulties_represented(self):
         difficulties = {p["difficulty"] for p in STATIC_PAYLOADS}
         assert {"low", "medium", "high"} == difficulties
-
-
-# ---------------------------------------------------------------------------
-# build_application_payloads — capability-conditioned path
-# ---------------------------------------------------------------------------
 
 class TestBuildApplicationPayloadsCapability:
 
@@ -147,11 +136,6 @@ class TestBuildApplicationPayloadsCapability:
         for p in payloads:
             assert p["technique"] in TECHNIQUE_FAMILY
 
-
-# ---------------------------------------------------------------------------
-# build_application_payloads — app-type fallback path
-# ---------------------------------------------------------------------------
-
 class TestBuildApplicationPayloadsFallback:
 
     def test_customer_support_fallback(self):
@@ -188,6 +172,5 @@ class TestBuildApplicationPayloadsFallback:
         cs = CapabilitySet(capabilities=[AppCapability.RETRIEVAL])
         payloads_cap = build_application_payloads(ApplicationType.CUSTOMER_SUPPORT, cs)
         payloads_no  = build_application_payloads(ApplicationType.CUSTOMER_SUPPORT, CapabilitySet())
-        # cap path generates retrieval payloads; fallback generates support payloads
         cap_objs = {p["objective"] for p in payloads_cap}
         assert Objective.LEAK_RAG_CHUNK in cap_objs or Objective.IGNORE_POLICY in cap_objs

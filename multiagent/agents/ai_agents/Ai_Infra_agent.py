@@ -20,7 +20,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class AIInfraThreat:
     attack_name:     str
@@ -35,7 +34,6 @@ class AIInfraThreat:
     cve_reference:   str = ""
     atlas_technique: str = ""
     mitigation:      str = ""
-
 
 @dataclass
 class AIInfraScanResult:
@@ -52,11 +50,8 @@ class AIInfraScanResult:
     error:           str = ""
     catch_all_detected: bool = False
     auth_protected_endpoints: list = field(default_factory=list)
-    # Richer per-endpoint classification: [{"url","status","auth_status","reason"}]
-    # auth_status: "authentication_required" (401) | "access_forbidden" (403)
     auth_protected_details: list = field(default_factory=list)
     exposed_endpoints: list = field(default_factory=list)
-
 
 RAY_SERVE_PATHS = ["/-/routes", "/api/serve/routes", "/-/healthz",
                    "/api/serve/deployments", "/api/jobs/", "/dashboard"]
@@ -88,22 +83,21 @@ WRITE_ENDPOINTS = {
 }
 
 INFO_ENDPOINTS = {
-    "/api/show":     ("model metadata",          "MEDIUM", "AML.T0044", "ollama"),
-    "/api/tags":     ("Ollama model list",       "MEDIUM", "AML.T0044", "ollama_list"),
-    "/v1/models":    ("OpenAI-style model list",  "MEDIUM", "AML.T0044", "openai_list"),
-    "/v2/models":    ("Triton model list",       "MEDIUM", "AML.T0044", "triton_list"),
-    "/info":         ("service metadata",        "MEDIUM", "AML.T0044", "generic"),
-    "/openapi.json": ("API schema",              "LOW",    "AML.T0044", "openapi"),
+    "/api/show":     ("model metadata",   "MEDIUM", "AML.T0044", "model_meta"),
+    "/api/tags":     ("model list",       "MEDIUM", "AML.T0044", "model_list"),
+    "/v1/models":    ("model list",       "MEDIUM", "AML.T0044", "openai_list"),
+    "/v2/models":    ("model list",       "MEDIUM", "AML.T0044", "triton_list"),
+    "/info":         ("service metadata", "MEDIUM", "AML.T0044", "generic"),
+    "/openapi.json": ("API schema",       "LOW",    "AML.T0044", "openapi"),
 }
 
 GENERIC_PATHS = {"/docs", "/health", "/healthz", "/readyz", "/metrics",
                  "/openapi.json", "/info", "/ping"}
 
-AI_BODY_SIGNALS = ["model", "embedding", "inference",
-                   "completion", "generate", "torch", "tensorflow", "llm",
-                   "cuda", "gpu", "triton", "ray", "bentoml", "langchain",
-                   "huggingface", "transformers", "tokenizer", "checkpoint",
-                   "choices", "messages", "prompt", "chatflows", "flows"]
+AI_BODY_SIGNALS = [
+    "model", "embedding", "inference", "completion", "generate",
+    "choices", "messages", "prompt", "generated_text", "chatflows", "flows",
+]
 
 CANARY_PATH = "/__scanner_canary_nonexistent_check_xyz789_do_not_create_this_route"
 INFERENCE_PATHS = ["/v1/chat/completions", "/v1/completions", "/api/generate",
@@ -132,10 +126,8 @@ _SEV_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 SKIP_STATUS = {404, 405, 501, 502, 503, 0}
 
-
 def _normalize_caps(capabilities) -> set:
     return {str(c).lower() for c in (capabilities or [])}
-
 
 def _reachability(target_url: str) -> str:
     host = urlparse(target_url).hostname or ""
@@ -151,16 +143,13 @@ def _reachability(target_url: str) -> str:
     except ValueError:
         return "public"
 
-
 def _cap_severity(severity: str, reachability: str) -> str:
     if reachability in ("loopback", "private") and severity in _SEV_ORDER:
         return _SEV_ORDER[max(0, _SEV_ORDER.index(severity) - 1)]
     return severity
 
-
 def _inference_severity(reachability: str) -> str:
     return "CRITICAL" if reachability == "public" else "MEDIUM"
-
 
 def _injection_surface_severity(capabilities) -> str:
     caps = _normalize_caps(capabilities)
@@ -170,13 +159,11 @@ def _injection_surface_severity(capabilities) -> str:
         return "HIGH"
     return "MEDIUM"
 
-
 def _extraction_surface_severity(capabilities) -> str:
     caps = _normalize_caps(capabilities)
     if caps & HIGH_IMPACT_CAPS:
         return "HIGH"
     return "MEDIUM"
-
 
 def _json_body(body: str):
     if not body:
@@ -186,11 +173,9 @@ def _json_body(body: str):
     except Exception:
         return None
 
-
 def _looks_html(ct: str, body: str) -> bool:
     b = (body or "").strip().lower()
     return "html" in (ct or "").lower() or b.startswith(("<!doctype", "<html"))
-
 
 def _has_data(status: int, body: str) -> bool:
     if status != 200:
@@ -198,27 +183,22 @@ def _has_data(status: int, body: str) -> bool:
     b = (body or "").strip().lower()
     return b not in ("", "{}", "[]", "null")
 
-
-def _is_ollama_list(body: str) -> bool:
+def _is_model_list(body: str) -> bool:
     d = _json_body(body)
     return isinstance(d, dict) and isinstance(d.get("models"), list) and len(d["models"]) > 0
-
 
 def _is_openai_list(body: str) -> bool:
     d = _json_body(body)
     return isinstance(d, dict) and d.get("object") == "list" and isinstance(d.get("data"), list)
 
-
 def _is_triton_list(body: str) -> bool:
     d = _json_body(body)
     return isinstance(d, (list, dict))
-
 
 def _is_k8s_body(body: str) -> bool:
     d = _json_body(body)
     if not isinstance(d, dict):
         return False
-    # Require both fields — SPA/auth JSON often has one by coincidence.
     if "kind" in d and "apiVersion" in d:
         return True
     kind = d.get("kind")
@@ -230,7 +210,6 @@ def _is_k8s_body(body: str) -> bool:
         and kind is not None
     )
 
-
 def _is_ai_json(body: str) -> bool:
     d = _json_body(body)
     if not isinstance(d, (dict, list)):
@@ -240,16 +219,14 @@ def _is_ai_json(body: str) -> bool:
         isinstance(d, dict) and any(k in d for k in
                                     ("choices", "response", "message", "models", "data", "generated_text")))
 
-
 _INFO_VALIDATORS = {
-    "ollama_list": _is_ollama_list,
+    "model_list":  _is_model_list,
     "openai_list": _is_openai_list,
     "triton_list": _is_triton_list,
-    "ollama":      lambda b: _json_body(b) is not None,
+    "model_meta":  lambda b: _json_body(b) is not None,
     "generic":     lambda b: _json_body(b) is not None,
     "openapi":     lambda b: _json_body(b) is not None,
 }
-
 
 class AIInfraAgent:
 
@@ -258,8 +235,6 @@ class AIInfraAgent:
         self.client    = openai_client
         self.timeout   = timeout
         self.llm_model = llm_model or os.getenv("AZURE_OPENAI_DEPLOYMENT", "MultiAgentLLM")
-        # Sent with every probe request — reaches AI infra endpoints that are
-        # only exposed post-authentication.
         self.auth_headers = auth_headers or {}
 
     async def scan(self, target_url: str, ai_stack: Optional[dict] = None) -> AIInfraScanResult:
@@ -349,7 +324,6 @@ class AIInfraAgent:
                       catch_all: bool = False) -> list:
         paths_to_probe = []
 
-        # Expand from confirmed path patterns (no product-name catalogs).
         if any(p in confirmed_paths for p in ["/api/tags", "/api/generate", "/api/chat"]):
             paths_to_probe += OLLAMA_PATHS
         if any(p in confirmed_paths for p in ["/v1/models", "/v1/chat/completions"]):
@@ -363,12 +337,9 @@ class AIInfraAgent:
         if any(p in confirmed_paths for p in ["/v2/models", "/v2/health/ready"]):
             paths_to_probe += TRITON_PATHS
 
-        # Always include confirmed fingerprint endpoints.
         paths_to_probe += confirmed_paths
 
-        # Avoid spraying K8s/Ray/management probes onto SPA frontends — massive FP source.
         if not catch_all:
-            # Only expand management/K8s when already confirmed on this host.
             for p in MANAGEMENT_PATHS:
                 if p in confirmed_paths:
                     paths_to_probe.append(p)
@@ -401,7 +372,6 @@ class AIInfraAgent:
             is_catch_all = True
 
         confirmed       = list((ai_stack or {}).get("ml_endpoints") or [])
-        # Also consider auth-gated paths as known AI surfaces (not "exposed").
         for sig in (ai_stack or {}).get("auth_required_paths") or []:
             if isinstance(sig, dict) and sig.get("endpoint"):
                 confirmed.append(sig["endpoint"])
@@ -409,9 +379,7 @@ class AIInfraAgent:
         page_host = urlparse(base_url).netloc
         allowed = self._allowed_hosts(base_url, ai_stack)
 
-        # Catalog expansion only on the page origin — never spray related hosts.
         same_origin_paths: list = []
-        # (origin, path, full_url) for allowlisted cross-origin confirmed endpoints.
         cross_targets: list = []
         for e in confirmed:
             if not e:
@@ -433,7 +401,6 @@ class AIInfraAgent:
         paths_to_probe = self._select_paths(
             list(dict.fromkeys(same_origin_paths)), ai_stack, catch_all=is_catch_all)
 
-        # Dedupe cross-origin confirmed URLs (no catalog expansion on them).
         seen_cross = set()
         cross_unique = []
         for origin, path, full in cross_targets:
@@ -445,7 +412,6 @@ class AIInfraAgent:
         exposed: dict = {}
         auth_hits: list = []
         auth_details: list = []
-        # Work items: (probe_base, path, full_url, use_spa, same_origin)
         work = [
             (base_url, p, base_url + p, is_catch_all, True) for p in paths_to_probe
         ] + [
@@ -478,10 +444,8 @@ class AIInfraAgent:
                 continue
             if verdict == "skip":
                 continue
-            # Defense in depth: never mark non-success/validation statuses as exposed.
             if status in SKIP_STATUS or status in (401, 403):
                 continue
-            # Same-origin keyed by path (threat heuristics); cross-origin by full URL.
             key = path if same_origin else full_url
             exposed[key] = {
                 "status": status, "body": body, "verdict": verdict,
@@ -512,7 +476,6 @@ class AIInfraAgent:
                 ai_shaped = _is_ai_json(body) or any(
                     s in (body or "").lower() for s in AI_BODY_SIGNALS
                 )
-                # Known inference routes: non-HTML JSON 200 is enough in SPA mode.
                 if not ai_shaped and not (is_inference and parsed is not None and not soft_404):
                     if not (is_inference and "json" in (ct or "").lower() and not soft_404):
                         return "skip"
@@ -526,7 +489,6 @@ class AIInfraAgent:
                 return "skip"
             return "exposed"
         if status in (400, 422):
-            # Validation errors prove a real handler; still skip HTML SPA shells.
             if catch_all and not (_json_body(body) or any(
                 s in (body or "").lower() for s in AI_BODY_SIGNALS
             )):
@@ -641,7 +603,6 @@ class AIInfraAgent:
             body = entry.get("body", "")
             verdict = entry.get("verdict")
             if _is_ai_json(body) or verdict == "reached":
-                # Ignore 404/HTML ghosts that slipped through.
                 if entry.get("status") in SKIP_STATUS:
                     continue
                 exposed_inference.append(p)

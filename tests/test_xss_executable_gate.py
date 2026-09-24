@@ -22,10 +22,8 @@ from multiagent.agents.threat_modeling_agent import (
     _is_manual_queue_finding,
 )
 
-
 class TestUrlEncodedHrefIsNotXss:
     def test_canonical_link_percent_encoded_payload(self):
-        # Shape seen on marketing sites: payload only in encoded ?q= inside href=
         body = (
             '<html><head><title>Search</title>'
             f'<link href="https://example.com/search?q=%22%3E%3Cimg+src%3Dx+'
@@ -52,7 +50,6 @@ class TestUrlEncodedHrefIsNotXss:
         )
         assert _xss_marker_only_url_encoded(window, _XSS_MARKER) is True
 
-
 class TestLiveHtmlBreakout:
     def test_raw_img_onerror_passes_gate(self):
         body = (
@@ -77,7 +74,6 @@ class TestLiveHtmlBreakout:
             param_name="q",
         )
         assert ok is True, reason
-
 
 class TestPublisherXssTier:
     def test_http_body_xss_not_publishable_confirmed(self):
@@ -122,7 +118,6 @@ class TestPublisherXssTier:
             "evidence": {"confidence": "Medium", "confirmation_method": "http_body"},
         }
         assert _is_manual_queue_finding(v) is True
-
 
 class TestXssDedupAndBogusParams:
     def test_dedupe_collapses_same_path_params(self):

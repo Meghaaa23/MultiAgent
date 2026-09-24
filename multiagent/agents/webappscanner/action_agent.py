@@ -6,7 +6,6 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-
 _HEADER_FIXES = {
     "nginx": {
         "X-Frame-Options":           'add_header X-Frame-Options "DENY" always;',
@@ -171,7 +170,6 @@ _SAFE_SERVER_PATTERNS = re.compile(
     re.I,
 )
 
-
 def _server_is_leaky(value: str) -> bool:
     """
     Return True only when the Server header value discloses a version or
@@ -188,15 +186,11 @@ def _server_is_leaky(value: str) -> bool:
     v = value.strip()
     if not v:
         return False
-    # Contains a version-like substring (digit.digit pattern)
     if re.search(r"\d+\.\d+", v):
         return True
-    # Matches a bare safe value with no extra tokens
     if _SAFE_SERVER_PATTERNS.fullmatch(v):
         return False
-    # Anything else (unknown software name, composite strings) is leaky
     return True
-
 
 class ActionAgent:
 
@@ -226,8 +220,6 @@ class ActionAgent:
         actions = []
         for finding in confirmed:
             try:
-                # Refuse PoC emission when upstream evidence is empty —
-                # prevents Confirmed/HIGH + "NO EVIDENCE CAPTURED" contradictions.
                 if not self._finding_has_usable_evidence(finding):
                     if verbose:
                         print(
@@ -239,7 +231,6 @@ class ActionAgent:
                     finding, target_url, stack_keywords, hdrs
                 )
                 if action:
-                    # Second gate: action writers must not claim capture without it
                     if action.get("evidence_captured") is False:
                         if verbose:
                             print(
@@ -346,10 +337,6 @@ class ActionAgent:
             return self._action_sensitive_file(vuln_type, location, stack_keywords, evidence)
         else:
             return self._action_generic(vuln_type, severity, location, evidence)
-
-    # ------------------------------------------------------------------
-    # Evidence helpers
-    # ------------------------------------------------------------------
 
     def _evidence_block(self, evidence: Dict, fallback_note: str) -> str:
         """
@@ -479,7 +466,6 @@ class ActionAgent:
         if not isinstance(hdrs, dict):
             hdrs = {}
         hdrs_lower = {str(k).lower(): str(v) for k, v in hdrs.items()}
-        # Scanners write response_headers with "(missing)" — that IS captured evidence.
         headers_were_checked = (
             evidence.get("checked_headers") is not None
             or bool(hdrs)
@@ -529,8 +515,6 @@ class ActionAgent:
         xfo_fix     = _HEADER_FIXES.get(stack_key, _HEADER_FIXES["generic"]).get(
             "X-Frame-Options", "X-Frame-Options: DENY"
         )
-        # CSP alternative must stay in the same dialect as the stack fix —
-        # never append a raw HTTP header line into a JS/nginx/apache snippet.
         _FRAME_ANCESTOR_FIXES = {
             "express": (
                 "// Prefer CSP frame-ancestors (stronger):\n"
@@ -599,7 +583,6 @@ class ActionAgent:
         headers = evidence.get("response_headers") or evidence.get("headers") or {}
         if not isinstance(headers, dict):
             headers = {}
-        # Prefer explicit keys; fall back to standard evidence header map
         acao_value = (
             evidence.get("access_control_allow_origin")
             or headers.get("Access-Control-Allow-Origin")
@@ -610,7 +593,6 @@ class ActionAgent:
         if not reflected_origin:
             req = str(evidence.get("request") or "")
             if "Origin:" in req:
-                # e.g. GET url (Origin: https://evil-cors-test.example.com)
                 reflected_origin = req.split("Origin:", 1)[-1].strip(" )")
             elif acao_value and acao_value != "*":
                 reflected_origin = acao_value
@@ -634,7 +616,6 @@ class ActionAgent:
                 f"# → {'Credentialed' if acac_true else ('Wildcard' if is_star else 'Reflected')} origin accepted."
             )
         else:
-            # Caller gates on evidence_captured=False — do not emit contradiction
             evidence_block = (
                 "# [NO EVIDENCE CAPTURED — ACAO value missing from evidence headers]"
             )
@@ -763,7 +744,6 @@ class ActionAgent:
             f' CVE lookup — attacker narrows exploits to your exact server version.'
         )
 
-        # Fix snippet — stack-aware
         if "nginx" in stack_keywords:
             fix_snippet  = "# nginx.conf\nserver_tokens off;\nmore_clear_headers Server;"
             fix_language = "nginx"
@@ -892,7 +872,6 @@ class ActionAgent:
         tech   = "T" if method == "timing" else "E"
 
         timing_delta = evidence.get("timing_delta_seconds")
-        # Prefer explicit db_error_snippet; fall back to standard body evidence key
         error_text   = (
             evidence.get("db_error_snippet")
             or evidence.get("response_body_snippet")
@@ -1100,7 +1079,6 @@ class ActionAgent:
             f'{evidence_comment}\n'
             'curl -s -i "' + location + '"'
         )
-
 
         is_access_controlled = status_code in (401, 403)
 

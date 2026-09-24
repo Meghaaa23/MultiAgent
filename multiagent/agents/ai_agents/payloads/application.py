@@ -165,4 +165,3 @@ def build_application_payloads(
 
     return payloads
 
-

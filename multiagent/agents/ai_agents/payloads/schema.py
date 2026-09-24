@@ -5,12 +5,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List
 
-
 class InjectionFamily(str, Enum):
     DIRECT = "direct"
     INDIRECT = "indirect"
     AGENTIC = "agentic"
-
 
 FAMILY_DESCRIPTIONS = {
     InjectionFamily.DIRECT: "Direct Prompt Injection - payload delivered in user input",
@@ -18,10 +16,7 @@ FAMILY_DESCRIPTIONS = {
     InjectionFamily.AGENTIC: "Agentic Injection - targets tool invocation or multi-turn pipelines",
 }
 
-
-# Populated by catalog / application payload builders.
 TECHNIQUE_FAMILY: Dict[str, InjectionFamily] = {}
-
 
 class Objective(str, Enum):
     ECHO_TOKEN = "echo_token"
@@ -41,7 +36,6 @@ class Objective(str, Enum):
     HIJACK_PLANNER = "hijack_planner"
     INJECT_OBSERVATION = "inject_observation"
     EXFIL_SCRATCHPAD = "exfil_scratchpad"
-
 
 OBJECTIVE_GOAL: Dict[Objective, str] = {
     Objective.ECHO_TOKEN: "output the canary verification token",
@@ -63,7 +57,6 @@ OBJECTIVE_GOAL: Dict[Objective, str] = {
     Objective.EXFIL_SCRATCHPAD: "read or exfiltrate the agent's internal scratchpad or reasoning trace",
 }
 
-
 class ApplicationType(str, Enum):
     INFERENCE_SERVER = "inference_server"
     FOUNDATION_MODEL_API = "foundation_model_api"
@@ -74,7 +67,6 @@ class ApplicationType(str, Enum):
     MEDICAL = "medical"
     FINANCIAL = "financial"
     GENERIC = "generic"
-
 
 class AppCapability(str, Enum):
     CHAT = "chat"
@@ -89,7 +81,6 @@ class AppCapability(str, Enum):
     WEB_SEARCH = "web_search"
     MULTI_AGENT = "multi_agent"
 
-
 @dataclass
 class CapabilitySet:
     capabilities: List[AppCapability] = field(default_factory=list)
@@ -102,7 +93,6 @@ class CapabilitySet:
     def __repr__(self) -> str:
         return f"CapabilitySet({[c.value for c in self.capabilities]})"
 
-
 class ResponseOutcome(str, Enum):
     EXECUTED = "executed"
     LEAKED = "leaked"
@@ -112,7 +102,6 @@ class ResponseOutcome(str, Enum):
     IGNORED = "ignored"
     HALLUCINATED = "hallucinated"
     ERROR = "error"
-
 
 SUCCESS_OUTCOMES = {
     ResponseOutcome.EXECUTED,

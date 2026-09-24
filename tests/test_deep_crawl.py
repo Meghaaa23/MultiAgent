@@ -9,10 +9,8 @@ sys.path.insert(0, os.path.join(ROOT, "multiagent"))
 
 from multiagent.agents.webappscanner.browser_controller import BrowserController
 
-
 def _bc() -> BrowserController:
     return BrowserController(openai_client=None, llm_model="test")
-
 
 class TestCookieParse:
     def test_parses_cookie_header(self):
@@ -26,14 +24,12 @@ class TestCookieParse:
         assert cookies[0]["value"] == "abc123"
         assert cookies[0]["domain"] == "localhost"
 
-
 class TestDummyFill:
     def test_benign_dummy_values(self):
         bc = _bc()
         assert bc._dummy_value("username", "text") == "testuser"
         assert bc._dummy_value("password", "password") == "TestPassword123!"
         assert bc._dummy_value("email", "email") == "test@example.com"
-
 
 class TestFormNormalize:
     def test_fields_and_inputs_aligned(self):
@@ -45,7 +41,6 @@ class TestFormNormalize:
         })
         assert form["inputs"] == form["fields"]
         assert form["action"].endswith("login.php")
-
 
 class TestHeuristicDeepActions:
     def test_prefers_login_form_when_task_mentions_login(self):
@@ -78,7 +73,6 @@ class TestHeuristicDeepActions:
         assert action["command"] == "CLICK"
         assert action["target_id"] == 0
 
-
 class TestBlackBoxDeepCrawl:
     def test_deep_crawl_return_has_no_auth_fields(self):
         """Black-box mode must not export auth_cookie / authenticated flags."""
@@ -96,7 +90,6 @@ class TestBlackBoxDeepCrawl:
         assert "authenticated" not in result
         assert "api_urls" in result
         assert result["tasks_executed"] == 0
-
 
 class TestApiHarvestAndTaskHeuristics:
     def test_harvestable_api_urls(self):
@@ -137,8 +130,7 @@ class TestApiHarvestAndTaskHeuristics:
         }
         action = bc._heuristic_next_action("Explore search products", state, [])
         assert action["command"] == "CLICK"
-        assert action["target_id"] == 1  # Search over About
-
+        assert action["target_id"] == 1
 
 class TestTaskGenerationUnauthenticated:
     def test_no_credentials_login_task_prepended(self):

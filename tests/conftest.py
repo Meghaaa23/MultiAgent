@@ -11,26 +11,18 @@ from multiagent.agents.ai_agents.ai_vulnerability_test import (
     STATIC_PAYLOADS, CANARY_PREFIX,
 )
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 @pytest.fixture(scope="session")
 def scorer():
     """Jaccard-only scorer — no heavy embedding dependency in CI."""
     return SemanticScorer(enable_embeddings=False)
 
-
 @pytest.fixture
 def canary():
     return "YURA_TESTCANARY"
 
-
 @pytest.fixture
 def baseline():
     return "The answer is four."
-
 
 @pytest.fixture
 def empty_fingerprint():
@@ -40,12 +32,11 @@ def empty_fingerprint():
         "response_headers": {},
     }
 
-
 @pytest.fixture
 def rag_fingerprint():
     return {
         "page_title": "RAG Knowledge Assistant",
-        "technologies": ["pinecone", "langchain"],
+        "technologies": ["vector", "retrieval"],
         "ml_endpoints": ["/api/retrieve", "/api/chat/completions"],
         "app_description": "vector retrieval chatbot",
         "api_schema": {"tools": [{"name": "retrieve", "description": "vector search"}]},
@@ -53,12 +44,11 @@ def rag_fingerprint():
         "response_headers": {},
     }
 
-
 @pytest.fixture
 def cs_fingerprint():
     return {
         "page_title": "Customer Support Helpdesk",
-        "technologies": ["zendesk", "crm"],
+        "technologies": ["ticket", "helpdesk"],
         "ml_endpoints": ["/api/chat"],
         "app_description": "support ticket assistant",
         "api_schema": {},
@@ -66,12 +56,11 @@ def cs_fingerprint():
         "response_headers": {},
     }
 
-
 @pytest.fixture
 def agentic_fingerprint():
     return {
         "page_title": "AutoGen Multi-Agent Workflow",
-        "technologies": ["autogen", "langchain", "redis"],
+        "technologies": ["orchestrator", "multi_agent"],
         "ml_endpoints": ["/api/agent/run", "/api/tool/execute"],
         "app_description": "multi-agent orchestrator",
         "api_schema": {"tools": [

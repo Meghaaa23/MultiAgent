@@ -42,7 +42,6 @@ Generate 5-15 realistic tasks maximum.
 Return ONLY valid JSON.
 """
 
-
 FORM_FILLING_PROMPT = """You are FormGPT, an agent that generates realistic form input data for both normal and security testing.
 
 Form Structure:
@@ -73,7 +72,6 @@ Output JSON:
 
 Return ONLY valid JSON.
 """
-
 
 VULNERABILITY_ANALYSIS_PROMPT = """You are a penetration testing expert analyzing structured test results.
 

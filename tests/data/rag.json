@@ -1,11 +1,9 @@
 {
-    "page_title": "Knowledge Search",
-    "technologies": [
-        "Pinecone",
-        "LangChain"
-    ],
+    "page_title": "RAG Knowledge Assistant",
+    "technologies": [],
     "ml_endpoints": [
-        "/retrieve",
-        "/query"
-    ]
+        "/api/retrieve",
+        "/api/embed"
+    ],
+    "app_description": "vector retrieval"
 }

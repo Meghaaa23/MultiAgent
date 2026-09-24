@@ -17,14 +17,12 @@ from multiagent.agents.webappscanner.vulnerability_tester import (
 )
 from multiagent.agents.webappscanner.browser_controller import BrowserController
 
-
 class TestProbePathSelection:
     def test_php_signal_prefers_ssr_paths(self):
         agent = EndpointDiscoveryAgent(max_probe_paths=40)
         html = '<html><form action="login.php"><input name="username"><input name="password" type="password"></form></html>'
         paths = agent._select_probe_paths(html)
         assert "/login.php" in paths
-        # SSR family should appear before deep API-only brand paths
         assert paths.index("/login.php") < paths.index("/api/v3") if "/api/v3" in paths else True
         assert any(p.endswith(".php") for p in paths[:20])
 
@@ -53,7 +51,6 @@ class TestProbePathSelection:
         for p in brand:
             assert p not in SSR_COMMON_PATHS
             assert p not in API_COMMON_PATHS
-
 
 class TestInjectableUrlSeedingGeneral:
     def test_empty_discovery_uses_generic_templates_only(self):
@@ -116,7 +113,6 @@ class TestInjectableUrlSeedingGeneral:
             assert "challenge" not in path.lower()
             assert "juice" not in path.lower()
 
-
 class TestJsExtractionKeepsApiPaths:
     def test_inline_script_api_paths_extracted(self):
         agent = EndpointDiscoveryAgent(max_probe_paths=40)
@@ -137,7 +133,6 @@ class TestJsExtractionKeepsApiPaths:
         urls = [e["url"] for e in eps]
         assert any("/rest/products/search" in u for u in urls)
         assert any("application-configuration" in u for u in urls)
-
 
 class TestBrowserCrawlGeneral:
     def test_parse_keeps_links_without_query(self):

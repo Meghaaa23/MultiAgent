@@ -395,4 +395,3 @@ STATIC_PAYLOADS: List[Dict] = [
 for _p in STATIC_PAYLOADS:
     TECHNIQUE_FAMILY[_p["technique"]] = _p["family"]
 
-

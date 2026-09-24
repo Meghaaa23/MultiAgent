@@ -8,11 +8,9 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-
 AVID_BASE_URL   = "https://avidml.org"
 AVID_DB_URL     = "https://avidml.org/database/"
 AVID_API_URL    = "https://avidml.org/database/AVID"
-
 
 LIBRARY_SEARCH_TERMS = {
     "pytorch":       ["pytorch", "torch"],
@@ -32,7 +30,6 @@ LIBRARY_SEARCH_TERMS = {
     "pickle":        ["pickle", "picklescan", "deserialization"],
     "jupyter":       ["jupyter", "notebook"],
 }
-
 
 AVID_BACKDOOR_ENTRIES = [
     {
@@ -156,7 +153,6 @@ AVID_BACKDOOR_ENTRIES = [
         "ai_backdoor_relevant": True,
     },
 ]
-
 
 class AVIDLookupAgent:
 
@@ -293,27 +289,33 @@ class AVIDLookupAgent:
     def _get_static_backdoor_entries(self, ml_stack: List[str],
                                       ai_fingerprint: Dict) -> List[Dict]:
         relevant = []
-        stack_lower = " ".join(ml_stack).lower()
+        observed = " ".join(
+            [str(x) for x in (ml_stack or [])]
+            + [str(x) for x in (ai_fingerprint or {}).get("technologies") or []]
+            + [str(x) for x in (ai_fingerprint or {}).get("discovered_paths") or []]
+            + [str(x) for x in (ai_fingerprint or {}).get("ml_endpoints") or []]
+        ).lower()
 
         for entry in AVID_BACKDOOR_ENTRIES:
             title_lower = entry["title"].lower()
             desc_lower  = entry["description"].lower()
+            blob = title_lower + " " + desc_lower
 
             if ai_fingerprint.get("model_upload_endpoints"):
-                if any(kw in title_lower or kw in desc_lower
-                       for kw in ["pickle", "deserialization", "model load"]):
+                if any(kw in blob for kw in ["pickle", "deserialization", "model load"]):
                     relevant.append(entry)
                     continue
 
-            lib_keywords = ["pytorch", "tensorflow", "keras", "bentoml",
-                            "langflow", "llamaindex", "mlflow", "onnx"]
-            for kw in lib_keywords:
-                if kw in stack_lower and kw in (title_lower + desc_lower):
-                    relevant.append(entry)
-                    break
-
-            if entry.get("severity") == "Critical" and \
-               entry.get("ai_backdoor_relevant"):
+            # Only attach an advisory when this app's own surface mentions it.
+            subject_tokens = [
+                tok for tok in re.findall(r"[a-z][a-z0-9_.-]{3,}", blob)
+                if tok not in {
+                    "allows", "remote", "code", "execution", "insecure",
+                    "deserialization", "malicious", "model", "files",
+                    "arbitrary", "via", "server", "leads", "through",
+                }
+            ]
+            if any(tok in observed for tok in subject_tokens[:8]) and observed.strip():
                 if entry not in relevant:
                     relevant.append(entry)
 

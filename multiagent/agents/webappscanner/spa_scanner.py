@@ -1,4 +1,3 @@
-# agents/webappscanner/spa_scanner.py
 """
 Universal SPA Scanner
 =====================
@@ -32,11 +31,6 @@ from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Framework detection
-# ---------------------------------------------------------------------------
-
 FRAMEWORK_SIGNATURES = {
     "angular": ["ng-version", "ng-app", "__ngContext__", "app-root",
                 "router-outlet", "platformBrowserDynamic", "NgModule"],
@@ -49,17 +43,15 @@ FRAMEWORK_SIGNATURES = {
     "svelte":  ["__svelte", "svelte-", "SvelteComponent", "svelte/internal"],
 }
 
-# Server-side signals — if present, skip SPA scanning entirely
 SERVER_SIDE_SIGNALS = [
-    "wp-content", "wp-json",            # WordPress
-    "sites/default/files",              # Drupal
-    "/components/com_",                 # Joomla
-    "csrfmiddlewaretoken",              # Django
-    "authenticity_token",               # Rails
-    "__VIEWSTATE",                      # ASP.NET WebForms
+    "wp-content", "wp-json",
+    "sites/default/files",
+    "/components/com_",
+    "csrfmiddlewaretoken",
+    "authenticity_token",
+    "__VIEWSTATE",
 ]
 
-# Route URL patterns extracted from JS bundles
 ROUTE_PATTERNS = [
     r"""path\s*:\s*['"]([a-zA-Z0-9/_-]{1,60})['"]""",
     r"""(?:path|to)\s*=\s*['"]([/][a-zA-Z0-9/_-]{1,60})['"]""",
@@ -71,7 +63,6 @@ ROUTE_PATTERNS = [
     r"""(?:fetch|axios\.(?:get|post|put|delete))\(['"]([/][a-zA-Z0-9/_-]{1,60})""",
 ]
 
-# Keywords that suggest a route likely has user-input forms
 FORM_ROUTE_KEYWORDS = [
     "login", "signin", "sign-in", "auth", "register", "signup", "sign-up",
     "contact", "feedback", "support", "message", "search", "find", "query",
@@ -80,7 +71,6 @@ FORM_ROUTE_KEYWORDS = [
     "comment", "review", "rate", "order", "cart",
 ]
 
-# Minimal fallback — only if discovery finds < 3 routes
 FALLBACK_PATHS = ["/login", "/register", "/search", "/contact"]
 
 ANGULAR_READY_SELECTORS = [
@@ -92,11 +82,6 @@ GENERIC_READY_SELECTORS = [
     "form", "input", "nav", "header", "main", "[data-testid]",
     ".container", "#root > *", "#app > *",
 ]
-
-
-# ===========================================================================
-# Main class
-# ===========================================================================
 
 class SPAScanner:
     """
@@ -121,19 +106,16 @@ class SPAScanner:
         """
         base = _normalise_base(base_url)
 
-        # Fetch raw HTTP response
         status, raw_html, raw_headers = _fetch(base)
         if not raw_html and status == 0:
             logger.warning(f"SPAScanner: cannot reach {base}")
             return _empty_result()
 
-        # Skip server-side frameworks — they don't need Playwright
         if _is_server_side(raw_html):
             if verbose:
                 print(f"   ℹ SPAScanner: server-side framework — skipping")
             return _empty_result()
 
-        # Detect SPA framework
         framework, is_spa = _detect_framework(raw_html, raw_headers)
         if not is_spa:
             if verbose:
@@ -146,16 +128,13 @@ class SPAScanner:
         if not self._has_playwright:
             return {**_empty_result(), "is_spa": True, "framework": framework}
 
-        # Discover routes from the app itself
         routes = await self._discover_routes(base, raw_html, verbose)
         if verbose:
             form_routes = sum(1 for r in routes if r["has_form_hint"])
             print(f"   ✓ Routes: {len(routes)} ({form_routes} with form hints)")
 
-        # Visit routes with Playwright
         all_forms, all_urls = await self._visit_routes(base, routes, framework, verbose)
 
-        # Discover REST/API endpoints from JS bundles
         api_urls = await self._discover_api_endpoints(base, raw_html, verbose)
         all_urls.extend(api_urls)
 
@@ -168,11 +147,6 @@ class SPAScanner:
             "urls":           list(set(all_urls)),
         }
 
-    # ------------------------------------------------------------------
-    # Route discovery — fully dynamic, no hardcoded paths
-    # Returns List[Dict] with keys: url, path, has_form_hint, priority
-    # ------------------------------------------------------------------
-
     async def _discover_routes(self, base: str, raw_html: str,
                                 verbose: bool) -> List[Dict]:
         """
@@ -181,36 +155,28 @@ class SPAScanner:
         """
         discovered: Set[str] = set()
 
-        # Method 1: Rendered hrefs from Playwright homepage visit
         rendered = await self._extract_rendered_hrefs(base, verbose)
         discovered.update(rendered)
 
-        # Method 2: JS bundle route configs
         js_routes = await self._extract_js_routes(base, raw_html, verbose)
         discovered.update(js_routes)
 
-        # Method 3: robots.txt + sitemap.xml
         static = await self._extract_static_hints(base)
         discovered.update(static)
 
-        # Method 4: Fallback — minimal structural routes
-        # Only added if we found very few routes through other methods
         if len(discovered) < 3:
             if verbose:
                 print(f"      < 3 routes found — adding structural fallbacks")
             discovered.update(FALLBACK_PATHS)
 
-        # Build route objects with priority scoring
         routes = []
         for path in discovered:
-            # Skip routes that shouldn't be visited
             if any(skip in path.lower() for skip in
                    ["logout", "signout", "sign-out", "delete",
                     ".js", ".css", ".png", ".jpg", ".ico", "favicon"]):
                 continue
 
             has_form = any(kw in path.lower() for kw in FORM_ROUTE_KEYWORDS)
-            # Form-likely routes first (lower score = higher priority)
             priority = (0 if has_form else 1) * 100 + len(path)
 
             routes.append({
@@ -312,7 +278,6 @@ class SPAScanner:
     async def _extract_static_hints(self, base: str) -> Set[str]:
         """Method 3: Parse robots.txt and sitemap.xml for path hints."""
         paths: Set[str] = set()
-        # robots.txt
         try:
             _, body, _ = _fetch(f"{base}/robots.txt")
             if body:
@@ -324,7 +289,6 @@ class SPAScanner:
                             paths.add(path.split("?")[0])
         except Exception:
             pass
-        # sitemap.xml
         try:
             _, body, _ = _fetch(f"{base}/sitemap.xml")
             if body:
@@ -353,7 +317,6 @@ class SPAScanner:
             r'<script[^>]+src=[\'"]([^\'"]+\.js[^\'"]*)[\'"]',
             raw_html, re.IGNORECASE
         )
-        # Prefer main/runtime bundles where REST paths usually live
         def _prio(u: str) -> int:
             ul = u.lower()
             s = 0
@@ -384,10 +347,6 @@ class SPAScanner:
         if verbose and api_urls:
             print(f"      API endpoints discovered: {len(api_urls)}")
         return api_urls[:25]
-
-    # ------------------------------------------------------------------
-    # Route visiting with Playwright
-    # ------------------------------------------------------------------
 
     async def _visit_routes(self, base: str, routes: List[Dict],
                              framework: str,
@@ -454,19 +413,12 @@ class SPAScanner:
 
         return all_forms, all_urls
 
-
-# ===========================================================================
-# Module-level helpers
-# ===========================================================================
-
 def _normalise_base(url: str) -> str:
     return url.split("#")[0].rstrip("/") if url.startswith("http") \
            else "http://" + url.split("#")[0].rstrip("/")
 
-
 def _build_url(base: str, path: str) -> str:
     return base + path if path.startswith("/") else base + "/" + path
-
 
 def _fetch(url: str, max_bytes: int = 65536) -> Tuple[int, str, Dict]:
     try:
@@ -482,14 +434,12 @@ def _fetch(url: str, max_bytes: int = 65536) -> Tuple[int, str, Dict]:
     except Exception:
         return 0, "", {}
 
-
 def _is_server_side(html: str) -> bool:
     """Returns True if HTML contains server-side framework signals."""
     if not html:
         return False
     html_lower = html.lower()
     return any(s.lower() in html_lower for s in SERVER_SIDE_SIGNALS)
-
 
 def _detect_framework(html: str,
                        headers: Dict) -> Tuple[str, bool]:
@@ -508,12 +458,10 @@ def _detect_framework(html: str,
         return "none", False
     return max(scores, key=lambda k: scores[k]), True
 
-
 def _empty_result() -> Dict:
     return {"is_spa": False, "framework": "none",
             "routes_found": 0, "routes_visited": 0,
             "forms": [], "urls": []}
-
 
 async def _dismiss_overlays(page) -> None:
     """Dismiss cookie banners / GDPR modals — framework-agnostic."""
@@ -531,7 +479,6 @@ async def _dismiss_overlays(page) -> None:
                     break
         except Exception:
             pass
-
 
 async def _extract_forms(page, page_url: str,
                           framework: str) -> List[Dict]:
@@ -646,7 +593,6 @@ async def _extract_forms(page, page_url: str,
     except Exception as e:
         logger.debug(f"Form extraction failed: {e}")
         return []
-
 
 def _dedup_forms(forms: List[Dict]) -> List[Dict]:
     seen: Set[str] = set()

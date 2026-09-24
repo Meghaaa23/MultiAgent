@@ -1,4 +1,3 @@
-# dev_ai_scan.py
 
 import asyncio, argparse, json, os, logging
 from dotenv import load_dotenv
@@ -24,7 +23,6 @@ def get_openai_client():
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT"),
     )
 
-
 async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
                              verbose: bool,
                              scope_policy=None,
@@ -41,7 +39,6 @@ async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
 
     components = widgets_to_chat_components(result.widgets)
     existing = list(ai_fingerprint.get("chat_components") or [])
-    # Prefer Playwright selectors; keep unique provider hints.
     merged = components + [
         c for c in existing
         if c.get("source") == "static_html"
@@ -59,7 +56,6 @@ async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
             f"submit={w.get('submit_allowed')} provider={w.get('provider') or '-'} "
             f"via={w.get('source')}"
         )
-    # Merge UI taxonomy evidence into fingerprint evidence list when present.
     evidence = list(ai_fingerprint.get("evidence_items") or [])
     existing_keys = {e.get("key") for e in evidence if isinstance(e, dict)}
     for w in merged:
@@ -89,7 +85,6 @@ async def _enrich_chatbot_ui(ai_fingerprint: dict, target_url: str,
         existing_keys.add(key)
     ai_fingerprint["evidence_items"] = evidence
     return ai_fingerprint
-
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -253,7 +248,6 @@ async def main():
             verbose        = args.verbose,
         )
         print(f"\n  AVID findings: {avid_result['total_found']}")
-
 
 if __name__ == "__main__":
     asyncio.run(main())

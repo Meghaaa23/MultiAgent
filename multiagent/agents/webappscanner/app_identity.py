@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 _APP_IDENTITY_MIN_CONFIDENCE = 88
 
-
 @dataclass
 class AppIdentity:
     name:         Optional[str]  = None
@@ -30,7 +29,6 @@ class AppIdentity:
                 q += f" {self.version}"
             return q
         return None
-
 
 def _from_generator_meta(html: str) -> Tuple[Optional[str], Optional[str], str]:
     m = re.search(
@@ -52,7 +50,6 @@ def _from_generator_meta(html: str) -> Tuple[Optional[str], Optional[str], str]:
     if not _looks_like_app_name(name):
         return None, None, ""
     return name, version, f"generator meta: {content!r}"
-
 
 def _from_powered_by(html: str, headers: Dict) -> Tuple[Optional[str], Optional[str], str]:
     powered_by = headers.get("x-powered-by", "")
@@ -76,7 +73,6 @@ def _from_powered_by(html: str, headers: Dict) -> Tuple[Optional[str], Optional[
 
     return None, None, ""
 
-
 def _title_segment_brand_score(candidate: str) -> int:
     """
     Rank page-title segments for product identity.
@@ -87,7 +83,6 @@ def _title_segment_brand_score(candidate: str) -> int:
         return -1
     words = s.split()
     score = 50
-    # Marketing / slogan cues
     if len(words) >= 4:
         score -= 40
     if re.match(
@@ -99,17 +94,15 @@ def _title_segment_brand_score(candidate: str) -> int:
         s, re.I,
     ):
         score -= 30
-    # Compact product tokens score up
     if len(words) == 1:
         score += 40
-    if re.search(r"[A-Z]{2,}|[a-z][A-Z]", s):  # LLM, AnythingLLM, OpenWebUI
+    if re.search(r"[A-Z]{2,}|[a-z][A-Z]", s):
         score += 25
     if len(s) <= 24:
         score += 10
     if len(s) > 32:
         score -= 15
     return score
-
 
 def _from_page_title(html: str) -> Tuple[Optional[str], Optional[str], str]:
     m = re.search(r'<title[^>]*>([^<]{1,200})</title>', html, re.IGNORECASE)
@@ -118,14 +111,12 @@ def _from_page_title(html: str) -> Tuple[Optional[str], Optional[str], str]:
 
     title = m.group(1).strip()
     segments = re.split(r'\s*[-|–—·•]\s*', title)
-    # Prefer left brand ("AnythingLLM | slogan"), then other segments
     ordered = []
     if segments:
         ordered.append(segments[0].strip())
         ordered.extend(s.strip() for s in segments[1:])
         if len(segments) > 1:
             ordered.append(segments[-1].strip())
-    # Dedup while scoring
     best_name = None
     best_score = -1
     for candidate in ordered:
@@ -140,7 +131,6 @@ def _from_page_title(html: str) -> Tuple[Optional[str], Optional[str], str]:
         return name, version, f"page title: {title!r}"
 
     return None, None, ""
-
 
 def _from_html_comments(html: str) -> Tuple[Optional[str], Optional[str], str]:
     for m in re.finditer(r'<!--\s*(.*?)\s*-->', html[:5000]):
@@ -157,7 +147,6 @@ def _from_html_comments(html: str) -> Tuple[Optional[str], Optional[str], str]:
                     return name, version, f"HTML comment: {comment!r}"
     return None, None, ""
 
-
 def _from_data_attributes(html: str) -> Tuple[Optional[str], Optional[str], str]:
     m = re.search(
         r'data-(?:app|application|platform|software)=["\']([^"\']{2,40})["\']',
@@ -169,7 +158,6 @@ def _from_data_attributes(html: str) -> Tuple[Optional[str], Optional[str], str]
             return name, None, f"data attribute: {name!r}"
     return None, None, ""
 
-
 def _from_wp_json(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
     """
     WordPress REST root + generator — definitive CMS identity when exposed.
@@ -180,7 +168,6 @@ def _from_wp_json(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
     version: Optional[str] = None
     evidence_parts: List[str] = []
 
-    # Root index often includes site name; version may appear in namespaces/GMT
     for path in ("/wp-json", "/wp-json/"):
         try:
             req = urllib.request.Request(
@@ -199,14 +186,12 @@ def _from_wp_json(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
                     continue
                 data = json.loads(body)
                 evidence_parts.append(f"wp-json root HTTP 200")
-                # Some installs expose generator / version in extras
                 ver = _find_in_json(
                     data,
                     ("version", "wp_version", "wordpress_version", "generator"),
                 )
                 if ver and re.search(r"\d+\.\d+", str(ver)):
                     version = _extract_version_from_string(str(ver)) or str(ver)
-                # Confirm it looks like WP REST
                 if isinstance(data, dict) and (
                     "namespaces" in data or "routes" in data or "name" in data
                 ):
@@ -214,8 +199,6 @@ def _from_wp_json(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
         except Exception:
             continue
 
-    # Generator-style version from wp/v2 settings or types is rare; try users
-    # only as surface evidence (enumeration), not for version.
     try:
         req = urllib.request.Request(
             base + "/wp-json/wp/v2/users",
@@ -239,7 +222,6 @@ def _from_wp_json(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
     if not evidence_parts:
         return None, None, ""
     return name, version, "; ".join(evidence_parts)
-
 
 def _from_version_api(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
     version_paths = [
@@ -295,7 +277,6 @@ def _from_version_api(base_url: str) -> Tuple[Optional[str], Optional[str], str]
 
     return None, None, ""
 
-
 def _from_robots_txt(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
     try:
         url = base_url.rstrip("/") + "/robots.txt"
@@ -312,7 +293,6 @@ def _from_robots_txt(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
         pass
     return None, None, ""
 
-
 def _pick_preferred_wappalyzer_app(
     wappalyzer_technologies: List,
 ) -> Optional[Dict]:
@@ -328,21 +308,18 @@ def _pick_preferred_wappalyzer_app(
         if not name or _is_infra_or_framework_name(name):
             continue
         category = (tech.get("category") or "").strip()
-        # Framework/Language/Server are stack, not product identity
         if category in ("Framework", "Language", "Server", "CDN", "Analytics"):
             continue
         if category == "CMS":
-            return tech  # CMS is authoritative
+            return tech
         if category == "Other" and name not in (
             "Ubuntu", "Debian", "HTTP/2", "HTTP/3", "HSTS", "OpenSSL",
         ):
-            # Prefer versioned app-like names over bare platform hints
             if preferred is None or (
                 tech.get("version") and not preferred.get("version")
             ):
                 preferred = tech
     return preferred
-
 
 async def detect_app_identity(
     base_url: str,
@@ -400,7 +377,6 @@ async def detect_app_identity(
             None, lambda: _from_version_api(base_url)
         )
         if name or version:
-            # WordPress REST often returns version without a product name
             if not name and version:
                 name = "WordPress"
             signals.append((name, version, evidence, 95 if version else 90))
@@ -465,7 +441,6 @@ async def detect_app_identity(
         _build_cve_queries(identity, technologies)
         return identity
 
-    # Drop infrastructure/framework names that slipped through extractors
     signals = [
         s for s in signals
         if s[0] and _looks_like_app_name(s[0]) and not _is_infra_or_framework_name(s[0])
@@ -484,14 +459,12 @@ async def detect_app_identity(
     if best:
         best_name, best_version, best_evidence, best_score = best
 
-    # Wappalyzer CMS / preferred app can override or fill gaps — never wipe.
     preferred_app = _pick_preferred_wappalyzer_app(wappalyzer_technologies)
     if preferred_app and preferred_app.get("name"):
         pref_name = preferred_app["name"]
         pref_ver = preferred_app.get("version")
         pref_cat = preferred_app.get("category") or ""
         if pref_cat == "CMS":
-            # Authoritative CMS identity
             if not best_name or best_score < 100:
                 best_name = pref_name
                 best_score = max(best_score, 85)
@@ -554,7 +527,6 @@ async def detect_app_identity(
 
     return identity
 
-
 def _build_cve_queries(identity: AppIdentity,
                         technologies: List[str]) -> None:
     queries = []
@@ -567,8 +539,6 @@ def _build_cve_queries(identity: AppIdentity,
             queries.append(t)
     identity.cve_queries = queries
 
-
-# Runtimes / frameworks / servers are stack signals, not product identity.
 _INFRA_OR_FRAMEWORK_NAMES = {
     "express", "node", "nodejs", "node.js", "nginx", "apache", "httpd",
     "iis", "tomcat", "jetty", "uvicorn", "gunicorn", "werkzeug", "php",
@@ -582,7 +552,6 @@ _INFRA_OR_FRAMEWORK_NAMES = {
     "openssl", "ubuntu", "debian", "alpine", "centos", "redhat",
 }
 
-
 def _is_infra_or_framework_name(s: str) -> bool:
     n = re.sub(r"\s+", " ", (s or "").strip().lower())
     n = re.sub(r"\s*\d[\d.]*\s*$", "", n).strip()
@@ -590,10 +559,8 @@ def _is_infra_or_framework_name(s: str) -> bool:
         return True
     if n in _INFRA_OR_FRAMEWORK_NAMES:
         return True
-    # x-powered-by style "Express" / "PHP/8.2"
     base = n.split("/")[0].strip()
     return base in _INFRA_OR_FRAMEWORK_NAMES
-
 
 def _looks_like_app_name(s: str) -> bool:
     if not s or not isinstance(s, str):
@@ -609,10 +576,8 @@ def _looks_like_app_name(s: str) -> bool:
         return False
     if re.match(r'^\d+$', s):
         return False
-    # Never promote stack/runtime names to product identity
     if _is_infra_or_framework_name(s):
         return False
-    # Marketing slogans are not product names
     words = s.split()
     if len(words) >= 5:
         return False
@@ -635,11 +600,9 @@ def _looks_like_app_name(s: str) -> bool:
 
     return True
 
-
 def _extract_version_from_string(s: str) -> Optional[str]:
     m = re.search(r'\bv?(\d+\.\d+(?:\.\d+)*)\b', s)
     return m.group(1) if m else None
-
 
 def _find_in_json(data, keys: tuple) -> Optional[str]:
     if not isinstance(data, dict):
@@ -654,7 +617,6 @@ def _find_in_json(data, keys: tuple) -> Optional[str]:
                 if nested and isinstance(nested, str):
                     return nested
     return None
-
 
 def _extract_technologies_from_headers(headers: Dict) -> List[str]:
     techs = []

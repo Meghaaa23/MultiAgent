@@ -1,10 +1,9 @@
 {
-    "page_title": "Customer Support AI",
-    "technologies": [
-        "LangChain"
-    ],
+    "page_title": "Support Helpdesk",
+    "technologies": [],
     "ml_endpoints": [
-        "/chat",
-        "/tickets"
-    ]
+        "/api/ticket",
+        "/api/refund"
+    ],
+    "app_description": "support ticket assistant"
 }

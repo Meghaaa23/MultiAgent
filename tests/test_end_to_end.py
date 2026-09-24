@@ -21,16 +21,10 @@ from multiagent.agents.ai_agents.ai_vulnerability_test import (
     AIVulnerabilityTester, ResponseOutcome, ApplicationType, CapabilitySet,
 )
 
-
-# ---------------------------------------------------------------------------
-# Mock HTTP servers
-# ---------------------------------------------------------------------------
-
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("", 0))
         return s.getsockname()[1]
-
 
 def _run_server(handler_class, port: int):
     srv = HTTPServer(("127.0.0.1", port), handler_class)
@@ -38,11 +32,10 @@ def _run_server(handler_class, port: int):
     t.start()
     return srv
 
-
 class VulnerableHandler(BaseHTTPRequestHandler):
     """Echoes back whatever 'content' or 'prompt' is in the request body."""
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length  = int(self.headers.get("Content-Length", 0))
         body    = json.loads(self.rfile.read(length) or "{}")
         content = (body.get("messages", [{}])[0].get("content", "")
@@ -63,11 +56,10 @@ class VulnerableHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-
 class RefusingHandler(BaseHTTPRequestHandler):
     """Always returns a refusal, never echoes payload content."""
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         resp = json.dumps({"choices": [{"message": {
@@ -85,11 +77,10 @@ class RefusingHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-
 class LeakingHandler(BaseHTTPRequestHandler):
     """Returns a response that contains system-prompt leak markers."""
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         resp = json.dumps({"choices": [{"message": {
@@ -112,17 +103,11 @@ class LeakingHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 @pytest.fixture(scope="module")
 def vulnerable_url():
     port = _free_port()
     _run_server(VulnerableHandler, port)
     return f"http://127.0.0.1:{port}"
-
 
 @pytest.fixture(scope="module")
 def refusing_url():
@@ -130,13 +115,11 @@ def refusing_url():
     _run_server(RefusingHandler, port)
     return f"http://127.0.0.1:{port}"
 
-
 @pytest.fixture(scope="module")
 def leaking_url():
     port = _free_port()
     _run_server(LeakingHandler, port)
     return f"http://127.0.0.1:{port}"
-
 
 @pytest.fixture
 def tester():
@@ -147,7 +130,6 @@ def tester():
         enable_embeddings=False,
         mutation_sample=2,
     )
-
 
 def _fingerprint(url: str) -> dict:
     return {
@@ -160,11 +142,6 @@ def _fingerprint(url: str) -> dict:
         "discovered_paths": [],
         "response_headers": {},
     }
-
-
-# ---------------------------------------------------------------------------
-# test_all() — operational scan
-# ---------------------------------------------------------------------------
 
 class TestTestAll:
 
@@ -209,8 +186,6 @@ class TestTestAll:
         assert len(result["atlas_techniques_tested"]) > 0
 
     def test_leaking_server_finds_leak(self, leaking_url):
-        # Use a higher budget so leak payloads (which require divergence from baseline)
-        # have room to run after baseline + early direct payloads
         leak_tester = AIVulnerabilityTester(
             timeout=3, rate_limit_delay=0.0, max_requests=150,
             enable_embeddings=False, mutation_sample=1,
@@ -220,11 +195,6 @@ class TestTestAll:
         leak_findings = [f for f in result["confirmed_ai_vulns"]
                          if f["outcome"] == "leaked"]
         assert len(leak_findings) > 0
-
-
-# ---------------------------------------------------------------------------
-# evaluate() — full matrix + ASR
-# ---------------------------------------------------------------------------
 
 class TestEvaluate:
 
@@ -268,7 +238,6 @@ class TestEvaluate:
         for attempt in result["attempts"]:
             for field in ["category", "technique", "objective", "outcome",
                           "success", "variant_kind", "mutation"]:
-                # Note: 'category' renamed to 'family' internally but check what's returned
                 assert field in attempt or "family" in attempt
 
     def test_semantic_backend_reported(self, tester, refusing_url):
@@ -281,30 +250,24 @@ class TestEvaluate:
         fp = _fingerprint(refusing_url)
         result = asyncio.run(tester.evaluate(fp, refusing_url))
         strict_asr = result["evaluation"]["asr_overall"]["strict"]
-        assert strict_asr < 0.3   # should be near 0 for a consistently refusing server
+        assert strict_asr < 0.3
 
     def test_vulnerable_server_asr_is_high(self, tester, vulnerable_url):
         fp = _fingerprint(vulnerable_url)
         result = asyncio.run(tester.evaluate(fp, vulnerable_url))
         strict_asr = result["evaluation"]["asr_overall"]["strict"]
-        assert strict_asr > 0.3   # echo-all server should have high ASR
-
-
-# ---------------------------------------------------------------------------
-# Scope and budget enforcement
-# ---------------------------------------------------------------------------
+        assert strict_asr > 0.3
 
 class TestScopeAndBudget:
 
     def test_out_of_scope_endpoint_skipped(self, tester):
         fp = {
             "page_title": "", "technologies": [], "chat_components": [],
-            "ml_endpoints": ["http://evil.example.com/api/chat"],  # different host
+            "ml_endpoints": ["http://evil.example.com/api/chat"],
             "app_description": "", "api_schema": {}, "discovered_paths": [],
             "response_headers": {},
         }
         result = asyncio.run(tester.test_all(fp, "http://127.0.0.1:9999"))
-        # Nothing should have been tested
         assert result["requests_sent"] == 0
 
     def test_budget_limits_requests(self, vulnerable_url):

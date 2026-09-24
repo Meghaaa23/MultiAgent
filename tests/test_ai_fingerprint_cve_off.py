@@ -13,7 +13,6 @@ from multiagent.agents.threat_modeling_agent import (
 )
 from multiagent.agents.ai_agents.ai_evidence_scoring import score_evidence
 
-
 class TestSection2FingerprintOnly:
     def test_no_orphan_cve_dump(self):
         text = _build_section_2(
@@ -46,7 +45,6 @@ class TestSection2FingerprintOnly:
         )
         assert "LibreChat" in text
 
-
 class TestStrideNoDoubleSeeSection3:
     def test_no_double_prefix(self):
         text = _build_section_5(
@@ -68,7 +66,6 @@ class TestStrideNoDoubleSeeSection3:
             }],
         )
         assert text.count("See Section 3") == 1
-
 
 class TestLiveSurfaceGateNoNameHardcoding:
     """Scanner must escalate on live surface, not product-name lists."""
@@ -113,8 +110,10 @@ class TestLiveSurfaceGateNoNameHardcoding:
 
     def test_taxonomy_brand_vs_live(self):
         assert score_evidence(["framework_identified"]).is_ai is False
-        assert score_evidence(["ml_endpoint_401_403"]).is_ai is True
-
+        r = score_evidence(["ml_endpoint_401_403"])
+        assert r.is_ai is False
+        assert r.has_route_confirmed is True
+        assert score_evidence(["chat_endpoint_200"]).is_ai is True
 
 class TestSection8AuthGatedAndRecommendations:
     def _scan(self, vulns, strategic=None):
@@ -172,7 +171,6 @@ class TestSection8AuthGatedAndRecommendations:
         assert "8.4 Strategic Recommendations" in text
         assert "no AI-specific attack surfaces identified" not in text
         assert "AI chat/inference surfaces were identified" in text
-
 
 if __name__ == "__main__":
     fails = 0

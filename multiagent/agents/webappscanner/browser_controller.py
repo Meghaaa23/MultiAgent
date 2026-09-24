@@ -1,4 +1,3 @@
-# agents/browser_controller.py
 
 import asyncio
 import json
@@ -7,8 +6,15 @@ import logging
 from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse, urljoin, urlsplit
 
-logger = logging.getLogger(__name__)
+from .navigation_model import NavigationGraph, normalize_state_url
+from .interstate_tracker import (
+    InterstateTracker,
+    stored_xss_payload,
+    stored_xss_executed,
+    stored_xss_breakout,
+)
 
+logger = logging.getLogger(__name__)
 
 class BrowserController:
     """
@@ -16,6 +22,10 @@ class BrowserController:
 
     Deep crawl keeps one anonymous Playwright context across tasks, harvesting
     forms/links at every step. Black-box unauthenticated only — no login/creds.
+
+    Beyond YuraScanner (XSS-only) and Black Widow (XSS + inter-state):
+    the shared session also builds a navigation graph and plants benign
+    canaries so SQLi/CSRF testers can rank stored/state-changing surfaces.
     """
 
     def __init__(self, openai_client, llm_model: str = "Qwen-2.5"):
@@ -23,28 +33,27 @@ class BrowserController:
         self.llm_model      = llm_model
         self.action_history: List[Dict] = []
 
-        # Shared deep-crawl Playwright session (one browser across tasks)
         self._pw = None
         self._browser = None
         self._context = None
         self._page = None
         self._session_base: str = ""
         self._visited_urls: Set[str] = set()
-        # Same-host XHR/fetch/API URLs observed during Playwright navigation
         self._network_apis: Set[str] = set()
+        self.nav_graph = NavigationGraph()
+        self.taint = InterstateTracker()
+        self._current_task_name: str = ""
+        self.crawl_findings: List[Dict] = []
+        self._confirmed_flow_keys: Set[tuple] = set()
 
         try:
-            from playwright.async_api import async_playwright  # noqa: F401
+            from playwright.async_api import async_playwright
             self._has_playwright = True
             print(" Browser Controller initialized (Playwright)")
         except ImportError:
             self._has_playwright = False
             logger.warning("Playwright not installed — using urllib fallback")
             print(" Browser Controller initialized (urllib fallback)")
-
-    # ------------------------------------------------------------------
-    # Network API harvest (public surface reach)
-    # ------------------------------------------------------------------
 
     _API_PATH_HINTS = (
         "/api/", "/rest/", "/graphql", "/query", "/v1/", "/v2/", "/v3/",
@@ -64,14 +73,12 @@ class BrowserController:
         if base_host and p.netloc and p.netloc != base_host:
             return False
         path = (p.path or "").lower()
-        # Skip static assets
         if re.search(
             r"\.(js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|map|webp)(\?|$)", path
         ):
             return False
         if any(h in path for h in self._API_PATH_HINTS):
             return True
-        # Any same-host URL with query params is potentially injectable
         if p.query and path not in ("/", ""):
             return True
         return False
@@ -87,7 +94,6 @@ class BrowserController:
                 url = request.url or ""
                 if rtype in ("xhr", "fetch", "websocket") or self._is_harvestable_api_url(url):
                     if self._is_harvestable_api_url(url):
-                        # Strip fragments; keep query for injectables
                         clean = url.split("#", 1)[0]
                         self._network_apis.add(clean)
             except Exception:
@@ -97,11 +103,6 @@ class BrowserController:
             self._context.on("request", _on_request)
         except Exception as e:
             logger.debug("network listener attach failed: %s", e)
-
-
-    # ==================================================================
-    # SENSORS — page capture
-    # ==================================================================
 
     async def capture_page(self, url: str) -> Dict:
         """
@@ -134,7 +135,7 @@ class BrowserController:
                 context = await browser.new_context()
                 page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(2000)  # wait for JS
+                await page.wait_for_timeout(2000)
 
                 html     = await page.content()
                 elements = await self._extract_elements_playwright(page)
@@ -189,11 +190,11 @@ class BrowserController:
                         }
                     });
 
-                    // Forms
+                    // Forms — include hidden inputs so CSRF tokens are visible
                     const forms = document.querySelectorAll('form');
                     forms.forEach((form, idx) => {
                         const inputs = form.querySelectorAll(
-                            'input:not([type="hidden"]), textarea, select'
+                            'input, textarea, select'
                         );
                         if (inputs.length > 0) {
                             result.push({
@@ -242,7 +243,6 @@ class BrowserController:
         elements = []
         base = self._base_url(base_url)
 
-        # Forms — handle both attribute orderings
         form_re = re.compile(
             r'<form([^>]*)>(.*?)</form>',
             re.IGNORECASE | re.DOTALL
@@ -269,7 +269,7 @@ class BrowserController:
                 })
 
             if not action:
-                action = base_url  # empty action posts to current page
+                action = base_url
             elif not action.startswith("http"):
                 action = urljoin(base_url, action)
 
@@ -282,7 +282,6 @@ class BrowserController:
                 "inputs": inp_list
             })
 
-        # All same-host links (not only query-string URLs)
         base_host = urlsplit(base_url).netloc if base_url else ""
         for href in re.findall(r'href=["\']([^"\'#]+)["\']', html, re.I):
             if href.lower().startswith(("javascript:", "mailto:", "data:")):
@@ -293,10 +292,6 @@ class BrowserController:
             elements.append({"type": "link", "href": full})
 
         return elements
-
-    # =================
-    # TASK GENERATION 
-    # =================
 
     def _format_ui_elements(self, elements: List[Dict]) -> str:
         """
@@ -334,7 +329,6 @@ class BrowserController:
                              llm_model: str,
                              target_url: str = "",
                              deep: bool = True) -> List[Dict]:
-        # Deep crawl needs clickables (menus/nav) as well as forms/links
         filtered = [
             e for e in elements
             if e.get("type") in ("form", "link", "clickable")
@@ -364,7 +358,9 @@ Generate 4-6 realistic deep-crawl security tasks for black-box unauthenticated p
 Focus on:
 - Public login / search / contact forms (probe without real credentials)
 - Multi-step navigation into publicly reachable secondary pages
-- CRUD-shaped form submission on anonymous surfaces
+- Search / id / filter parameters (SQL injection-shaped surfaces)
+- State-changing anonymous POST forms (CSRF-shaped surfaces)
+- Comment / message / profile forms that may persist data across pages
 - Input handling on search, profile, admin, and data views that do not require login
 
 Each task must include a specific URL to navigate to.
@@ -416,13 +412,11 @@ Respond with JSON only — no explanation:
                 seen.add(name)
                 unique.append(task)
 
-        # Always merge deterministic coverage tasks (links/forms) for depth
         for t in self._deterministic_tasks(filtered, target_url):
             name = (t.get("name") or "").strip().lower()
             if name and name not in seen:
                 seen.add(name)
                 unique.append(t)
-
 
         return unique[:(20 if deep else 15)]
 
@@ -450,10 +444,30 @@ Respond with JSON only — no explanation:
             if el.get("type") == "form":
                 action = el.get("action") or target_url
                 method = (el.get("method") or "get").upper()
+                names = " ".join(
+                    (i.get("name") or "")
+                    for i in (el.get("inputs") or el.get("fields") or [])
+                    if isinstance(i, dict)
+                ).lower()
+                action_l = (action or "").lower()
+                if any(k in names or k in action_l for k in (
+                    "search", "q", "query", "id", "filter",
+                )):
+                    desc = "Exercise search/id parameters for SQLi and XSS"
+                elif method == "POST" and any(k in action_l for k in (
+                    "update", "save", "delete", "profile", "account", "order",
+                )):
+                    desc = "Exercise state-changing POST for CSRF and injection"
+                elif any(k in names or k in action_l for k in (
+                    "comment", "message", "review", "guestbook", "bio",
+                )):
+                    desc = "Exercise persistent fields for inter-page stored flows"
+                else:
+                    desc = "Exercise form inputs for XSS, SQLi, and CSRF"
                 _add(
                     f"Submit {method} form {action}",
                     action,
-                    "Exercise form inputs for injection and auth testing",
+                    desc,
                 )
             elif el.get("type") == "link":
                 href = el.get("href") or ""
@@ -464,10 +478,6 @@ Respond with JSON only — no explanation:
             if len(tasks) >= 10:
                 break
         return tasks
-
-    # ==================================================================
-    # BRIDGE — LLM decision-making
-    # ==================================================================
 
     async def _decide_next_action(self, task: str,
                                   current_state: Dict,
@@ -545,10 +555,6 @@ Output JSON only:
             logger.warning(f"BRIDGE decision failed: {e}")
             return {"command": "STOP", "reasoning": "Error in decision"}
 
-    # ==================================================================
-    # ACTUATORS — action execution
-    # ==================================================================
-
     async def _wait_after_nav(self, page, ms: int = 1200) -> None:
         """Give SPAs time to render + fire XHR after a navigation/click."""
         try:
@@ -575,7 +581,6 @@ Output JSON only:
                     target = clickables[target_id]
                     text = (target.get("text") or "")[:50]
                     href = (target.get("href") or "").strip()
-                    # Prefer direct navigation for hash/router SPA links
                     if href and (
                         "#/" in href
                         or href.startswith(self._session_base or "http")
@@ -594,7 +599,6 @@ Output JSON only:
                         )
                         await self._wait_after_nav(page, 900)
                         return True
-                    # Fallback: click by index among visible anchors/buttons
                     try:
                         loc = page.locator("a, button, [routerLink], [onclick]")
                         await loc.nth(target_id).click(timeout=5000)
@@ -612,7 +616,14 @@ Output JSON only:
                         name = field.get("name", "")
                         if not name:
                             continue
-                        value = self._dummy_value(name, field.get("type", "text"))
+                        itype = field.get("type", "text")
+                        if (itype or "").lower() == "hidden":
+                            continue
+                        value = self._dummy_value(
+                            name, itype,
+                            url=state.get("url") or "",
+                            form_action=form.get("action") or "",
+                        )
                         try:
                             await page.fill(f'[name="{name}"]', value, timeout=3000)
                         except Exception:
@@ -641,15 +652,14 @@ Output JSON only:
 
         return False
 
-    def _dummy_value(self, field_name: str, field_type: str) -> str:
-        """Generate benign dummy value for form fields (unauthenticated probe)."""
+    def _dummy_value(self, field_name: str, field_type: str,
+                     url: str = "", form_action: str = "") -> str:
+        """Benign dummy value; plant a unique inter-state canary when safe."""
         n = field_name.lower()
         if "password" in n or field_type == "password":
             return "TestPassword123!"
         if "email" in n or field_type == "email":
             return "test@example.com"
-        if any(k in n for k in ("user", "login", "account", "name")):
-            return "testuser"
         if "phone" in n or "tel" in n:
             return "555-0123"
         if "url" in n or "website" in n:
@@ -658,11 +668,17 @@ Output JSON only:
             return "42"
         if field_type == "date":
             return "2024-01-01"
+        if any(k in n for k in ("user", "login", "account", "name")):
+            return "testuser"
+        token = self.taint.plant(
+            field_name, field_type,
+            url=url,
+            form_action=form_action,
+            task=self._current_task_name,
+        )
+        if token:
+            return token
         return "test"
-
-    # ==================================================================
-    # Deep-crawl session (shared Playwright context across tasks)
-    # ==================================================================
 
     def _parse_cookie_header(self, cookie_header: str, base_url: str) -> List[Dict]:
         """Convert 'a=b; c=d' Cookie header into Playwright cookie dicts."""
@@ -708,6 +724,10 @@ Output JSON only:
             self._session_base = self._base_url(base_url)
             self._visited_urls = set()
             self._network_apis = set()
+            self.nav_graph = NavigationGraph()
+            self.taint = InterstateTracker()
+            self.crawl_findings = []
+            self._confirmed_flow_keys = set()
             self._attach_network_listener()
             self._page = await self._context.new_page()
             return True
@@ -759,10 +779,8 @@ Output JSON only:
         ):
             if kw in t or kw in h:
                 score += 2
-                # Task alignment only counts when the link itself matches
                 if task_l and kw in task_l:
                     score += 3
-        # SPA hash routes and router links are high value
         if "#/" in h or "router" in h:
             score += 2
         if h and h not in self._visited_urls:
@@ -817,9 +835,7 @@ Output JSON only:
             if i in tried_clicks:
                 continue
             href = c.get("href") or ""
-            # Allow hash SPA routes (#/search); skip empty/js/mailto
             if not href or href.startswith(("javascript:", "mailto:")):
-                # Still allow buttons with no href (text click)
                 if (c.get("tag") or "").lower() not in ("button", "a") and not c.get("text"):
                     continue
             if href.startswith("#") and not href.startswith("#/"):
@@ -849,7 +865,6 @@ Output JSON only:
             (a.get("action") or {}).get("command") == "FILL_FORM" for a in history
         )
         if forms and not filled:
-            # Prefer search-like forms over random
             for i, f in enumerate(forms):
                 names = {(fld.get("name") or "").lower() for fld in f.get("fields") or []}
                 if any(k in n for n in names for k in ("q", "query", "search")):
@@ -864,6 +879,186 @@ Output JSON only:
                 "reasoning": "heuristic: exercise first form",
             }
         return {"command": "STOP", "reasoning": "heuristic: nothing left to explore"}
+
+    def _href_unvisited(self, href: str) -> bool:
+        if not href or href.startswith(("javascript:", "mailto:", "data:")):
+            return False
+        if href in self._visited_urls:
+            return False
+        norm = normalize_state_url(href)
+        return all(normalize_state_url(u) != norm for u in self._visited_urls)
+
+    def _action_is_useful(self, action: Dict, state: Dict,
+                           history: List[Dict]) -> bool:
+        """True when the action is likely to open a new graph edge."""
+        command = (action or {}).get("command") or ""
+        if command == "STOP" or not command:
+            return False
+        target_id = action.get("target_id", 0)
+        if command == "CLICK":
+            clickables = state.get("clickables") or []
+            if not isinstance(target_id, int) or target_id >= len(clickables):
+                return False
+            href = clickables[target_id].get("href") or ""
+            return self._href_unvisited(href)
+        if command == "FILL_FORM":
+            filled = {
+                (a.get("action") or {}).get("target_id")
+                for a in history
+                if (a.get("action") or {}).get("command") == "FILL_FORM"
+            }
+            forms = state.get("forms") or []
+            return (
+                isinstance(target_id, int)
+                and target_id < len(forms)
+                and target_id not in filled
+            )
+        return False
+
+    def _graph_next_action(self, task: str, state: Dict,
+                            history: List[Dict]) -> Dict:
+        """Pick the next unexplored edge from the current state (BW-style)."""
+        clickables = state.get("clickables") or []
+        forms = state.get("forms") or []
+        task_l = (task or "").lower()
+        sink_norms = {
+            normalize_state_url(f.sink_url)
+            for f in self.taint.flows
+            if getattr(f, "sink_url", None)
+        }
+        tried_clicks = {
+            (a.get("action") or {}).get("target_id")
+            for a in history
+            if (a.get("action") or {}).get("command") == "CLICK"
+        }
+        ranked: List[tuple] = []
+        for i, c in enumerate(clickables):
+            if i in tried_clicks:
+                continue
+            href = c.get("href") or ""
+            if not self._href_unvisited(href):
+                continue
+            score = self._clickable_score(c.get("text") or "", href, task_l)
+            if normalize_state_url(href) in sink_norms:
+                score += 6
+            ranked.append((score, i, href))
+        if ranked:
+            ranked.sort(key=lambda x: (-x[0], x[1]))
+            score, i, href = ranked[0]
+            return {
+                "command": "CLICK",
+                "target_id": i,
+                "reasoning": f"graph: unvisited edge score={score} {href[:50]}",
+            }
+
+        filled = {
+            (a.get("action") or {}).get("target_id")
+            for a in history
+            if (a.get("action") or {}).get("command") == "FILL_FORM"
+        }
+        for i, form in enumerate(forms):
+            if i in filled:
+                continue
+            names = " ".join(
+                (fld.get("name") or "")
+                for fld in (form.get("fields") or [])
+            ).lower()
+            if any(k in names for k in (
+                "comment", "message", "q", "query", "search", "review", "bio",
+            )):
+                return {
+                    "command": "FILL_FORM",
+                    "target_id": i,
+                    "reasoning": "graph: unfilled write/search form",
+                }
+        for i, _form in enumerate(forms):
+            if i not in filled:
+                return {
+                    "command": "FILL_FORM",
+                    "target_id": i,
+                    "reasoning": "graph: unfilled form",
+                }
+        return {"command": "STOP", "reasoning": "graph: no unexplored edges"}
+
+    def _graph_is_decisive(self, task: str, state: Dict,
+                            history: List[Dict]) -> bool:
+        """True when one unexplored edge is clearly better than the rest.
+
+        A tie is left to the LLM (task semantics). A single winner is taken
+        by the graph so already-visited clicks are never chosen.
+        """
+        action = self._graph_next_action(task, state, history)
+        if not self._action_is_useful(action, state, history):
+            return False
+        if action.get("command") == "FILL_FORM":
+            return True
+        clickables = state.get("clickables") or []
+        tried = {
+            (a.get("action") or {}).get("target_id")
+            for a in history
+            if (a.get("action") or {}).get("command") == "CLICK"
+        }
+        task_l = (task or "").lower()
+        scores: List[int] = []
+        for i, c in enumerate(clickables):
+            href = c.get("href") or ""
+            if i in tried or not self._href_unvisited(href):
+                continue
+            scores.append(self._clickable_score(c.get("text") or "", href, task_l))
+        if len(scores) <= 1:
+            return True
+        scores.sort(reverse=True)
+        return scores[0] >= scores[1] + 2
+
+    async def _select_crawl_action(self, task: str, state: Dict,
+                                    history: List[Dict]) -> Dict:
+        """Graph drives the crawl. The LLM breaks ties and finishes tasks."""
+        graph = self._graph_next_action(task, state, history)
+        if (
+            self._graph_is_decisive(task, state, history)
+            and self._action_is_useful(graph, state, history)
+        ):
+            return graph
+        llm = await self._decide_next_action(task, state, history)
+        if self._action_is_useful(llm, state, history):
+            return llm
+        if self._action_is_useful(graph, state, history):
+            return graph
+        alt = self._heuristic_next_action(task, state, history)
+        if self._action_is_useful(alt, state, history):
+            return alt
+        return {"command": "STOP", "reasoning": "no unexplored edge"}
+
+    def _revisit_candidates(self, extra_urls: List[str],
+                             current_url: str,
+                             max_pages: int = 8) -> List[str]:
+        """Pages to re-open after a write so stored tokens can be observed."""
+        current = normalize_state_url(current_url)
+        seen: Set[str] = set()
+        out: List[tuple] = []
+        for url in list(self._visited_urls) + list(extra_urls or []):
+            if not url or not url.startswith(("http://", "https://")):
+                continue
+            if self._session_base and not url.startswith(self._session_base):
+                host = urlsplit(url).netloc
+                base_host = urlsplit(self._session_base).netloc
+                if host and base_host and host != base_host:
+                    continue
+            norm = normalize_state_url(url)
+            if not norm or norm == current or norm in seen:
+                continue
+            seen.add(norm)
+            low = (url or "").lower()
+            score = 0
+            for kw in (
+                "guest", "comment", "message", "search", "list", "view",
+                "post", "topic", "thread", "profile", "product", "user",
+            ):
+                if kw in low:
+                    score += 2
+            out.append((score, url))
+        out.sort(key=lambda x: (-x[0], x[1]))
+        return [u for _, u in out[:max_pages]]
 
     async def deep_crawl(self, tasks: List[Dict], base_url: str,
                          max_tasks: int = 15,
@@ -912,6 +1107,18 @@ Output JSON only:
                         f"{len(result.get('api_urls') or [])} apis"
                         f"{'' if progressed else ' [no new surface]'}"
                     )
+            if session_ok and self._page is not None and self.taint.sources:
+                budget_left = True
+                if time_budget_seconds:
+                    budget_left = (
+                        asyncio.get_event_loop().time() - started
+                    ) < time_budget_seconds
+                if budget_left:
+                    n_obs = await self._revisit_for_taint(
+                        self._page, all_urls, max_pages=10,
+                    )
+                    if verbose and n_obs:
+                        print(f"   Inter-state revisit: {n_obs} page(s) re-scanned")
         finally:
             api_snapshot = sorted(self._network_apis)
             await self.close_deep_session()
@@ -923,11 +1130,10 @@ Output JSON only:
             "api_urls": api_snapshot,
             "tasks_executed": tasks_executed,
             "tasks_with_progress": tasks_with_progress,
+            "nav_graph": self.nav_graph.to_dict(),
+            "interstate": self.taint.to_dict(),
+            "crawl_findings": list(self.crawl_findings),
         }
-
-    # ==================================================================
-    # Full task execution loop  (SENSORS → BRIDGE → ACTUATORS)
-    # ==================================================================
 
     async def execute_task(self, task: Dict, base_url: str,
                            max_steps: int = 15,
@@ -938,6 +1144,7 @@ Output JSON only:
         """
         task_name = task.get("name") or task.get("task", "unknown")
         url       = task.get("url") or base_url
+        self._current_task_name = task_name
 
         if not self._has_playwright:
             page_data = await self._urllib_capture(url)
@@ -982,6 +1189,7 @@ Output JSON only:
             await self._wait_after_nav(page, 1100)
             self.action_history = []
 
+            prev_nav = None
             for step in range(max_steps):
                 state = await self._capture_page_state(page)
                 page_url = page.url
@@ -995,19 +1203,22 @@ Output JSON only:
                     if link:
                         discovered_urls.add(link)
 
-                action = await self._decide_next_action(
+                nav_state, _hits = await self._record_crawl_state(page, state)
+                if prev_nav is not None and self.action_history:
+                    last = self.action_history[-1]
+                    last_cmd = (last.get("action") or {}).get("command") or ""
+                    if last.get("success") and last_cmd:
+                        self.nav_graph.add_edge(
+                            prev_nav, nav_state,
+                            command=last_cmd,
+                            task=task_name,
+                            reasoning=(last.get("action") or {}).get("reasoning") or "",
+                        )
+                prev_nav = nav_state
+
+                action = await self._select_crawl_action(
                     task_name, state, self.action_history
                 )
-                # Override early STOP whenever unexplored surface remains
-                if action.get("command") == "STOP":
-                    alt = self._heuristic_next_action(
-                        task_name, state, self.action_history
-                    )
-                    if alt.get("command") != "STOP":
-                        action = alt
-                    elif step < max(3, max_steps // 2):
-                        # Force one more heuristic attempt early in the task
-                        action = alt
 
                 if action.get("command") == "STOP":
                     break
@@ -1019,11 +1230,14 @@ Output JSON only:
                     "success": success
                 })
 
-                # Soft-fail: try heuristic next instead of aborting the task
                 if not success:
-                    alt = self._heuristic_next_action(
+                    alt = self._graph_next_action(
                         task_name, state, self.action_history
                     )
+                    if alt.get("command") == "STOP":
+                        alt = self._heuristic_next_action(
+                            task_name, state, self.action_history
+                        )
                     if alt.get("command") == "STOP":
                         break
                     success = await self._execute_action(page, alt, state)
@@ -1034,8 +1248,13 @@ Output JSON only:
                     })
                     if not success:
                         break
+                    action = alt
 
-                # Fold newly observed network APIs into this task's URL set
+                if success and (action.get("command") == "FILL_FORM") and self.taint.sources:
+                    await self._revisit_for_taint(
+                        page, list(discovered_urls), max_pages=4,
+                    )
+
                 for api in list(self._network_apis):
                     discovered_urls.add(api)
 
@@ -1057,9 +1276,236 @@ Output JSON only:
             "progressed": len(urls_seen_this_task) > 1 or len(discovered_forms) > 0,
         }
 
-    # ==================================================================
-    # SENSORS helper — page state capture
-    # ==================================================================
+    async def _revisit_for_taint(self, page, extra_urls: List[str],
+                                  max_pages: int = 8) -> int:
+        """Re-open other pages after a write and scan them for planted tokens."""
+        if page is None or not self.taint.sources:
+            return 0
+        current = ""
+        try:
+            current = page.url
+        except Exception:
+            current = ""
+        targets = self._revisit_candidates(list(extra_urls or []), current, max_pages)
+        scanned = 0
+        new_flows = []
+        for url in targets:
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                await self._wait_after_nav(page, 500)
+                state = await self._capture_page_state(page)
+                _nav, hits = await self._record_crawl_state(page, state)
+                new_flows.extend(h for h in hits if not h.escaped)
+                scanned += 1
+            except Exception:
+                continue
+        if new_flows:
+            await self._confirm_stored_flows(page, new_flows)
+        return scanned
+
+    async def _submit_named_field(self, page, field_name: str, value: str) -> bool:
+        if not field_name:
+            return False
+        try:
+            await page.fill(f'[name="{field_name}"]', value, timeout=3000)
+        except Exception:
+            return False
+        try:
+            submit = await page.query_selector(
+                'button[type="submit"], input[type="submit"]'
+            )
+            if submit:
+                await submit.click()
+            else:
+                await page.keyboard.press("Enter")
+            await self._wait_after_nav(page, 800)
+            return True
+        except Exception:
+            return False
+
+    def _remember_crawl_finding(self, finding: Dict) -> None:
+        loc = (finding.get("location") or "").rstrip("/")
+        key = ((finding.get("type") or "").lower(), loc, finding.get("parameter") or "")
+        if key in self._confirmed_flow_keys:
+            return
+        self._confirmed_flow_keys.add(key)
+        self.crawl_findings.append(finding)
+
+    async def _confirm_stored_flows(self, page, flows: List) -> None:
+        """Replay the proving payload on the source, then read the sink.
+
+        XSS is Confirmed only when the sink document title changes to the
+        marker. A live HTML breakout without execution stays Potential.
+        One SQL-error probe on the same stored field covers second-order SQLi.
+        """
+        from .vulnerability_tester import _sqli_error_match
+
+        for flow in flows:
+            src = flow.source_url or flow.source_action
+            sink = flow.sink_url
+            field = flow.source_field
+            if not src or not sink or not field:
+                continue
+            marker = self.taint.make_token()
+            try:
+                await page.goto(src, wait_until="domcontentloaded", timeout=15000)
+                await self._wait_after_nav(page, 400)
+                posted = await self._submit_named_field(
+                    page, field, stored_xss_payload(marker)
+                )
+                if not posted:
+                    continue
+                await page.goto(sink, wait_until="domcontentloaded", timeout=15000)
+                await self._wait_after_nav(page, 600)
+                title = ""
+                html = ""
+                try:
+                    title = await page.title()
+                except Exception:
+                    title = ""
+                try:
+                    html = await page.content()
+                except Exception:
+                    html = ""
+            except Exception:
+                continue
+
+            if stored_xss_executed(title, marker):
+                self._remember_crawl_finding({
+                    "type": "Stored XSS",
+                    "severity": "High",
+                    "status": "Confirmed",
+                    "location": sink,
+                    "parameter": field,
+                    "details": (
+                        f"Benign token from {src} field {field!r} reappeared on "
+                        f"{sink}. Replaying an onload payload set document.title "
+                        f"to the marker."
+                    ),
+                    "poc": f"POST {field} at {src}; observe title on {sink}",
+                    "cwe": "CWE-79",
+                    "impact": "Stored script execution in the sink page.",
+                    "remediation": "Encode output at the sink; sanitize on input.",
+                    "confidence": "High",
+                    "category": "vulnerability",
+                    "evidence": {
+                        "request": f"FILL {src} {field}=<svg onload title={marker}>",
+                        "response_status": 200,
+                        "response_body_snippet": f"title={title!r}",
+                        "response_headers": {},
+                        "payload_reflected": True,
+                        "verified": True,
+                        "confidence": "High",
+                        "confirmation_method": "js_execution",
+                        "source_url": src,
+                        "sink_url": sink,
+                    },
+                })
+            elif stored_xss_breakout(html, marker):
+                self._remember_crawl_finding({
+                    "type": "Stored XSS",
+                    "severity": "High",
+                    "status": "Potential",
+                    "location": sink,
+                    "parameter": field,
+                    "details": (
+                        f"XSS markup from {src} field {field!r} is present unescaped "
+                        f"on {sink}, without script execution in this pass."
+                    ),
+                    "poc": f"POST {field} at {src}; read HTML on {sink}",
+                    "cwe": "CWE-79",
+                    "impact": "Stored markup reaches another page.",
+                    "remediation": "Encode output at the sink.",
+                    "confidence": "Medium",
+                    "category": "vulnerability",
+                    "evidence": {
+                        "request": f"FILL {src} {field}",
+                        "response_status": 200,
+                        "response_body_snippet": marker,
+                        "response_headers": {},
+                        "payload_reflected": True,
+                        "verified": False,
+                        "confidence": "Medium",
+                        "confirmation_method": "dom_reflection",
+                        "source_url": src,
+                        "sink_url": sink,
+                    },
+                })
+
+            try:
+                await page.goto(src, wait_until="domcontentloaded", timeout=15000)
+                await self._wait_after_nav(page, 300)
+                if not await self._submit_named_field(page, field, "'"):
+                    continue
+                body = ""
+                try:
+                    body = await page.content()
+                except Exception:
+                    body = ""
+                await page.goto(sink, wait_until="domcontentloaded", timeout=15000)
+                await self._wait_after_nav(page, 400)
+                try:
+                    body = (body or "") + "\n" + (await page.content() or "")
+                except Exception:
+                    pass
+                error = _sqli_error_match(body or "")
+                if error:
+                    self._remember_crawl_finding({
+                        "type": "SQL Injection",
+                        "severity": "Critical",
+                        "status": "Confirmed",
+                        "location": src,
+                        "parameter": field,
+                        "details": (
+                            f"Quote probe on stored field {field!r} produced a "
+                            f"database error (source {src}, sink {sink}): {error[:150]}"
+                        ),
+                        "poc": f"POST {field}=' at {src}",
+                        "cwe": "CWE-89",
+                        "impact": "Second-order SQL injection via a stored field.",
+                        "remediation": "Use parameterised queries for stored values.",
+                        "confidence": "High",
+                        "category": "vulnerability",
+                        "evidence": {
+                            "request": f"FILL {src} {field}='",
+                            "response_status": 200,
+                            "response_body_snippet": error[:400],
+                            "response_headers": {},
+                            "payload_reflected": True,
+                            "verified": True,
+                            "confidence": "High",
+                            "confirmation_method": "pattern",
+                            "source_url": src,
+                            "sink_url": sink,
+                        },
+                    })
+            except Exception:
+                continue
+
+    async def _cookie_names(self) -> List[str]:
+        if self._context is None:
+            return []
+        try:
+            cookies = await self._context.cookies()
+            return [c.get("name") or "" for c in cookies if c.get("name")]
+        except Exception:
+            return []
+
+    async def _record_crawl_state(self, page, state: Dict):
+        html = ""
+        try:
+            html = await page.content()
+        except Exception:
+            html = ""
+        page_url = state.get("url") or getattr(page, "url", "") or ""
+        hits = self.taint.observe(html, page_url)
+        nav_state = self.nav_graph.add_state(
+            url=page_url,
+            forms=state.get("forms") or [],
+            cookie_names=await self._cookie_names(),
+            title=state.get("title") or "",
+        )
+        return nav_state, hits
 
     async def _capture_page_state(self, page) -> Dict:
         """Capture simplified page state for BRIDGE + link harvest."""
@@ -1135,7 +1581,7 @@ Output JSON only:
                     const forms = document.querySelectorAll('form');
                     forms.forEach((form, fidx) => {
                         const inputs = form.querySelectorAll(
-                            'input:not([type="hidden"]), textarea, select'
+                            'input, textarea, select'
                         );
                         if (inputs.length > 0) {
                             result.forms.push({
@@ -1165,10 +1611,6 @@ Output JSON only:
         except Exception as e:
             logger.debug(f"_capture_page_state failed: {e}")
             return {"url": "", "title": "", "clickables": [], "forms": [], "links": []}
-
-    # ==================================================================
-    # Utility
-    # ==================================================================
 
     def _base_url(self, url: str) -> str:
         parsed = urlparse(url)

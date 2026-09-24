@@ -1,9 +1,8 @@
 {
-    "page_title": "Banking AI",
-    "technologies": [
-        "OpenAI"
-    ],
+    "page_title": "Portfolio trade dashboard",
+    "technologies": [],
     "ml_endpoints": [
-        "/transaction"
+        "/api/transaction",
+        "/api/invest"
     ]
 }

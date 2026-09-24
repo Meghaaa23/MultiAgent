@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Iterable, List, Optional, Tuple
 
-
-# Evidence classes
 class EvidenceClass(str, Enum):
     BEHAVIORAL = "behavioral"
     LIVE_SURFACE = "live_surface"
@@ -19,7 +17,6 @@ class EvidenceClass(str, Enum):
     PASSIVE = "passive_hint"
     BRAND = "brand"
 
-
 class Detection(str, Enum):
     CONFIRMED = "confirmed"
   
@@ -27,7 +24,6 @@ class Detection(str, Enum):
     PROBABLE = "probable"
     POSSIBLE = "possible"
     NOT_DETECTED = "not_detected"
-
 
 _CLASS_RANK: Dict[EvidenceClass, int] = {
     EvidenceClass.BEHAVIORAL: 6,
@@ -38,44 +34,31 @@ _CLASS_RANK: Dict[EvidenceClass, int] = {
     EvidenceClass.BRAND: 1,
 }
 
-
 _CLASS_RULES: List[Tuple[re.Pattern, EvidenceClass]] = [
+    (re.compile(r"^behavior_model_reported$"), EvidenceClass.PASSIVE_STRUCTURAL),
+    (re.compile(r"^behavior_llm_response$"), EvidenceClass.PASSIVE_HINT),
     (re.compile(r"^behavior_"), EvidenceClass.BEHAVIORAL),
-    # A structured validation error proves a handler was reached, not that it
-    # ran inference — no model output was observed. Route-confirmed only.
     (re.compile(r"^error_"), EvidenceClass.ROUTE_CONFIRMED),
-    # AI-shaped HTTP 200 body is the one status that actually carries model
-    # output — that alone is LIVE_SURFACE. 401/403/405 confirm the route
-    # exists and nothing more.
     (re.compile(r"_endpoint_200$"), EvidenceClass.LIVE_SURFACE),
     (re.compile(r"_endpoint_(?:401_403|405)$"), EvidenceClass.ROUTE_CONFIRMED),
-    # Schema-declared AI operations (OpenAPI/GraphQL) are self-documented,
-    # but still "operation exists," never observed model output.
     (re.compile(r"_ai_(?:endpoint|field)$"), EvidenceClass.ROUTE_CONFIRMED),
     (re.compile(
         r"^(?:sse_streaming_header|ai_response_header)$"
     ), EvidenceClass.LIVE_SURFACE),
-    # Chunked transfer alone is not AI live surface (kept as hint if ever emitted).
     (re.compile(r"^sse_chunked_transfer$"), EvidenceClass.PASSIVE_HINT),
-    # Product/framework headers and cookies are brand signals only —
-    # they must not escalate detection without a live API/behavior surface.
     (re.compile(r"^framework_header$"), EvidenceClass.BRAND),
     (re.compile(r"^framework_identified$"), EvidenceClass.BRAND),
     (re.compile(r"^framework_cookie$"), EvidenceClass.PASSIVE_HINT),
     (re.compile(r"^(?:openapi|graphql)_schema$"), EvidenceClass.PASSIVE_STRUCTURAL),
-    # Chatbot UI channel — same ordinal taxonomy as API evidence.
-    # More specific chatbot_ui_* rules must precede the generic hint prefix.
     (re.compile(r"^behavior_chatbot_ui_"), EvidenceClass.BEHAVIORAL),
     (re.compile(r"^chatbot_ui_live_surface$"), EvidenceClass.LIVE_SURFACE),
     (re.compile(r"^chatbot_ui_structural$"), EvidenceClass.PASSIVE_STRUCTURAL),
     (re.compile(r"^(?:js_|sse_in_js|websocket_|robots_|sitemap_|csp_|chatbot_ui_)"),
      EvidenceClass.PASSIVE_HINT),
-    # HTML/meta/favicon brand cues — not live surface.
     (re.compile(r"^(?:meta_ai_tag|dom_assistant_role|html_ai_form|"
                 r"favicon_known_framework|page_title_ai|html_brand_signal)$"),
      EvidenceClass.BRAND),
 ]
-
 
 _CONFIDENCE: Dict[Detection, str] = {
     Detection.CONFIRMED: "high",
@@ -85,12 +68,8 @@ _CONFIDENCE: Dict[Detection, str] = {
     Detection.NOT_DETECTED: "none",
 }
 
-
-# Hints alone need a high bar — two robots lines must not reach PROBABLE.
 PROBABLE_MIN_HINT = 4
-# Back-compat alias for older imports/tests.
 PROBABLE_MIN_PASSIVE = PROBABLE_MIN_HINT
-
 
 def classify_evidence(key: str) -> EvidenceClass:
     for pattern, cls in _CLASS_RULES:
@@ -98,10 +77,8 @@ def classify_evidence(key: str) -> EvidenceClass:
             return cls
     return EvidenceClass.BRAND
 
-
 def evidence_weight(key: str) -> int:
     return _CLASS_RANK[classify_evidence(key)]
-
 
 @dataclass
 class EvidenceGroup:
@@ -135,18 +112,15 @@ class EvidenceGroup:
             EvidenceClass.ROUTE_CONFIRMED.value: self.route_confirmed,
             EvidenceClass.PASSIVE_STRUCTURAL.value: self.passive_structural,
             EvidenceClass.PASSIVE_HINT.value: self.passive_hint,
-            # Compat key for older readers.
             "passive": self.passive_hint,
             EvidenceClass.BRAND.value: self.brand,
         }
-
 
 def group_evidence(keys: Iterable[str]) -> EvidenceGroup:
     group = EvidenceGroup()
     for key in dict.fromkeys(k for k in keys if k):
         group.bucket(classify_evidence(key)).append(key)
     return group
-
 
 @dataclass
 class DetectionResult:
@@ -171,7 +145,6 @@ class DetectionResult:
             "brand_only": self.brand_only,
             "classes": self.classes,
         }
-
 
 def score_evidence(keys: Iterable[str]) -> DetectionResult:
     group = group_evidence(keys)
@@ -210,21 +183,17 @@ def score_evidence(keys: Iterable[str]) -> DetectionResult:
         classes=group.as_dict(),
     )
 
-
 def has_live_surface_evidence(keys: Iterable[str]) -> bool:
     group = group_evidence(keys)
     return bool(group.behavioral or group.live_surface)
-
 
 def has_route_confirmed_evidence(keys: Iterable[str]) -> bool:
     """True when a route/handler was confirmed (structured 4xx, schema-
     declared operation) even though no model output was ever observed."""
     return bool(group_evidence(keys).route_confirmed)
 
-
 def has_behavioral_evidence(keys: Iterable[str]) -> bool:
     return bool(group_evidence(keys).behavioral)
-
 
 def has_brand_only_evidence(keys: Iterable[str]) -> bool:
     group = group_evidence(keys)
@@ -235,9 +204,6 @@ def has_brand_only_evidence(keys: Iterable[str]) -> bool:
         or group.passive_structural
         or group.passive_hint
     )
-
-
-
 
 _AUTH_REASON_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"\bbann(?:ed|ing)\b", re.I),                              "account_banned"),
@@ -260,7 +226,6 @@ _AUTH_REASON_PATTERNS: List[Tuple[re.Pattern, str]] = [
 _AUTH_BODY_MESSAGE_KEYS = (
     "message", "error", "detail", "error_description", "reason", "msg", "title",
 )
-
 
 def extract_auth_reason(
     status_code: int, body: str = "", headers: Optional[Dict] = None,

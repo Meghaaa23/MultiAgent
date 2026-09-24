@@ -16,7 +16,6 @@ from multiagent.agents.webappscanner.vulnerability_tester import (
 )
 from multiagent.agents.threat_modeling_agent import _is_manual_queue_finding
 
-
 class TestLoginFormDetection:
     def test_password_plus_username(self):
         inputs = [
@@ -28,7 +27,6 @@ class TestLoginFormDetection:
     def test_search_form_not_login(self):
         inputs = [{"name": "q", "type": "text"}]
         assert _looks_like_login_form(inputs, "/search") is False
-
 
 class TestAuthBypassOracle:
     def test_redirect_away_from_login(self):
@@ -68,7 +66,6 @@ class TestAuthBypassOracle:
         )
         assert ok is False
 
-
 class TestCsrfPublishable:
     def test_medium_potential_is_queued(self):
         assert _is_manual_queue_finding({
@@ -85,14 +82,12 @@ class TestCsrfPublishable:
             "evidence": {"confidence": "Low"},
         }) is False
 
-
 class TestPhpinfoHtmlDisclosure:
     def test_phpinfo_html_confirmed(self):
         tester = VulnerabilityTester(timeout=2)
         findings = []
 
         async def run():
-            # Monkeypatch fetch to return phpinfo HTML
             def fake_fetch(url):
                 body = (
                     "<html><title>phpinfo()</title><body>"

@@ -37,7 +37,6 @@ from multiagent.agents.webappscanner.web_scanner_agent import (
     _build_evidence_gated_stride,
 )
 
-
 class TestStaticAssetFilter:
     def test_css_extension(self):
         assert is_static_asset(
@@ -58,7 +57,6 @@ class TestStaticAssetFilter:
     def test_login_not_static(self):
         assert not is_static_asset("/login", "text/html")
 
-
 class TestAdminClassifierIgnoresStaticPlugins:
     def test_bootstrap_under_plugins_not_admin(self):
         text = _build_section_2(
@@ -68,7 +66,7 @@ class TestAdminClassifierIgnoresStaticPlugins:
                 "method": "GET",
                 "status": 200,
                 "interesting": True,
-                "admin_panel": True,  # bad label from body heuristic
+                "admin_panel": True,
                 "content_type": "text/css",
                 "source": "probe",
             }],
@@ -77,7 +75,6 @@ class TestAdminClassifierIgnoresStaticPlugins:
         )
         assert "Administrative Endpoints" not in text
         assert "bootstrap.min.css" not in text
-
 
 class TestAuthRedirectStatusHonesty:
     def test_no_landing_200_beside_redirects_to_auth(self):
@@ -98,7 +95,6 @@ class TestAuthRedirectStatusHonesty:
         assert "[REDIR→AUTH]" in text
         assert "[200]" not in text
         assert "REDIRECTS TO AUTH" in text
-
 
 class TestAuthWallCoverageDisclosure:
     def test_dominated_surface_qualifies_risk(self):
@@ -137,7 +133,6 @@ class TestAuthWallCoverageDisclosure:
         assert "pre-authentication" in summary.lower()
         assert "auth-gated and not tested" in summary.lower()
         assert "3 functional" in summary
-        # Must not present as unqualified app-wide risk
         assert "Overall risk level: Low-Medium" not in summary
         assert "assessed pre-authentication surface" in summary.lower()
 
@@ -157,7 +152,6 @@ class TestAuthWallCoverageDisclosure:
         assert "Overall risk level: Low" in summary
         assert "auth-gated" not in summary.lower()
 
-
 class TestMvcFingerprint:
     def test_mvc_promotes_spring_java_tomcat(self):
         hits = _rule_detect(
@@ -173,7 +167,6 @@ class TestMvcFingerprint:
             if h["name"] in ("Spring", "Java", "Tomcat"):
                 assert h["confidence"] >= 0.50
                 assert h["confidence"] <= 0.60
-
 
 class TestStrideClickjackingCorroboration:
     def test_stride_cites_section3_finding(self):
@@ -220,7 +213,6 @@ class TestStrideClickjackingCorroboration:
         section3 = _build_section_3([d])
         assert "Missing Clickjacking Protection" in section3
 
-
 class TestDiscoveryStackMerge:
     def test_mvc_url_promotes_java_out_of_hints(self):
         stack = {
@@ -239,7 +231,6 @@ class TestDiscoveryStackMerge:
         assert "Java" not in out["unverified_hints"]
         assert "Tomcat" not in out["unverified_hints"]
         assert "Tomcat" in out.get("stack_summary", "")
-
 
 if __name__ == "__main__":
     fails = 0

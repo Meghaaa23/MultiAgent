@@ -1,8 +1,9 @@
-# agents/webappscanner/__init__.py
 
 from .web_scanner_agent         import WebScannerAgent
 from .browser_controller        import BrowserController
 from .vulnerability_tester      import VulnerabilityTester
+from .navigation_model          import NavigationGraph
+from .interstate_tracker        import InterstateTracker
 from .fingerprint_agent         import TechFingerprintAgent
 from .pipeline_agent              import CVEVerificationPipeline
 from .endpoint_discovery_agent  import EndpointDiscoveryAgent
@@ -16,6 +17,8 @@ __all__ = [
     "WebScannerAgent",
     "BrowserController",
     "VulnerabilityTester",
+    "NavigationGraph",
+    "InterstateTracker",
     "TechFingerprintAgent",
     "CVEVerificationPipeline",
     "EndpointDiscoveryAgent",

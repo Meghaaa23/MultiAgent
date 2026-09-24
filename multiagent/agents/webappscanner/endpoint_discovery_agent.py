@@ -1,4 +1,3 @@
-# agents/endpoint_discovery_agent.py
 
 
 import os
@@ -15,8 +14,6 @@ from urllib.parse import urlparse, urljoin, urlsplit, urlunparse
 
 logger = logging.getLogger(__name__)
 
-
-# Strong SPA shell signals — bare "admin"/"dashboard" appear in most shells.
 _SPA_STRONG_SIGNALS = (
     "<app-root", "ng-version", "router-outlet",
     "React.createElement", "__NEXT_DATA__", "__vue_app__",
@@ -28,14 +25,12 @@ _SPA_WEAK_SIGNALS = (
     "webpackJsonp", "vite/client",
 )
 
-# Bare "admin"/"dashboard" in SPA HTML are false positives on catch-alls.
 _ADMIN_STRONG_MARKERS = (
     "admin panel", "administration", "wp-admin",
     "django administration", "control panel",
     "management console", "admin dashboard",
     "administrator login", "site administration",
 )
-
 
 def looks_like_spa_shell(body: str) -> bool:
     if not body:
@@ -44,11 +39,9 @@ def looks_like_spa_shell(body: str) -> bool:
     weak_count = sum(1 for s in _SPA_WEAK_SIGNALS if s in body)
     return has_strong or weak_count >= 2
 
-
 def has_strong_admin_content(body: str) -> bool:
     low = (body or "").lower()
     return any(m in low for m in _ADMIN_STRONG_MARKERS)
-
 
 def _is_api_surface_path(url_or_path: str) -> bool:
     path = (url_or_path or "").lower()
@@ -60,8 +53,6 @@ def _is_api_surface_path(url_or_path: str) -> bool:
         p in path for p in ("/api/", "/rest/", "/graphql", "/v1/", "/v2/", "/v3/")
     ) or path.rstrip("/").endswith(("/api", "/rest", "/graphql"))
 
-
-# Classic server-rendered / PHP / CMS entrypoints (product-agnostic)
 SSR_COMMON_PATHS = [
     "/login.php",
     "/login",
@@ -96,7 +87,6 @@ SSR_COMMON_PATHS = [
     "/files",
 ]
 
-# Generic API / SPA surfaces (product-agnostic — no app brand paths)
 API_COMMON_PATHS = [
     "/api",
     "/api/v1",
@@ -132,7 +122,6 @@ API_COMMON_PATHS = [
     "/oauth2",
 ]
 
-# Sensitive / ops / docs (always worth a few slots)
 SENSITIVE_COMMON_PATHS = [
     "/.env",
     "/.env.local",
@@ -165,10 +154,8 @@ SENSITIVE_COMMON_PATHS = [
     "/console",
 ]
 
-# Backward-compatible flat list (SSR first so the probe budget hits classic apps)
 COMMON_PATHS = SSR_COMMON_PATHS + API_COMMON_PATHS + SENSITIVE_COMMON_PATHS
 
-# Patterns to find API endpoints in JS source (allow ?query for injectables)
 JS_ENDPOINT_PATTERNS = [
     r'["\'](/(?:api|rest|v\d+)/[^"\'\s]{2,120})["\']',
     r'["\'](/api/[^"\'\s]{2,100})["\']',
@@ -203,7 +190,6 @@ EXPECTED_200_PATHS = {
     "/health", "/ping", "/status",
 }
 
-# Static assets must never enter the endpoint attack-surface table.
 STATIC_EXTS = frozenset({
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
     ".css", ".js", ".map", ".woff", ".woff2", ".ttf", ".eot", ".otf",
@@ -218,9 +204,8 @@ STATIC_CONTENT_TYPES = (
     "image/",
     "font/",
     "application/font",
-    "application/octet-stream",  # only when paired with a static extension
+    "application/octet-stream",
 )
-
 
 def is_static_asset(url: str = "", content_type: str = "") -> bool:
     """True for CSS/JS/images/fonts — not API or HTML attack surface."""
@@ -249,7 +234,6 @@ def is_static_asset(url: str = "", content_type: str = "") -> bool:
         return True
     return False
 
-
 class EndpointDiscoveryAgent:
     """
     Discovers API endpoints via passive parsing + JS extraction + path probing.
@@ -264,7 +248,6 @@ class EndpointDiscoveryAgent:
         self._soft404_bodies:     List[str]  = []
 
   
-    # Soft-404 calibration
     async def calibrate(self, base: str) -> None:
         """
         Enable soft-404 mode only when unknown paths return a same-path 200
@@ -296,11 +279,9 @@ class EndpointDiscoveryAgent:
                         self._soft404_lengths.append(len(body))
                         if body:
                             self._soft404_bodies.append(body)
-                    # else: redirect to another path (e.g. /login.php) — not SPA soft-404
             except Exception:
                 pass
 
-        # Require body baselines so we can similarity-gate probes
         self._soft_mode = same_path_hits >= 2 and len(self._soft404_bodies) >= 1
         if self._soft_mode:
             logger.info(
@@ -334,7 +315,6 @@ class EndpointDiscoveryAgent:
             or "application/json" in html_l
         )
 
-        # Paths referenced in HTML always get priority (grounded, not guessed brands)
         html_paths: List[str] = []
         for m in re.finditer(
             r'''(?:href|action)=["']([^"']+)["']''', html, re.I
@@ -345,7 +325,6 @@ class EndpointDiscoveryAgent:
             path = urlsplit(raw).path or ""
             if path.startswith("/") and 1 < len(path) < 80:
                 cleaned = path.split(";")[0]
-                # Never probe stylesheets/fonts/images harvested from <link>/<a>
                 if is_static_asset(cleaned):
                     continue
                 html_paths.append(cleaned)
@@ -360,7 +339,6 @@ class EndpointDiscoveryAgent:
                     ordered.append(p)
 
         _extend(html_paths)
-        # Soft-404 / SPA catch-all: reserve probe budget for API family first
         if getattr(self, "_soft_mode", False) or (api_signal and not php_signal):
             _extend(API_COMMON_PATHS)
             _extend(SSR_COMMON_PATHS[:12])
@@ -368,7 +346,6 @@ class EndpointDiscoveryAgent:
             _extend(SSR_COMMON_PATHS)
             _extend(API_COMMON_PATHS[:12])
         else:
-            # Mixed / unknown — interleave so classic apps aren't starved
             _extend(SSR_COMMON_PATHS)
             _extend(API_COMMON_PATHS)
         _extend(SENSITIVE_COMMON_PATHS)
@@ -380,7 +357,6 @@ class EndpointDiscoveryAgent:
             return False
         ct = (content_type or "").lower()
         stripped = body.lstrip()
-        # Real JSON/API bodies are never the Angular/HTML shell
         if "json" in ct or stripped.startswith(("{", "[")):
             return False
         try:
@@ -388,28 +364,23 @@ class EndpointDiscoveryAgent:
                 _same_document_shell, _normalize_body_fingerprint,
             )
         except Exception:
-            from multiagent.agents.webappscanner.vulnerability_tester import (  # type: ignore
+            from multiagent.agents.webappscanner.vulnerability_tester import (
                 _same_document_shell, _normalize_body_fingerprint,
             )
         for baseline in self._soft404_bodies:
-            # Real SPA shells are large; also accept exact normalized equality
-            # for smaller catch-all templates (min_len relaxed to 80).
             if _same_document_shell(body, baseline, min_len=80):
                 return True
             nb = _normalize_body_fingerprint(body)
             nbase = _normalize_body_fingerprint(baseline)
             if nb and nbase and nb == nbase:
                 return True
-        # Length prefilter when bodies weren't stored but lengths were
         if self._soft404_lengths and not self._soft404_bodies:
             blen = len(body)
             for bl in self._soft404_lengths:
                 if bl > 200 and abs(blen - bl) <= max(80, int(bl * 0.05)):
-                    # HTML-ish and same size as bogus path → treat as shell
                     if "<html" in body.lower() or "<!doctype" in body.lower():
                         return True
         return False
-
 
     async def discover(self, target_url: str,
                        page_html: str = "",
@@ -424,7 +395,6 @@ class EndpointDiscoveryAgent:
 
         base = self._base_url(target_url)
 
-        # Calibrate soft-404 detection before any probing
         await self.calibrate(base)
         if verbose and self._soft_mode:
             print(f"    ⚠ Soft-404/catch-all site detected — redirect filter active")
@@ -473,8 +443,6 @@ class EndpointDiscoveryAgent:
     
         verified.sort(key=lambda x: (not x.get("interesting"), x.get("url", "")))
 
-        # Second-pass OpenAPI: if a docs UI survived as interesting, parse it
-        # even when the early passive-file pass only saw SPA shells.
         try:
             oa_extra = await self._enrich_openapi_from_discovered(base, verified)
             if oa_extra:
@@ -522,7 +490,6 @@ class EndpointDiscoveryAgent:
                 )
             ):
                 candidates.append(url)
-        # Always retry well-known spec paths with Accept: JSON
         for path in (
             "/api/openapi.json", "/openapi.json", "/api/docs/json",
             "/api/docs-json", "/docs-json", "/api/swagger.json",
@@ -537,7 +504,6 @@ class EndpointDiscoveryAgent:
             if cand in seen_cands:
                 continue
             seen_cands.add(cand)
-            # Docs HTML → follow refs + embedded specs
             path_l = (urllib.parse.urlsplit(cand).path or "").lower()
             if any(k in path_l for k in ("/docs", "swagger-ui", "redoc", "documentation")) and not path_l.endswith(
                 (".json", ".yaml", ".yml")
@@ -559,8 +525,6 @@ class EndpointDiscoveryAgent:
                 return parsed
         return []
 
-
-
     async def _verify_endpoint(self, ep: Dict) -> Dict:
    
         url    = ep.get("url", "")
@@ -576,7 +540,6 @@ class EndpointDiscoveryAgent:
             return ep
 
         ctype = (ep.get("content_type") or "").lower()
-        # Static assets are never attack-surface / admin endpoints
         if is_static_asset(url, ctype):
             ep["interesting"]  = False
             ep["static_asset"] = True
@@ -588,7 +551,6 @@ class EndpointDiscoveryAgent:
             body       = await self._fetch_text(url) or ""
             body_lower = body.lower()
             ctype      = (ep.get("content_type") or ctype or "").lower()
-            # Re-check after body fetch may have revealed content-type via URL only
             if is_static_asset(url, ctype) or (
                 body and not ("html" in ctype or "<html" in body_lower[:200])
                 and (
@@ -603,8 +565,6 @@ class EndpointDiscoveryAgent:
                 ep["verification"] = "Static asset — excluded from endpoint table"
                 return ep
 
-            # OpenAPI/Swagger machine docs: never treat JSON specs as SPA shells.
-            # Retry with Accept: application/json when HTML catch-all was returned.
             path_l = urllib.parse.urlsplit(ep.get("url") or "").path.lower()
             openapi_ish = any(
                 k in path_l for k in (
@@ -634,7 +594,6 @@ class EndpointDiscoveryAgent:
                     except Exception:
                         pass
 
-            # Drop SPA catch-all shells before keyword heuristics
             if self._matches_spa_shell(body, ctype):
                 ep["interesting"]  = False
                 ep["verification"] = "SPA/soft-404 shell — not a real endpoint"
@@ -656,7 +615,6 @@ class EndpointDiscoveryAgent:
                     ep["severity"]         = "Critical"
                     return ep
 
-            # JSON API response (real surface — keep)
             stripped = body.strip()
             if stripped.startswith(("{", "[")):
                 try:
@@ -671,19 +629,15 @@ class EndpointDiscoveryAgent:
 
             is_html = "html" in ctype or "<html" in body_lower[:500]
 
-            # Login / auth form (HTML only — never on SPA shell, already gated)
             if is_html and any(kw in body_lower for kw in (
                 'type="password"', "type='password'",
                 "login", "sign in", "signin", "authenticate"
             )):
-                # SPA catch-all login chrome still counts as auth surface
                 ep["interesting"]   = True
                 ep["auth_endpoint"] = True
                 ep["verification"]  = "Login form detected"
                 return ep
 
-            # Admin panel — require strong markers; bare "admin"/"dashboard"
-            # in SPA shells are false positives on catch-all routers.
             if is_html and has_strong_admin_content(body):
                 if looks_like_spa_shell(body) and (
                     self._soft_mode or self._matches_spa_shell(body, ctype)
@@ -700,7 +654,6 @@ class EndpointDiscoveryAgent:
                 ep["verification"] = "Admin panel indicators detected"
                 return ep
 
-            # Soft-404 / SPA catch-all HTML (admin/dashboard/graphql shells)
             if is_html and (
                 self._matches_spa_shell(body, ctype) or looks_like_spa_shell(body)
             ):
@@ -713,7 +666,6 @@ class EndpointDiscoveryAgent:
                     ep["verification"]   = "SPA/soft-404 shell — not a real endpoint"
                     return ep
 
-            # Directory listing
             if "index of /" in body_lower or "<title>directory listing" in body_lower:
                 ep["interesting"]       = True
                 ep["directory_listing"] = True
@@ -721,7 +673,6 @@ class EndpointDiscoveryAgent:
                 ep["severity"]          = "Medium"
                 return ep
 
-            # SSR signal: HTML page with a form is an injectable surface
             if "<form" in body_lower and ("html" in ctype or "<html" in body_lower):
                 ep["interesting"]  = True
                 ep["has_form"]     = True
@@ -731,13 +682,11 @@ class EndpointDiscoveryAgent:
             ep["verification"] = "HTTP 200 — content unclassified"
             return ep
 
-        # 401 = auth required (endpoint exists, protected)
         if status == 401:
             ep["auth_required"] = True
             ep["verification"]  = "HTTP 401 — authentication required"
             return ep
 
-        # 405 = method not allowed (endpoint exists, wrong method)
         if status == 405:
             ep["verification"] = "HTTP 405 — endpoint exists, wrong method"
             return ep
@@ -855,11 +804,8 @@ class EndpointDiscoveryAgent:
             "/api/documentation", "/documentation",
         )
 
-        # Spec URLs referenced from HTML docs UIs (and JSON Accept on the UI itself)
         for ui_path in docs_ui_paths:
             ui_url = f"{base}{ui_path}"
-            # Some frameworks serve the OpenAPI document at the docs path when
-            # Accept: application/json is set (NestJS /docs-json pattern).
             parsed = await self._endpoints_from_openapi_url(ui_url, base)
             if parsed:
                 return parsed
@@ -915,7 +861,6 @@ class EndpointDiscoveryAgent:
                     ref = urljoin(base + "/", ref[2:])
                 if ref.startswith("http") or ref.startswith("/"):
                     refs.append(ref)
-        # Dedup, preserve order
         return list(dict.fromkeys(refs))
 
     @classmethod
@@ -1036,7 +981,6 @@ class EndpointDiscoveryAgent:
         if not body:
             return []
         stripped = body.lstrip()
-        # HTML docs shell — try embedded spec, else not a machine-readable doc
         if stripped.lower().startswith(("<!doctype", "<html")):
             return self._endpoints_from_embedded_openapi(
                 body, base, source_url=url
@@ -1045,7 +989,6 @@ class EndpointDiscoveryAgent:
         try:
             spec = json.loads(body)
         except Exception:
-            # Minimal YAML: only accept if it looks like OpenAPI and has paths:
             if re.search(r"(?m)^(openapi|swagger)\s*:", body) and "paths:" in body:
                 spec = self._minimal_yaml_openapi_paths(body)
         if not isinstance(spec, dict):
@@ -1065,7 +1008,7 @@ class EndpointDiscoveryAgent:
                 continue
             if not in_paths:
                 continue
-            if re.match(r"^[A-Za-z]", line):  # next top-level key
+            if re.match(r"^[A-Za-z]", line):
                 break
             m_path = re.match(r"^  (/[^:]+)\s*:", line)
             if m_path:
@@ -1108,7 +1051,6 @@ class EndpointDiscoveryAgent:
                 continue
         return endpoints
 
-
     async def _strategy_js_extraction(self, base: str,
                                        page_html: str,
                                        verbose: bool = False) -> List[Dict]:
@@ -1148,7 +1090,6 @@ class EndpointDiscoveryAgent:
             for match in re.finditer(pat, page_html):
                 js_urls.add(urljoin(base, match.group(0)))
 
-        # Prefer main/runtime/vendor bundles (SPA API strings live there)
         def _js_priority(u: str) -> int:
             ul = u.lower()
             score = 0
@@ -1158,7 +1099,7 @@ class EndpointDiscoveryAgent:
             ):
                 if kw in ul:
                     score += w
-            return -score  # lower sort key = higher priority
+            return -score
 
         js_list = sorted(js_urls, key=_js_priority)[:16]
         fetch_tasks = [self._fetch_text(url) for url in js_list]
@@ -1197,7 +1138,6 @@ class EndpointDiscoveryAgent:
                         continue
                     if len(path) < 3 or path in ("/", "//"):
                         continue
-                    # Keep API-ish paths; drop random relative assets
                     pl = path.lower()
                     if not any(
                         pl.startswith(p) for p in (
@@ -1206,7 +1146,6 @@ class EndpointDiscoveryAgent:
                     ) and not any(
                         k in pl for k in ("/api", "/rest", "login", "search", "config")
                     ):
-                        # Still allow fetch("/something") when clearly API-shaped
                         if not re.search(r"/(api|rest|graphql)/", pl):
                             continue
                     key = f"{path}?{query}" if query else path
@@ -1244,8 +1183,6 @@ class EndpointDiscoveryAgent:
             urls.add(urljoin(base, href))
         return urls
 
-
-
     async def _strategy_common_paths(self, base: str,
                                       page_html: str = "",
                                       verbose: bool = False) -> List[Dict]:
@@ -1274,7 +1211,6 @@ class EndpointDiscoveryAgent:
 
         url = f"{base}{path}"
         try:
-            # Extension gate before any network I/O
             if is_static_asset(path):
                 return None
 
@@ -1292,7 +1228,6 @@ class EndpointDiscoveryAgent:
                 if str(k).lower() == "content-type":
                     content_type = str(v).lower()
                     break
-            # Content-type gate: CSS/fonts/images are not endpoints
             if is_static_asset(url, content_type):
                 return None
             auth_required = status in (401, 403)
@@ -1305,18 +1240,12 @@ class EndpointDiscoveryAgent:
                     landed == asked + "/" or asked == landed + "/"
                 )
                 if not is_slash_redirect and landed != asked:
-                    # Keep only when redirect target or requested path looks like auth/setup.
                     landed_l = landed.lower()
                     authish = any(k in landed_l or k in path_lower for k in (
                         "login", "signin", "sign-in", "auth", "sso",
                         "account", "setup", "install", "register", "signup",
                     ))
                     if authish:
-                        # Do NOT mark auth_required on final HTTP 200 — that
-                        # produces misleading "[200] … [AUTH REQUIRED]" reports.
-                        # Keep a separate redirects_to_auth flag for inventory.
-                        # status is the landing hop; report layer must not print
-                        # a clean [200] beside REDIRECTS TO AUTH.
                         return {
                             "url":               url,
                             "method":            "GET",
@@ -1337,7 +1266,6 @@ class EndpointDiscoveryAgent:
                     )
                     return None
 
-
             if path_lower in EXPECTED_200_PATHS and status == 200:
                 return {
                     "url": url, "method": "GET", "source": "probe",
@@ -1346,7 +1274,6 @@ class EndpointDiscoveryAgent:
                     "params": [], "content_type": content_type,
                     "note": "public-by-design"
                 }
-
 
             is_sensitive = any(
                 path_lower.startswith(p) for p in SENSITIVE_PATH_PREFIXES
@@ -1360,7 +1287,6 @@ class EndpointDiscoveryAgent:
             if not is_interesting:
                 return None
 
-            # Auth challenges prove the route exists without needing body compare
             if status in (401, 405):
                 return {
                     "url":          url,
@@ -1375,9 +1301,6 @@ class EndpointDiscoveryAgent:
                     "is_sensitive": is_sensitive,
                 }
 
-            # SPA catch-all gate: do not trust status 200 alone.
-            # For /api|/rest paths, retry with Accept: application/json and
-            # optional ?q=test so JSON APIs aren't dropped as HTML shells.
             if status == 200 and self._soft_mode:
                 body = await self._fetch_text(url) or ""
                 if self._matches_spa_shell(body, content_type):
@@ -1404,7 +1327,6 @@ class EndpointDiscoveryAgent:
                             "probe: drop %s — SPA/soft-404 shell match (status 200)", url
                         )
                         return None
-                # Persist body fingerprint hint for verify stage
                 content_type = content_type or (
                     "application/json" if body.lstrip()[:1] in "{[" else content_type
                 )
@@ -1419,8 +1341,6 @@ class EndpointDiscoveryAgent:
                 if not looks_like_endpoint:
                     return None
 
-                # SPA catch-all: /admin,/dashboard,/manage,/graphql HTML shells
-                # that match soft-404 / SPA markers are not real surfaces.
                 adminish = any(kw in path_lower for kw in (
                     "admin", "dashboard", "manage", "console", "panel",
                 ))
@@ -1469,8 +1389,6 @@ class EndpointDiscoveryAgent:
             }
         except Exception:
             return None
-
-
 
     async def _fetch_text(self, url: str) -> Optional[str]:
         loop = asyncio.get_event_loop()
@@ -1530,7 +1448,6 @@ class EndpointDiscoveryAgent:
                 if method == "GET":
                     return 0, {}, url
         return 0, {}, url
-
 
     def _base_url(self, url: str) -> str:
         parsed = urlparse(url)

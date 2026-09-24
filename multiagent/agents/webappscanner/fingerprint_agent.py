@@ -42,7 +42,7 @@ _CAT_MAP: Dict[str, str] = {
     "Programming languages": "Language",
     "Web servers":           "Server",
     "Reverse proxies":       "Server",
-    "Caching":               "Other",  # plugins like WP Rocket — not a web server
+    "Caching":               "Other",
     "Media servers":         "Server",
     "CDN":                   "CDN",
     "Databases":             "Database",
@@ -53,10 +53,8 @@ _CAT_MAP: Dict[str, str] = {
     "Miscellaneous":         "Other",
 }
 
-
 def _normalise_category(wappalyzer_cat_name: str) -> str:
     return _CAT_MAP.get(wappalyzer_cat_name, "Other")
-
 
 def _collapse_premium_duplicates(techs: List[Dict]) -> List[Dict]:
     """
@@ -81,7 +79,6 @@ def _collapse_premium_duplicates(techs: List[Dict]) -> List[Dict]:
         v_prem = (t.get("version") or "").strip()
         v_base = (by_name[base].get("version") or "").strip()
         if not v_prem or not v_base or v_prem == v_base:
-            # Merge version/confidence onto base if needed, then drop Premium
             base_t = by_name[base]
             if not base_t.get("version") and v_prem:
                 base_t["version"] = v_prem
@@ -95,14 +92,12 @@ def _collapse_premium_duplicates(techs: List[Dict]) -> List[Dict]:
         return techs
     return [t for t in techs if (t.get("name") or "") not in drop]
 
-
 def _to_list(value) -> List[str]:
     if not value:
         return []
     if isinstance(value, str):
         return [value]
     return [str(v) for v in value if v]
-
 
 def _parse_pattern(raw: str) -> Dict:
     parts = raw.split("\\;")
@@ -125,7 +120,6 @@ def _parse_pattern(raw: str) -> Dict:
                 result["version_tpl"] = v
     return result
 
-
 def _apply_version_tpl(m: re.Match, tpl: Optional[str]) -> Optional[str]:
     if not tpl or not m:
         return None
@@ -134,7 +128,6 @@ def _apply_version_tpl(m: re.Match, tpl: Optional[str]) -> Optional[str]:
         version = version.replace(f"\\{i}", group or "")
     version = re.sub(r"[\s._-]+$", "", version)
     return version or None
-
 
 class WappalyzerDB:
     _ENTHEC_BASE  = "https://raw.githubusercontent.com/enthec/webappanalyzer/main/src/technologies"
@@ -254,7 +247,6 @@ class WappalyzerDB:
                     logger.debug(f"AliasIO {letter}.json parse error: {e}")
         return technologies, categories
 
-
 class WappalyzerMatcher:
     def __init__(self, db: WappalyzerDB) -> None:
         self.db = db
@@ -363,7 +355,6 @@ class WappalyzerMatcher:
             "evidence":   evidence,
         }
 
-
 _SERVER_SIGS = {
     "nginx":    r"nginx(?:/(\S+))?",
     "Apache":   r"Apache(?:/(\S+))?",
@@ -401,9 +392,7 @@ _LANG_SIGS = {
     "Go":     r"Go-http-client|gorilla",
 }
 
-# URL-path stack signals (e.g. Spring MVC .mvc) — confirmed-low, not hints.
 _URL_STACK_RULES = (
-    # .mvc → Spring + Java + Tomcat (WebGoat / Spring-MVC pattern)
     (r"\.mvc\b", [
         {"name": "Spring", "category": "Framework", "confidence": 0.55,
          "evidence": "URL path .mvc extension (Spring MVC)"},
@@ -414,7 +403,6 @@ _URL_STACK_RULES = (
     ]),
 )
 
-
 def _rule_match(text: str, sigs: Dict[str, str]) -> Optional[Tuple[str, Optional[str]]]:
     for name, pattern in sigs.items():
         m = re.search(pattern, text, re.IGNORECASE)
@@ -422,7 +410,6 @@ def _rule_match(text: str, sigs: Dict[str, str]) -> Optional[Tuple[str, Optional
             ver = m.group(1) if m.lastindex else None
             return name, ver
     return None
-
 
 def _rule_detect(headers: Dict, html_hints: List[str],
                  url: str = "") -> List[Dict]:
@@ -448,7 +435,6 @@ def _rule_detect(headers: Dict, html_hints: List[str],
             })
             seen_names.add(name.lower())
 
-    # URL-path stack rules (Spring MVC .mvc → confirmed-low stack)
     path = ""
     try:
         path = urlparse(url or "").path or url or ""
@@ -470,7 +456,6 @@ def _rule_detect(headers: Dict, html_hints: List[str],
             break
     return results
 
-
 _CAT_HINT_TPL: Dict[str, str] = {
     "CMS":       "Check {name} version against CVE database; probe admin interface",
     "Framework": "Test {name} for debug mode and framework-specific CVEs",
@@ -479,7 +464,6 @@ _CAT_HINT_TPL: Dict[str, str] = {
     "CDN":       "Verify CDN security headers (CSP, HSTS, X-Frame-Options)",
     "Database":  "Test for {name} injection and default credential exposure",
 }
-
 
 def _rule_vuln_hints(detected: List[Dict]) -> List[str]:
     hints = []
@@ -496,7 +480,6 @@ def _rule_vuln_hints(detected: List[Dict]) -> List[str]:
         hints.append("Review HTTP security headers (CSP, HSTS, X-Frame-Options, Referrer-Policy)")
     return hints[:5]
 
-
 def merge_url_stack_signals(stack: Dict, urls: List[str]) -> Dict:
     """
     Promote URL-path stack signals (e.g. .mvc → Spring/Java/Tomcat) from
@@ -511,7 +494,6 @@ def merge_url_stack_signals(stack: Dict, urls: List[str]) -> Dict:
     stack = dict(stack)
     techs = list(stack.get("technologies") or [])
     if techs and not isinstance(techs[0], dict):
-        # Legacy string list — leave alone
         return stack
 
     seen = {str(t.get("name", "")).lower() for t in techs if isinstance(t, dict)}
@@ -532,14 +514,12 @@ def merge_url_stack_signals(stack: Dict, urls: List[str]) -> Dict:
         return stack
 
     stack["technologies"] = techs
-    # Drop hints that are now confirmed
     hints = [
         h for h in (stack.get("unverified_hints") or [])
         if str(h).lower() not in seen
     ]
     stack["unverified_hints"] = hints
 
-    # Refresh summary to prefer Server/Language/Framework over CSS libs
     by_cat: Dict[str, List[Dict]] = {}
     for dt in techs:
         if isinstance(dt, dict):
@@ -564,7 +544,6 @@ def merge_url_stack_signals(stack: Dict, urls: List[str]) -> Dict:
 
     summary_parts = [p for p in [server, language, framework] if p]
     if summary_parts:
-        # Keep prior summary bits (e.g. Bootstrap) after the stack core
         prior = stack.get("stack_summary") or ""
         core = " · ".join(summary_parts)
         extras = []
@@ -582,7 +561,6 @@ def merge_url_stack_signals(stack: Dict, urls: List[str]) -> Dict:
 
     return stack
 
-
 def _parse_cookies(headers: Dict) -> Dict[str, str]:
     cookies: Dict[str, str] = {}
     raw_vals = headers.get("set-cookie", "")
@@ -593,7 +571,6 @@ def _parse_cookies(headers: Dict) -> Dict[str, str]:
             name, _, value = first.partition("=")
             cookies[name.strip()] = value.strip()
     return cookies
-
 
 class TechFingerprintAgent:
     def __init__(self, openai_client, llm_model: str) -> None:
@@ -634,8 +611,6 @@ class TechFingerprintAgent:
         unverified_hints: List[str] = []
         vuln_hints:       List[str] = []
 
-        # Always merge URL/header rule hits (e.g. .mvc → Spring/Java/Tomcat)
-        # so CSS frameworks from Wappalyzer cannot bury the server stack.
         rule_hits = _rule_detect(
             headers, signals.get("html_hints", []), url=target_url,
         )
@@ -645,7 +620,6 @@ class TechFingerprintAgent:
             ):
                 detected.append(hit)
             else:
-                # Promote low-confidence Wappalyzer row if rule is stronger signal
                 for d in detected:
                     if d.get("name", "").lower() == hit["name"].lower():
                         if float(d.get("confidence") or 0) < float(hit.get("confidence") or 0):
@@ -659,13 +633,11 @@ class TechFingerprintAgent:
             llm_result = await self._llm_synthesize(target_url, signals, detected)
             for tech_name in llm_result.get("technologies", []):
                 if not any(d["name"].lower() == tech_name.lower() for d in detected):
-                    # Don't bury strong rule-confirmed stack as a hint
                     unverified_hints.append(tech_name)
             vuln_hints = llm_result.get("vuln_hints", [])
         else:
             vuln_hints = _rule_vuln_hints(detected)
 
-        # Drop unverified hints that we already confirmed via rules
         confirmed_names = {d.get("name", "").lower() for d in detected}
         unverified_hints = [
             h for h in unverified_hints if h.lower() not in confirmed_names
@@ -770,7 +742,6 @@ class TechFingerprintAgent:
             ]
         stack_summary = " · ".join(summary_parts) if summary_parts else "Unknown"
 
-        # Derived facts inherit parent confidence: Express entails Node.
         _IMPLIES = {
             "express": "node",
             "next.js": "node",

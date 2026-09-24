@@ -11,18 +11,15 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
-
 class VulnStatus(str, Enum):
     CONFIRMED  = "Confirmed"
     POTENTIAL  = "Potential"
     DOWNGRADED = "Downgraded"
 
-
 class Confidence(str, Enum):
     HIGH   = "High"
     MEDIUM = "Medium"
     LOW    = "Low"
-
 
 @dataclass
 class Evidence:
@@ -39,13 +36,11 @@ class Evidence:
     def to_dict(self) -> Dict:
         return asdict(self)
 
-
 def _enum_value(v):
     """Serialize str/Enum fields to plain strings (Py3.12 str(Enum)='Enum.MEMBER')."""
     if isinstance(v, Enum):
         return v.value if hasattr(v, "value") else str(v)
     return v
-
 
 @dataclass
 class Finding:
@@ -64,8 +59,6 @@ class Finding:
     owasp:       str      = ""
 
     def to_dict(self) -> Dict:
-        # Plain strings so publisher gates match "High"/"Confirmed", not
-        # "Confidence.HIGH" (Python 3.11+ str(Enum) representation).
         def _factory(pairs):
             return {k: _enum_value(v) for k, v in pairs}
 
@@ -73,7 +66,6 @@ class Finding:
         if isinstance(d.get("evidence"), dict):
             d["evidence"] = {k: _enum_value(v) for k, v in d["evidence"].items()}
         return d
-
 
 XSS_PAYLOADS = [
     '<script>alert(1)</script>',
@@ -139,7 +131,6 @@ _SENSITIVE_PATH_STATUS_MAP = {
 
 _SEVERITY_ORDER = ["Info", "Low", "Medium", "High", "Critical"]
 
-
 def _cap_severity(severity: str, cap: Optional[str]) -> str:
     if cap is None:
         return severity
@@ -150,7 +141,6 @@ def _cap_severity(severity: str, cap: Optional[str]) -> str:
         pass
     return cap
 
-
 SECURITY_HEADERS = [
     "X-Frame-Options",
     "X-Content-Type-Options",
@@ -160,16 +150,11 @@ SECURITY_HEADERS = [
     "Permissions-Policy",
 ]
 
-# Server/X-Powered-By values that disclose no version or meaningful software
-# detail — kept consistent with vulnerability_tester._server_header_is_leaky
-# and action_agent._server_is_leaky so all three agree on what counts as a
-# real information-disclosure finding.
 _SAFE_SERVER_PATTERNS = re.compile(
     r"^(cloudflare|cloudfront|awselb|fastly|google frontend|"
     r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik)$",
     re.I,
 )
-
 
 def _server_header_is_leaky(value: str) -> bool:
     v = (value or "").strip()
@@ -180,7 +165,6 @@ def _server_header_is_leaky(value: str) -> bool:
     if _SAFE_SERVER_PATTERNS.fullmatch(v):
         return False
     return True
-
 
 class AttackVerificationAgent:
 
@@ -230,8 +214,6 @@ class AttackVerificationAgent:
             "Clickjacking" in f.vuln_type and f.status == VulnStatus.CONFIRMED
             for f in findings
         )
-        # Dedup: XFO header absence is the clickjacking finding's evidence.
-        # STRIDE cites that Section 3 finding rather than re-deriving XFO alone.
         if has_clickjacking:
             findings = [
                 f for f in findings
@@ -282,13 +264,12 @@ class AttackVerificationAgent:
             if not headers:
                 return findings
 
-            # Keep latest publisher header logic from remove-mongodb-doc-ui branch
             headers_lower = {k.lower(): v for k, v in headers.items()}
             csp_value = headers_lower.get("content-security-policy", "")
             try:
                 from .vulnerability_tester import _should_report_missing_header
             except Exception:
-                def _should_report_missing_header(header: str, u: str) -> bool:  # type: ignore
+                def _should_report_missing_header(header: str, u: str) -> bool:
                     if header == "Strict-Transport-Security":
                         return str(u).lower().startswith("https://")
                     return header not in ("X-XSS-Protection", "Referrer-Policy")
@@ -495,7 +476,6 @@ class AttackVerificationAgent:
 
     async def _test_reflected_xss(self, url: str, param: str,
                                    parsed) -> Optional[Finding]:
-        # Redirect params commonly echo into error pages (Juice Shop 406) — not XSS
         if any(kw in param.lower() for kw in
                ("redirect", "url", "next", "return", "goto", "dest", "to")):
             return None
@@ -516,20 +496,17 @@ class AttackVerificationAgent:
                         ctype = str(v).lower()
                         break
                 lower = body.lower()
-                # Reject error-page / allowlist echoes
                 if any(m in lower for m in (
                     "unrecognized target url", "invalid redirect",
                     "bad request", "internal server error",
                 )):
                     continue
-                # Require unescaped payload (not &lt;script&gt;)
                 idx = body.find(payload)
                 window = body[max(0, idx - 40):idx + len(payload) + 40]
                 if "&lt;" in window and "<script" not in window.lower() \
                         and "onerror" not in window.lower():
                     continue
                 if ctype and "json" in ctype and "<" not in payload:
-                    # Plain string reflection inside JSON is not browser XSS by itself
                     continue
 
                 return Finding(
@@ -612,7 +589,6 @@ class AttackVerificationAgent:
                 return name == "token" or any(kw in name for kw in csrf_keywords)
 
             if not any(_has_csrf(inp) for inp in inputs) and form.get("method", "get").lower() == "post":
-                # Align with VulnerabilityTester CSRF honesty gates
                 try:
                     from .vulnerability_tester import (
                         _csrf_finding_should_skip, _form_inputs,
@@ -624,7 +600,6 @@ class AttackVerificationAgent:
                     ]):
                         continue
                 except Exception:
-                    # Fallback: skip obvious login forms
                     action_l = (action or "").lower()
                     if any(k in action_l for k in ("/login", "/signin", "/register")):
                         continue
@@ -647,9 +622,6 @@ class AttackVerificationAgent:
                     cwe   = "CWE-352",
                     owasp = "A01:2021"
                 ))
-
-            # Do not emit speculative XSS from field existence alone.
-            # Confirmed XSS must come from reflection / execution tests.
 
         return findings
 
@@ -721,7 +693,6 @@ class AttackVerificationAgent:
                     or _is_wildcard(r.get("acao", ""))
                 )
             ]
-            # Prefer reflected-origin API hits over bare * for severity
             api_reflected = [
                 r for r in api_hits if _reflects_origin(r.get("acao", ""))
             ]
@@ -750,7 +721,6 @@ class AttackVerificationAgent:
                 status     = VulnStatus.CONFIRMED
                 confidence = Confidence.HIGH
             elif star_base or any(_is_wildcard(r.get("acao", "")) for r in api_hits):
-                # Bare ACAO=* without credentials — Potential Low (not STRIDE)
                 severity   = "Low"
                 impact     = (
                     "Wildcard ACAO (*) without credentials — public responses "
@@ -820,9 +790,6 @@ class AttackVerificationAgent:
             if not headers:
                 return None
 
-            # Headers may arrive with mixed casing depending on the source
-            # (urllib.request preserves original casing; shared_headers from
-            # WebScannerAgent is lowercased). Normalise locally so both work.
             headers_lower = {k.lower(): v for k, v in headers.items()}
             xfo = headers_lower.get("x-frame-options", "")
             csp = headers_lower.get("content-security-policy", "")

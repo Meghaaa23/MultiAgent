@@ -23,7 +23,6 @@ from multiagent.agents.webappscanner.fingerprint_agent import (
 )
 from multiagent.agents.ai_agents.ai_evidence_scoring import evidence_weight
 
-
 class TestDetectAppIdentityCrashFix:
     def test_accepts_wappalyzer_technologies_kwarg(self):
         async def run():
@@ -39,7 +38,7 @@ class TestDetectAppIdentityCrashFix:
             )
         identity = asyncio.run(run())
         assert identity.name == "WordPress"
-        assert identity.version == "6.4.2" or identity.version  # from generator
+        assert identity.version == "6.4.2" or identity.version
 
     def test_cms_preferred_does_not_wipe_best(self):
         preferred = _pick_preferred_wappalyzer_app([
@@ -59,16 +58,13 @@ class TestDetectAppIdentityCrashFix:
                 wappalyzer_technologies=[],
             )
         identity = asyncio.run(run())
-        # May be low-confidence / None name, but must not raise
         assert identity is not None
-
 
 class TestCachingCategory:
     def test_caching_is_not_server(self):
         assert _normalise_category("Caching") != "Server"
         assert _normalise_category("Caching") == "Other"
         assert _normalise_category("Web servers") == "Server"
-
 
 class TestPremiumCollapse:
     def test_yoast_premium_collapsed(self):
@@ -90,7 +86,6 @@ class TestPremiumCollapse:
         out = _collapse_premium_duplicates(techs)
         assert len(out) == 1
         assert out[0]["name"] == "Yoast SEO Premium"
-
 
 class TestSseChunkedWeight:
     def test_weight_is_low(self):

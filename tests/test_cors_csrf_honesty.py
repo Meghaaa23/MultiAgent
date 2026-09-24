@@ -18,7 +18,6 @@ from multiagent.agents.webappscanner.web_scanner_agent import (
 from multiagent.agents.webappscanner.action_agent import ActionAgent
 from multiagent.agents.threat_modeling_agent import _build_section_4
 
-
 class TestCorsSeverityTiers:
     def test_wildcard_without_credentials_is_low(self):
         vt = VulnerabilityTester(timeout=2)
@@ -29,7 +28,7 @@ class TestCorsSeverityTiers:
                 "Access-Control-Allow-Credentials": "false",
             }
 
-        vt._sync_headers = fake_headers  # type: ignore
+        vt._sync_headers = fake_headers
         findings = asyncio.run(vt.test_cors("http://localhost:3141"))
         assert findings
         assert findings[0]["severity"] == "Low"
@@ -45,7 +44,7 @@ class TestCorsSeverityTiers:
                 "Access-Control-Allow-Origin": "https://evil-cors-test.example.com",
             }
 
-        vt._sync_headers = fake_headers  # type: ignore
+        vt._sync_headers = fake_headers
         findings = asyncio.run(vt.test_cors("http://localhost:3141"))
         assert findings[0]["severity"] == "Medium"
 
@@ -58,10 +57,9 @@ class TestCorsSeverityTiers:
                 "Access-Control-Allow-Credentials": "true",
             }
 
-        vt._sync_headers = fake_headers  # type: ignore
+        vt._sync_headers = fake_headers
         findings = asyncio.run(vt.test_cors("http://localhost:3141"))
         assert findings[0]["severity"] == "High"
-
 
 class TestCorsStrideHonesty:
     def test_wildcard_omitted_from_stride(self):
@@ -84,7 +82,6 @@ class TestCorsStrideHonesty:
         cors = [t for t in threats if t.get("threat") == "CORS Misconfiguration"]
         assert cors and cors[0]["impact"] == "High"
 
-
 class TestCorsActionPoc:
     def test_wildcard_poc_no_credential_theft(self):
         agent = ActionAgent()
@@ -101,7 +98,6 @@ class TestCorsActionPoc:
         assert "credentials: \"include\"" not in action["attack_poc"]
         assert "not enabled" in action["attack_poc"].lower() or \
             "reject credentialed" in action["attack_poc"].lower()
-
 
 class TestCsrfSkipGates:
     def test_skips_spa_login(self):
@@ -126,7 +122,6 @@ class TestCsrfSkipGates:
             {"name": "bio", "type": "text"},
         ]
         assert _csrf_finding_should_skip(form, inputs, page_html="") is False
-
 
 class TestSection4Confidence:
     def test_uses_stored_medium_not_hardcoded_low(self):

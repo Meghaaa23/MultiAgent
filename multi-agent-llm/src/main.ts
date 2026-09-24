@@ -10,10 +10,6 @@ export const appConfig: ApplicationConfig = {
   providers: [importProvidersFrom(HttpClientModule)]
 };
 
-// =============================================================================
-// Interfaces
-// =============================================================================
-
 interface ReportSection {
   id: string;
   title: string;
@@ -56,10 +52,6 @@ type StreamEvent =
   | { type: 'progress'; data: ProgressEvent }
   | { type: 'result'; data: StreamResult }
   | { type: 'error'; data: StreamError };
-
-// =============================================================================
-// API Service
-// =============================================================================
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
@@ -120,7 +112,7 @@ export class ApiService {
     subject: Subject<StreamEvent>
   ): Promise<void> {
     const controller = new AbortController();
-    // If no SSE bytes arrive at all, fail fast so the UI can fall back.
+
     const connectTimer = setTimeout(() => controller.abort(), 20000);
 
     try {
@@ -144,7 +136,7 @@ export class ApiService {
 
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('text/event-stream') && !contentType.includes('text/plain')) {
-        // Likely HTML from a misconfigured proxy — do not hang parsing.
+
         clearTimeout(connectTimer);
         this.ngZone.run(() =>
           subject.error(new Error('Streaming endpoint unavailable (unexpected response type)'))
@@ -235,10 +227,6 @@ export class ApiService {
     );
   }
 }
-
-// =============================================================================
-// App Component
-// =============================================================================
 
 @Component({
   selector: 'app-root',
@@ -513,7 +501,7 @@ export class AppComponent {
           finish();
         },
         complete: () => {
-          // If stream ended without a result/error event, fall back.
+
           if (!settled && this.isLoading()) {
             this.analysisMessage.set('Completing via standard query...');
             this.fallbackQuery(question).finally(finish);

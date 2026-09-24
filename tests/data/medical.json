@@ -1,9 +1,9 @@
 {
-    "page_title": "Medical Diagnosis Assistant",
-    "technologies": [
-        "OpenAI"
-    ],
+    "page_title": "Clinical diagnosis assistant",
+    "technologies": [],
     "ml_endpoints": [
-        "/diagnosis"
-    ]
+        "/api/patient",
+        "/api/diagnosis"
+    ],
+    "app_description": "patient ehr fhir clinical"
 }

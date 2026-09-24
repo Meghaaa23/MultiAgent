@@ -7,7 +7,6 @@ from multiagent.agents.ai_agents.ai_vulnerability_test import (
     detect_capabilities, AppCapability, CapabilitySet,
 )
 
-
 def _fp(**kwargs):
     base = {
         "page_title": "", "technologies": [], "ml_endpoints": [],
@@ -16,11 +15,6 @@ def _fp(**kwargs):
     }
     base.update(kwargs)
     return base
-
-
-# ---------------------------------------------------------------------------
-# Source 1: explicit tool/function schemas (confidence 0.95)
-# ---------------------------------------------------------------------------
 
 class TestCapabilityFromSchema:
 
@@ -54,132 +48,127 @@ class TestCapabilityFromSchema:
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.EMAIL_SEND)
 
-
-# ---------------------------------------------------------------------------
-# Source 2: endpoint path patterns (confidence 0.70)
-# ---------------------------------------------------------------------------
-
 class TestCapabilityFromEndpoints:
+    """Endpoint-path capability inference requires a CONFIRMED live surface and
+    reads only ml_endpoints (AI-classified). A capability-shaped substring in a
+    path that was never confirmed live — or the raw, never-probed
+    discovered_paths bag — must not fabricate a capability."""
 
     def test_retrieve_path(self):
-        fp = _fp(ml_endpoints=["/api/retrieve"])
+        fp = _fp(ml_endpoints=["/api/retrieve"], has_live_surface=True)
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.RETRIEVAL)
 
     def test_tool_execute_path(self):
-        fp = _fp(ml_endpoints=["/api/tool/execute"])
+        fp = _fp(ml_endpoints=["/api/tool/execute"], has_live_surface=True)
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.TOOL_CALLING)
 
     def test_memory_path(self):
-        fp = _fp(discovered_paths=["/api/memory/store"])
+        fp = _fp(ml_endpoints=["/api/memory/store"], has_live_surface=True)
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.MEMORY)
 
     def test_code_exec_path(self):
-        fp = _fp(discovered_paths=["/api/code/exec"])
+        fp = _fp(ml_endpoints=["/api/code/exec"], has_live_surface=True)
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.CODE_EXECUTION)
 
     def test_send_email_path(self):
-        fp = _fp(discovered_paths=["/api/email/send"])
+        fp = _fp(ml_endpoints=["/api/email/send"], has_live_surface=True)
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.EMAIL_SEND)
 
     def test_agent_orchestrat_path(self):
-        fp = _fp(discovered_paths=["/api/agent/orchestrat"])
+        fp = _fp(ml_endpoints=["/api/agent/orchestrat"], has_live_surface=True)
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.MULTI_AGENT)
 
     def test_endpoint_confidence_is_0_70(self):
-        fp = _fp(ml_endpoints=["/api/retrieve"])
+        fp = _fp(ml_endpoints=["/api/retrieve"], has_live_surface=True)
         cs = detect_capabilities(fp)
         conf = cs.confidence.get(AppCapability.RETRIEVAL, 0)
-        # schema not present, so confidence should be ~0.70 (not bumped higher)
         assert 0.65 <= conf <= 0.75
 
-    def test_both_ml_endpoints_and_discovered_paths_checked(self):
-        fp = _fp(ml_endpoints=["/api/retrieve"], discovered_paths=["/api/memory/store"])
+    def test_endpoint_path_requires_confirmed_live_surface(self):
+        fp = _fp(ml_endpoints=["/api/retrieve"], has_live_surface=False)
+        cs = detect_capabilities(fp)
+        assert not cs.has(AppCapability.RETRIEVAL)
+
+    def test_discovered_paths_are_not_a_capability_source(self):
+        fp = _fp(
+            ml_endpoints=["/api/retrieve"],
+            discovered_paths=["/api/memory/store"],
+            has_live_surface=True,
+        )
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.RETRIEVAL)
-        assert cs.has(AppCapability.MEMORY)
+        assert not cs.has(AppCapability.MEMORY)
 
+class TestCapabilityFromObservedFeatures:
 
-# ---------------------------------------------------------------------------
-# Source 3: technology keyword signals (confidence 0.50)
-# ---------------------------------------------------------------------------
-
-class TestCapabilityFromTechSignals:
-
-    def test_pinecone_gives_retrieval(self):
-        fp = _fp(technologies=["pinecone"])
+    def test_vector_retrieval_copy_gives_retrieval(self):
+        fp = _fp(app_description="vector retrieval")
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.RETRIEVAL)
 
-    def test_langchain_gives_retrieval_and_tool(self):
-        fp = _fp(technologies=["langchain"])
+    def test_function_call_copy_gives_tool(self):
+        fp = _fp(app_description="function_call tool_choice")
         cs = detect_capabilities(fp)
-        assert cs.has(AppCapability.RETRIEVAL)
         assert cs.has(AppCapability.TOOL_CALLING)
 
-    def test_autogen_gives_multi_agent(self):
-        fp = _fp(technologies=["autogen"])
+    def test_orchestrator_copy_gives_multi_agent(self):
+        fp = _fp(app_description="multi_agent orchestrator")
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.MULTI_AGENT)
 
-    def test_redis_gives_memory(self):
-        fp = _fp(technologies=["redis"])
+    def test_product_name_alone_is_not_a_capability(self):
+        fp = _fp(technologies=["pinecone", "langchain", "autogen", "redis", "sendgrid"])
         cs = detect_capabilities(fp)
-        assert cs.has(AppCapability.MEMORY)
+        assert not cs.has(AppCapability.RETRIEVAL)
+        assert not cs.has(AppCapability.MEMORY)
+        assert not cs.has(AppCapability.EMAIL_SEND)
+        assert not cs.has(AppCapability.MULTI_AGENT)
 
-    def test_sendgrid_gives_email(self):
-        fp = _fp(technologies=["sendgrid"])
+    def test_compose_copy_gives_email(self):
+        fp = _fp(app_description="send email compose")
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.EMAIL_SEND)
 
-    def test_tavily_gives_web_search(self):
-        fp = _fp(technologies=["tavily"])
+    def test_web_search_copy(self):
+        fp = _fp(app_description="web search browsing")
         cs = detect_capabilities(fp)
         assert cs.has(AppCapability.WEB_SEARCH)
 
-    def test_tech_confidence_is_0_50(self):
-        fp = _fp(technologies=["pinecone"])
+    def test_feature_copy_confidence_is_0_50(self):
+        fp = _fp(app_description="vector retrieval")
         cs = detect_capabilities(fp)
         conf = cs.confidence.get(AppCapability.RETRIEVAL, 0)
         assert 0.45 <= conf <= 0.55
 
-    def test_response_headers_checked(self):
+    def test_brand_header_is_not_a_capability(self):
         fp = _fp(response_headers={"X-Powered-By": "langchain"})
         cs = detect_capabilities(fp)
-        assert cs.has(AppCapability.RETRIEVAL)
-
-
-# ---------------------------------------------------------------------------
-# Higher-confidence source wins
-# ---------------------------------------------------------------------------
+        assert not cs.has(AppCapability.RETRIEVAL)
 
 class TestCapabilityConfidencePrecedence:
 
-    def test_schema_overrides_tech_keyword(self):
+    def test_schema_overrides_weak_copy(self):
         fp = _fp(
-            technologies=["pinecone"],  # 0.50
-            api_schema={"tools": [{"name": "retrieve", "description": "rag"}]},  # 0.95
+            app_description="vector",
+            api_schema={"tools": [{"name": "retrieve", "description": "rag"}]},
         )
         cs = detect_capabilities(fp)
         assert cs.confidence.get(AppCapability.RETRIEVAL, 0) >= 0.90
 
-    def test_endpoint_overrides_tech_keyword(self):
+    def test_endpoint_overrides_weak_copy(self):
         fp = _fp(
-            technologies=["pinecone"],       # 0.50
-            ml_endpoints=["/api/retrieve"],  # 0.70
+            app_description="vector",
+            ml_endpoints=["/api/retrieve"],
+            has_live_surface=True,
         )
         cs = detect_capabilities(fp)
         assert cs.confidence.get(AppCapability.RETRIEVAL, 0) >= 0.65
-
-
-# ---------------------------------------------------------------------------
-# CapabilitySet dataclass
-# ---------------------------------------------------------------------------
 
 class TestCapabilitySet:
 

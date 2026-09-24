@@ -13,10 +13,6 @@ STRIDE_ANALYSIS_PROMPT:
     categories to be generated even with zero evidence.
 """
 
-# ---------------------------------------------------------------------------
-# Prompt 1: Query Decomposition
-# ---------------------------------------------------------------------------
-
 QUESTION_DECOMPOSITION_PROMPT = """You are a cybersecurity expert analyzing a security-related question.
 
 User Question: {query}
@@ -42,10 +38,6 @@ Output ONLY valid JSON with no extra text:
     ]
 }}
 """
-
-# ---------------------------------------------------------------------------
-# Prompt 2: STRIDE Analysis
-# ---------------------------------------------------------------------------
 
 STRIDE_ANALYSIS_PROMPT = """You are a cybersecurity threat modeling expert using the STRIDE framework.
 
@@ -83,10 +75,6 @@ For each included STRIDE threat:
 
 Use clean markdown. Be precise and evidence-based. Stop when done.
 """
-
-# ---------------------------------------------------------------------------
-# Web scanning prompts (unchanged from hardened version)
-# ---------------------------------------------------------------------------
 
 TASK_GENERATION_PROMPT = """You are analyzing a web application to identify security testing tasks.
 

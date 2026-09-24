@@ -37,6 +37,25 @@ _GENERIC_RUNTIMES = {
 _CVE_WORTHY_CATEGORIES = {"CMS"}
 _CVE_WORTHY_WITH_VERSION = {"Framework", "Server"}
 
+def _normalise_package_name(keyword: str, ecosystem: str) -> str:
+    """Map a fingerprinted component name to its registry package name using
+    only structural conventions — no per-product lookup table.
+
+    Rules:
+      * take the first whitespace-delimited token (drops an appended version)
+      * lowercase for case-insensitive ecosystems
+      * for npm, a trailing runtime suffix like ".js" is dropped (the npm
+        package for a "<name>.js" framework is conventionally "<name>")
+    """
+    name = (keyword or "").strip().split()[0] if keyword.strip() else ""
+    if not name:
+        return name
+    if name.startswith("@"):
+        return name
+    lowered = name.lower()
+    if ecosystem == "npm" and lowered.endswith(".js") and len(lowered) > 3:
+        lowered = lowered[:-3]
+    return lowered
 
 class CVEVerificationPipeline:
 
@@ -248,7 +267,6 @@ class CVEVerificationPipeline:
         text = text.lower()
         text = re.sub(r"[^a-z0-9]+", " ", text)
         return " ".join(text.split())
-
 
     def _product_matches(self, keyword: str, description: str, affected: str) -> bool:
         """
@@ -547,41 +565,44 @@ class CVEVerificationPipeline:
             t.get("name", "") if isinstance(t, dict) else str(t)
             for t in techs
         ).lower()
-        combined  = language + " " + techs_str
+        runtime_hints = " ".join(
+            str(t.get("runtime", "") or t.get("ecosystem", ""))
+            for t in techs if isinstance(t, dict)
+        ).lower()
+        combined  = " ".join((language, techs_str, runtime_hints))
+
+        lang_tokens = {
+            "php":        "Packagist",
+            "python":     "PyPI",
+            "py":         "PyPI",
+            "ruby":       "RubyGems",
+            "node":       "npm",
+            "nodejs":     "npm",
+            "node.js":    "npm",
+            "javascript": "npm",
+            "typescript": "npm",
+            "java":       "Maven",
+            "kotlin":     "Maven",
+            ".net":       "NuGet",
+            "dotnet":     "NuGet",
+            "c#":         "NuGet",
+            "go":         "Go",
+            "golang":     "Go",
+            "rust":       "crates.io",
+        }
 
         ecosystem = None
-        for lang, eco in ecosystem_map.items():
+        for lang, eco in {**ecosystem_map, **lang_tokens}.items():
             key = lang.lstrip(".")
-            if re.search(rf"\b{re.escape(key)}\b", combined):
+            if re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", combined):
                 ecosystem = eco
                 break
-
-        kl = keyword.lower()
-        if not ecosystem:
-            if any(x in kl for x in ["gradio", "torch", "tensorflow", "fastapi",
-                                       "flask", "django", "langchain", "flowise"]):
-                ecosystem = "PyPI"
-            elif any(x in kl for x in ["next.js", "react", "vue", "svelte",
-                                         "express", "node"]):
-                ecosystem = "npm"
-            elif any(x in kl for x in ["wordpress", "drupal", "laravel"]):
-                ecosystem = "Packagist"
 
         if not ecosystem:
             return []
 
         try:
-            pkg_name = keyword.split()[0].lower()
-            name_map = {
-                "gradio":    "gradio",
-                "next.js":   "next",
-                "sveltekit": "@sveltejs/kit",
-                "langchain": "langchain",
-                "flowise":   "flowise",
-                "wordpress": "wordpress",
-                "drupal":    "drupal",
-            }
-            pkg_name = name_map.get(pkg_name, pkg_name)
+            pkg_name = _normalise_package_name(keyword, ecosystem)
 
             payload = json.dumps({
                 "package": {"name": pkg_name, "ecosystem": ecosystem}

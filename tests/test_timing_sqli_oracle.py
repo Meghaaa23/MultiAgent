@@ -15,7 +15,6 @@ from multiagent.agents.threat_modeling_agent import (
     _is_publishable_confirmed,
 )
 
-
 class TestTimingEvidenceGate:
     def test_rejects_http_0_even_with_delta(self):
         ev = {
@@ -48,7 +47,6 @@ class TestTimingEvidenceGate:
         }
         assert _evidence_has_substance(ev) is True
 
-
 class TestConfirmTimeBasedSqli:
     def test_unreachable_baseline_returns_none(self):
         vt = VulnerabilityTester()
@@ -56,7 +54,7 @@ class TestConfirmTimeBasedSqli:
         async def boom(*args, **kwargs):
             return 0, "", {}
 
-        vt._http_request = boom  # type: ignore
+        vt._http_request = boom
 
         async def run():
             return await vt._confirm_time_based_sqli(
@@ -74,10 +72,10 @@ class TestConfirmTimeBasedSqli:
         async def flaky(*args, **kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
-                return 200, "ok", {}  # fast baseline
-            return 0, "", {}  # client timeout on SLEEP probe
+                return 200, "ok", {}
+            return 0, "", {}
 
-        vt._http_request = flaky  # type: ignore
+        vt._http_request = flaky
 
         async def run():
             return await vt._confirm_time_based_sqli(

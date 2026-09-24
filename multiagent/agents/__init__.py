@@ -1,4 +1,3 @@
-# agents/__init__.py
 """
 Multi-Agent System for Threat Modeling and Web Scanning.
 
@@ -19,11 +18,9 @@ from .redis_manager import (
 )
 
 __all__ = [
-    # QA Agent
     'answer_question_from_db',
     'set_config',
 
-    # Redis Manager
     'set_agent_state',
     'get_agent_state',
     'publish_event',

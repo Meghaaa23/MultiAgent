@@ -14,7 +14,6 @@ from multiagent.agents.webappscanner.vulnerability_tester import (
     _sqli_error_match,
 )
 
-
 class TestXssConfirmationGate:
     def test_rejects_406_redirect_error_echo(self):
         body = (
@@ -62,7 +61,6 @@ class TestXssConfirmationGate:
         assert ok is True, reason
         assert reason == "ok"
 
-
 class TestInjectableUrlSeeding:
     def test_seeds_generic_search_when_empty(self):
         urls = synthesize_injectable_urls("http://localhost:3141", [])
@@ -82,7 +80,6 @@ class TestInjectableUrlSeeding:
             ["http://localhost:3141/rest/products/search?q=apple"],
         )
         assert any("q=apple" in u for u in urls)
-
 
 class TestSqliOracles:
     def test_sqlite_error_pattern(self):

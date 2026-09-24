@@ -1,9 +1,8 @@
 {
-    "page_title": "Email Assistant",
-    "technologies": [
-        "OpenAI"
-    ],
+    "page_title": "Inbox compose draft assistant",
+    "technologies": [],
     "ml_endpoints": [
-        "/compose"
+        "/api/compose",
+        "/api/mailbox"
     ]
 }

@@ -6,18 +6,12 @@ import urllib.request
 import pytest
 from multiagent.agents.ai_agents.ai_vulnerability_test import IndirectInjectionProbe
 
-
 @pytest.fixture
 def probe():
     p = IndirectInjectionProbe()
     p.start()
     yield p
     p.stop()
-
-
-# ---------------------------------------------------------------------------
-# Server lifecycle
-# ---------------------------------------------------------------------------
 
 class TestProbeLifecycle:
 
@@ -34,11 +28,6 @@ class TestProbeLifecycle:
 
     def test_host_is_loopback(self, probe):
         assert probe.host == "127.0.0.1"
-
-
-# ---------------------------------------------------------------------------
-# URL generation
-# ---------------------------------------------------------------------------
 
 class TestProbeUrlGeneration:
 
@@ -58,11 +47,6 @@ class TestProbeUrlGeneration:
     def test_path_suffix_appended(self, probe):
         url = probe.url_for_payload("test", path_suffix=".html")
         assert url.endswith(".html")
-
-
-# ---------------------------------------------------------------------------
-# Page content
-# ---------------------------------------------------------------------------
 
 class TestProbePageContent:
 
@@ -90,7 +74,6 @@ class TestProbePageContent:
     def test_page_has_surrounding_context(self, probe):
         url = probe.url_for_payload("injected content here")
         resp = urllib.request.urlopen(url, timeout=3).read().decode()
-        # Should look like a real document, not just the raw payload
         assert "<p>" in resp or "<h1>" in resp
 
     def test_multiple_payloads_served_independently(self, probe):
@@ -102,11 +85,6 @@ class TestProbePageContent:
         assert "PAYLOAD_TWO" in resp2
         assert "PAYLOAD_ONE" not in resp2
         assert "PAYLOAD_TWO" not in resp1
-
-
-# ---------------------------------------------------------------------------
-# SUMMARIZE_PATHS constant
-# ---------------------------------------------------------------------------
 
 class TestSummarizePaths:
 

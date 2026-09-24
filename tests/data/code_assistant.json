@@ -1,9 +1,8 @@
 {
-    "page_title": "AI Code Assistant",
-    "technologies": [
-        "OpenAI"
-    ],
+    "page_title": "IDE lint and diff assistant",
+    "technologies": [],
     "ml_endpoints": [
-        "/generate"
+        "/api/repository/diff",
+        "/api/lint"
     ]
 }
