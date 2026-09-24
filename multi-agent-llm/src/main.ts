@@ -48,6 +48,16 @@ interface StreamError {
   phase?: string;
 }
 
+/** Optional login for authenticated scans. Held in memory only. */
+export interface ScanAuth {
+  username: string;
+  password: string;
+  login_url?: string;
+  username_selector?: string;
+  password_selector?: string;
+  success_indicator?: string;
+}
+
 type StreamEvent =
   | { type: 'progress'; data: ProgressEvent }
   | { type: 'result'; data: StreamResult }
@@ -80,12 +90,14 @@ export class ApiService {
 
   queryDocument(
     question: string,
-    sessionId?: string
+    sessionId?: string,
+    auth?: ScanAuth | null
   ): Promise<any> {
     const payload: any = {
       question,
       session_id: sessionId || this.getSessionId()
     };
+    if (auth) payload.auth = auth;
     return firstValueFrom(
       this.http.post<any>('/api/query/', payload, {
         headers: { 'Content-Type': 'application/json' }
@@ -95,13 +107,15 @@ export class ApiService {
 
   queryDocumentStream(
     question: string,
-    sessionId?: string
+    sessionId?: string,
+    auth?: ScanAuth | null
   ): Observable<StreamEvent> {
     const subject = new Subject<StreamEvent>();
     const payload: any = {
       question,
       session_id: sessionId || this.getSessionId()
     };
+    if (auth) payload.auth = auth;
     this.consumeSSE('/api/query/stream', payload, subject);
     return subject.asObservable();
   }
@@ -340,6 +354,63 @@ export class ApiService {
           {{ uploadError() }}
         </div>
 
+        <!-- Optional login for authenticated scans -->
+        <div class="rounded-lg border border-gray-700 bg-gray-900/60">
+          <button type="button"
+                  (click)="showAuth.set(!showAuth())"
+                  [disabled]="isLoading()"
+                  class="w-full flex items-center justify-between px-3 py-2 text-left text-xs font-medium text-gray-300 hover:bg-gray-700/50 rounded-lg disabled:opacity-60">
+            <span>
+              Authentication (optional)
+              <span *ngIf="hasAuth()" class="ml-2 px-1.5 py-0.5 rounded bg-green-800 text-green-200">
+                scan as {{ auth.username }}
+              </span>
+            </span>
+            <span class="text-gray-500">{{ showAuth() ? '▾' : '▸' }}</span>
+          </button>
+
+          <div *ngIf="showAuth()" class="px-3 pb-3 pt-1 space-y-2">
+            <p class="text-xs text-gray-500">
+              Credentials for the target app. The scanner logs in first and tests pages behind the login too.
+              They're sent only with this scan and aren't saved.
+            </p>
+            <form class="grid grid-cols-1 sm:grid-cols-2 gap-2" autocomplete="off" (submit)="$event.preventDefault()">
+              <input [(ngModel)]="auth.username" name="scanUser" type="text" autocomplete="off"
+                     placeholder="Username or email" [disabled]="isLoading()"
+                     class="px-3 py-2 rounded bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
+              <input [(ngModel)]="auth.password" name="scanPass" type="password" autocomplete="new-password"
+                     placeholder="Password" [disabled]="isLoading()"
+                     class="px-3 py-2 rounded bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
+              <input [(ngModel)]="auth.login_url" name="scanLoginUrl" type="url"
+                     placeholder="Login page URL (optional — auto-detected if blank)" [disabled]="isLoading()"
+                     class="sm:col-span-2 px-3 py-2 rounded bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
+            </form>
+
+            <button type="button" (click)="showAuthAdvanced.set(!showAuthAdvanced())"
+                    class="text-xs text-blue-400 hover:text-blue-300">
+              {{ showAuthAdvanced() ? 'Hide advanced' : 'Advanced (if login is not auto-detected)' }}
+            </button>
+            <div *ngIf="showAuthAdvanced()" class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input [(ngModel)]="auth.username_selector" name="scanUserSel" type="text"
+                     placeholder="Username field CSS, e.g. #email" [disabled]="isLoading()"
+                     class="px-3 py-2 rounded bg-gray-800 border border-gray-600 text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
+              <input [(ngModel)]="auth.password_selector" name="scanPassSel" type="text"
+                     placeholder="Password field CSS, e.g. #password" [disabled]="isLoading()"
+                     class="px-3 py-2 rounded bg-gray-800 border border-gray-600 text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
+              <input [(ngModel)]="auth.success_indicator" name="scanSuccess" type="text"
+                     placeholder="Text only shown when logged in" [disabled]="isLoading()"
+                     class="px-3 py-2 rounded bg-gray-800 border border-gray-600 text-xs text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
+            </div>
+
+            <div class="flex justify-end">
+              <button type="button" (click)="clearAuth()" [disabled]="isLoading()"
+                      class="text-xs text-gray-400 hover:text-red-300 disabled:opacity-60">
+                Clear credentials
+              </button>
+            </div>
+          </div>
+        </div>
+
         <textarea #promptInput
                   rows="3"
                   placeholder="Ask a security question or paste a URL to scan..."
@@ -386,6 +457,37 @@ export class AppComponent {
   analysisSteps = signal<string[]>([]);
 
   activeSections = signal<Map<number, string | null>>(new Map());
+
+  showAuth = signal(false);
+  showAuthAdvanced = signal(false);
+  auth: ScanAuth = this.emptyAuth();
+
+  private emptyAuth(): ScanAuth {
+    return {
+      username: '', password: '', login_url: '',
+      username_selector: '', password_selector: '', success_indicator: ''
+    };
+  }
+
+  hasAuth(): boolean {
+    return !!(this.auth.username.trim() && this.auth.password);
+  }
+
+  clearAuth(): void {
+    this.auth = this.emptyAuth();
+  }
+
+  /** Snapshot sent with the request, or null when no credentials are set. */
+  private authPayload(): ScanAuth | null {
+    if (!this.hasAuth()) return null;
+    const a = this.auth;
+    const out: ScanAuth = { username: a.username.trim(), password: a.password };
+    for (const k of ['login_url', 'username_selector', 'password_selector', 'success_indicator'] as const) {
+      const v = (a[k] || '').trim();
+      if (v) out[k] = v;
+    }
+    return out;
+  }
 
   toggleSection(msgIdx: number, sectionId: string): void {
     const current = this.activeSections().get(msgIdx);
@@ -444,7 +546,11 @@ export class AppComponent {
     this.analysisPercent.set(5);
     this.analysisSteps.set([]);
 
-    this.appendMessage({ sender: 'user', text: question });
+    const auth = this.authPayload();
+    this.appendMessage({
+      sender: 'user',
+      text: auth ? `${question}\n\n🔐 Authenticated scan as ${auth.username}` : question
+    });
     this.scrollToBottom();
 
     let settled = false;
@@ -458,7 +564,8 @@ export class AppComponent {
     try {
       this.apiService.queryDocumentStream(
         question,
-        undefined
+        undefined,
+        auth
       ).subscribe({
         next: (event: StreamEvent) => {
           switch (event.type) {
@@ -497,31 +604,31 @@ export class AppComponent {
           console.error('Stream error:', err);
           this.analysisMessage.set('Streaming unavailable, using standard query...');
           this.analysisPercent.set(40);
-          await this.fallbackQuery(question);
+          await this.fallbackQuery(question, auth);
           finish();
         },
         complete: () => {
 
           if (!settled && this.isLoading()) {
             this.analysisMessage.set('Completing via standard query...');
-            this.fallbackQuery(question).finally(finish);
+            this.fallbackQuery(question, auth).finally(finish);
           }
         }
       });
     } catch (err: any) {
       console.error('Error:', err);
-      await this.fallbackQuery(question);
+      await this.fallbackQuery(question, auth);
       finish();
     }
   }
 
-  private async fallbackQuery(question: string): Promise<void> {
+  private async fallbackQuery(question: string, auth: ScanAuth | null = null): Promise<void> {
     try {
       this.analysisMessage.set('Waiting for response...');
       this.analysisPercent.set(60);
 
       const queryResponse = await this.apiService.queryDocument(
-        question, undefined
+        question, undefined, auth
       );
 
       const answer = queryResponse?.answer ?? 'No answer received';

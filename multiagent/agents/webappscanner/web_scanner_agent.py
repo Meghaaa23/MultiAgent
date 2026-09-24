@@ -19,6 +19,7 @@ from ..ai_agents.ai_fingerprint            import AIFingerprintAgent
 from ..ai_agents.avid_lookup_agent         import AVIDLookupAgent
 from ..ai_agents.ai_vulnerability_test     import AIVulnerabilityTester
 from ..ai_agents.Ai_Infra_agent            import AIInfraAgent
+from . import auth_session as _auth
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +153,57 @@ class WebScannerAgent:
     async def scan_application(self, target_url: str,
                                max_time_minutes: int = 15,
                                verbose: bool = False,
-                               ai_auth_token: Optional[str] = None) -> Dict:
+                               ai_auth_token: Optional[str] = None,
+                               auth: Optional[Dict] = None) -> Dict:
+        """
+        auth (optional): {"username", "password", "login_url",
+        "username_selector", "password_selector", "success_indicator"}.
+        When given, the scanner logs in first and every component reuses the
+        session; if login fails the scan continues unauthenticated and the
+        report says why.
+        """
+        session: Optional[_auth.AuthSession] = None
+        if auth and auth.get("username") and auth.get("password"):
+            base = _resolve_docker_url(target_url.split("#")[0].rstrip("/"))
+            login_url = auth.get("login_url") or ""
+            if login_url:
+                login_url = _resolve_docker_url(login_url)
+            if verbose:
+                print(f"\nAuthenticating as {auth['username']!r}...")
+            session = await _auth.login(
+                target_url=base,
+                username=auth["username"],
+                password=auth["password"],
+                login_url=login_url,
+                username_selector=auth.get("username_selector") or "",
+                password_selector=auth.get("password_selector") or "",
+                success_indicator=auth.get("success_indicator") or "",
+                verbose=verbose,
+            )
+            if session.logged_in:
+                _auth.activate(session)
+            elif verbose:
+                print(f"   ! {session.error} - continuing unauthenticated\n")
+        try:
+            return await self._scan_application(
+                target_url, max_time_minutes=max_time_minutes, verbose=verbose,
+                ai_auth_token=ai_auth_token, session=session,
+            )
+        finally:
+            if session is not None:
+                _auth.deactivate(session)
+
+    async def _scan_application(self, target_url: str,
+                                max_time_minutes: int = 15,
+                                verbose: bool = False,
+                                ai_auth_token: Optional[str] = None,
+                                session: Optional["_auth.AuthSession"] = None) -> Dict:
         start = datetime.now()
+        authed = bool(session and session.logged_in)
+
+        async def _keep_session():
+            if authed:
+                await session.ensure_alive(verbose=verbose)
 
         ai_auth_headers = (
             {"Authorization": f"Bearer {ai_auth_token}"} if ai_auth_token else None
@@ -161,12 +211,19 @@ class WebScannerAgent:
         ai_fingerprinter = self.ai_fingerprinter
         ai_infra_agent   = self.ai_infra_agent
         ai_vuln_tester   = self.ai_vuln_tester
+        # urllib calls pick the login session up via the global handler;
+        # the httpx-based infra agent needs it passed explicitly.
+        infra_headers = {
+            **(session.request_headers() if authed else {}),
+            **(ai_auth_headers or {}),
+        }
+        if infra_headers:
+            ai_infra_agent = AIInfraAgent(
+                openai_client=self.openai_client, llm_model=self.llm_model,
+                auth_headers=infra_headers,
+            )
         if ai_auth_headers:
             ai_fingerprinter = AIFingerprintAgent(timeout=8, auth_headers=ai_auth_headers)
-            ai_infra_agent   = AIInfraAgent(
-                openai_client=self.openai_client, llm_model=self.llm_model,
-                auth_headers=ai_auth_headers,
-            )
             ai_vuln_tester   = AIVulnerabilityTester(
                 timeout=10, llm_model=self.llm_model, enable_embeddings=False,
                 auth_headers=ai_auth_headers,
@@ -180,10 +237,13 @@ class WebScannerAgent:
         if verbose:
             print(f"\n{'='*70}")
             print(f"Evidence Based Web Application Scan + AI Backdoor Detection")
-            print(f"  Mode   : Black-box unauthenticated")
+            print("  Mode   : "
+                  + (f"Authenticated (as {session.username!r})" if authed
+                     else "Black-box unauthenticated"))
             print(f"  Target : {target_url}")
             print(f"  Budget : {max_time_minutes} minutes")
-            print(f"  Crawl  : Deep (shared anonymous session)")
+            print("  Crawl  : Deep (shared "
+                  + ("authenticated" if authed else "anonymous") + " session)")
             print(f"  AI Pipeline Auth : {'provided' if ai_auth_headers else 'none (unauthenticated)'}")
             print(f"{'='*70}\n")
 
@@ -275,6 +335,7 @@ class WebScannerAgent:
                 logger.debug(f"App identity failed: {e}")
 
       
+        await _keep_session()
         if verbose:
             print("Endpoint Discovery...")
         discovered_endpoints: List[Dict] = []
@@ -319,6 +380,7 @@ class WebScannerAgent:
                   + (" [soft-404 filter active]" if soft_mode else "") + "\n")
 
       
+        await _keep_session()
         if verbose:
             print("AI/ML Component Detection...")
 
@@ -425,6 +487,7 @@ class WebScannerAgent:
         if verbose:
             print(" CVE Lookup — skipped (fingerprint-only mode)\n")
 
+        await _keep_session()
         if verbose:
             print("Deep Browser Crawl (Yura-style shared session)...")
 
@@ -502,6 +565,7 @@ class WebScannerAgent:
             )
 
    
+        await _keep_session()
         if verbose:
             print("SPA Scanning...")
         try:
@@ -531,8 +595,26 @@ class WebScannerAgent:
             logger.warning(f"SPA scanning failed: {e}")
 
        
+        await _keep_session()
         if verbose:
             print("Vulnerability Testing...")
+        skipped_password_forms: List[Dict] = []
+        if authed:
+            # Forms with 2+ password inputs are change-password / sign-up
+            # forms; fuzzing them could rotate the scan account's password
+            # and end the authenticated session.
+            def _pw_fields(form):
+                return sum(
+                    1 for i in (form.get("inputs") or form.get("fields") or [])
+                    if isinstance(i, dict)
+                    and (i.get("type") or "").lower() == "password"
+                )
+            skipped_password_forms = [f for f in all_forms if _pw_fields(f) >= 2]
+            if skipped_password_forms:
+                all_forms = [f for f in all_forms if _pw_fields(f) < 2]
+                if verbose:
+                    print(f"   Skipping {len(skipped_password_forms)} password-change/"
+                          "registration form(s) to protect the scan account")
         raw_findings: List[Dict] = list(crawl_findings)
         forms_exercised: List[Dict] = []
         try:
@@ -585,6 +667,7 @@ class WebScannerAgent:
             print(f"  {c} confirmed, {p} potential\n")
 
      
+        await _keep_session()
         if verbose:
             print(" Attack Verification...")
         verified_findings: List[Dict] = []
@@ -754,6 +837,14 @@ class WebScannerAgent:
             elif ep.get("interesting"):
                 report_endpoints.append(ep)
 
+        for f in skipped_password_forms:
+            not_assessed_endpoints.append({
+                "url": f.get("action") or "",
+                "reason": "password_form_skipped_while_authenticated",
+                "status": None,
+                "assessment": "not_assessed",
+            })
+
         assessed_count = sum(
             1 for ep in report_endpoints
             if ep.get("interesting")
@@ -763,7 +854,9 @@ class WebScannerAgent:
             and not ep.get("redirects_to_auth")
             and not ep.get("access_controlled")
         )
-        auth_gated_count = len(not_assessed_endpoints)
+        auth_gated_count = sum(
+            1 for e in not_assessed_endpoints if e.get("reason") == "auth_required"
+        )
         auth_wall_dominated = auth_gated_count > 0 and (
             auth_gated_count >= max(assessed_count, 1) or assessed_count <= 1
         )
@@ -772,19 +865,21 @@ class WebScannerAgent:
             round(100.0 * assessed_count / discovered_ep_count, 1)
             if discovered_ep_count else 0.0
         )
+        scan_scope = "authenticated" if authed else "blackbox_unauth"
+        surface = "authenticated" if authed else "pre-authentication"
         coverage_assessment = {
-            "scope": "blackbox_unauth",
+            "scope": scan_scope,
             "assessed_count": assessed_count,
             "auth_gated_count": auth_gated_count,
             "auth_wall_dominated": auth_wall_dominated,
             "discovered_count": discovered_ep_count,
             "coverage_percent": coverage_pct,
             "note": (
-                f"Assessed surface limited to pre-authentication endpoints; "
-                f"{auth_gated_count} functional surface(s) were auth-gated "
-                f"and not tested."
+                f"Assessed surface limited to {surface} endpoints; "
+                f"{auth_gated_count} functional surface(s) were access-controlled "
+                f"for this session and not tested."
                 if auth_gated_count > 0 else
-                "Full discovered pre-auth surface assessed."
+                f"Full discovered {surface} surface assessed."
             ),
         }
 
@@ -878,7 +973,8 @@ class WebScannerAgent:
             "forms_testing":          forms_testing,
             "urls_discovered":        len(all_urls),
             "scan_duration":          round(duration, 1),
-            "scan_scope":             "blackbox_unauth",
+            "scan_scope":             scan_scope,
+            "auth":                   session.summary() if session else {"enabled": False},
             "ai_scan_authenticated":  bool(ai_auth_headers),
             "timestamp":              datetime.now().isoformat(),
             "is_ai_powered":          is_ai_powered or brand_only_ai or route_confirmed_only_ai,

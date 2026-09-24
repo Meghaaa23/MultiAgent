@@ -15,6 +15,7 @@ from .interstate_tracker import (
 )
 
 logger = logging.getLogger(__name__)
+from . import auth_session as _auth
 
 class BrowserController:
     """
@@ -133,6 +134,7 @@ class BrowserController:
                     headless=True, args=["--no-sandbox"]
                 )
                 context = await browser.new_context()
+                await _auth.prepare_context(context)
                 page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(2000)
@@ -581,6 +583,10 @@ Output JSON only:
                     target = clickables[target_id]
                     text = (target.get("text") or "")[:50]
                     href = (target.get("href") or "").strip()
+                    if _auth.any_active() and (
+                        _auth.is_logout_url(href) or _auth.is_logout_url(text)
+                    ):
+                        return False
                     if href and (
                         "#/" in href
                         or href.startswith(self._session_base or "http")
@@ -721,6 +727,7 @@ Output JSON only:
             self._context = await self._browser.new_context(
                 user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
             )
+            await _auth.prepare_context(self._context)
             self._session_base = self._base_url(base_url)
             self._visited_urls = set()
             self._network_apis = set()
@@ -1179,6 +1186,7 @@ Output JSON only:
                 self._context = await self._browser.new_context(
                     user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
                 )
+                await _auth.prepare_context(self._context)
                 self._session_base = self._base_url(base_url)
                 self._attach_network_listener()
                 page = await self._context.new_page()

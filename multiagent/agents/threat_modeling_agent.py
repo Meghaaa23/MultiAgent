@@ -168,6 +168,59 @@ def _is_manual_queue_finding(v: Dict) -> bool:
     ).lower()
     return conf in ("medium", "high")
 
+def _auth_info(scan_results) -> Dict:
+    return (scan_results or {}).get("auth") or {"enabled": False}
+
+
+def _is_authenticated_scan(scan_results) -> bool:
+    return (scan_results or {}).get("scan_scope") == "authenticated"
+
+
+def _authed_wording(text: str, scan_results) -> str:
+    """Rewrite pre-auth scope wording when the scan ran with a login session."""
+    if not _is_authenticated_scan(scan_results):
+        return text
+    user = _auth_info(scan_results).get("username") or "operator account"
+    for old, new in (
+        ("[Black-box unauthenticated]", f"[Authenticated as '{user}']"),
+        ("pre-authentication", "authenticated"),
+        ("(pre-auth)", "(authenticated)"),
+        ("pre-auth surface", "authenticated surface"),
+        ("on unauthenticated surfaces", "on the authenticated surface"),
+        ("on the unauthenticated surface", "on the authenticated surface"),
+        ("unauthenticated only", f"authenticated as '{user}'"),
+        ("auth-gated", "access-controlled for this account"),
+    ):
+        text = text.replace(old, new)
+    return text
+
+
+def _auth_status_line(scan_results) -> str:
+    a = _auth_info(scan_results)
+    if not a.get("enabled"):
+        return ""
+    user = a.get("username") or "?"
+    if a.get("logged_in"):
+        via = []
+        if a.get("cookie_names"):
+            via.append(f"session cookie(s) {', '.join(a['cookie_names'][:5])}")
+        if a.get("auth_header"):
+            via.append(f"Authorization header ({a.get('auth_header_source') or 'captured'})")
+        line = (f" Authentication: logged in as '{user}' via "
+                f"{a.get('login_page_url') or 'login form'}"
+                + (f"; session carried by {' and '.join(via)}" if via else "")
+                + ".")
+        if a.get("relogin_count"):
+            line += f" Session expired and was re-established {a['relogin_count']} time(s)."
+        if not a.get("expiry_monitored"):
+            line += " Session expiry could not be monitored."
+        if a.get("error"):
+            line += f" Note: {a['error']}."
+        return line
+    return (f" Authentication: login as '{user}' FAILED ({a.get('error') or 'unknown error'}); "
+            "results cover the unauthenticated surface only.")
+
+
 def _coverage_from_scan(scan_results) -> Dict:
     """
     Black-box unauth coverage signal: how much of the discovered surface
@@ -176,7 +229,11 @@ def _coverage_from_scan(scan_results) -> Dict:
     sr = scan_results or {}
     not_assessed = list(sr.get("not_assessed_endpoints") or [])
     endpoints = list(sr.get("endpoints_discovered") or [])
-    n_auth_gated = len(not_assessed)
+    n_auth_gated = sum(
+        1 for e in not_assessed
+        if not isinstance(e, dict)
+        or (e.get("reason") or "auth_required") == "auth_required"
+    )
 
     assessed = []
     for ep in endpoints:
@@ -277,6 +334,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
             summary += " — no exploitable surfaces found on unauthenticated surfaces."
     else:
         summary += f" Top actions: {actions_text}"
+    summary = _authed_wording(summary, scan_results) + _auth_status_line(scan_results)
 
     return f" 1. EXECUTIVE SUMMARY\n{summary}"
 
@@ -759,7 +817,7 @@ def _coverage_denominator_text(scan_results) -> str:
         parts.append(f"{n_excluded} candidate path(s) excluded as soft-404")
     if n_auth:
         parts.append(f"{n_auth} auth-gated surface(s) not tested")
-    return "Coverage: " + "; ".join(parts) + "."
+    return _authed_wording("Coverage: " + "; ".join(parts) + ".", scan_results)
 
 def _build_section_4(potential_vulns, scan_results=None):
     lines = [" 4. POTENTIAL VULNERABILITIES"]
@@ -889,11 +947,11 @@ def _build_section_8_ai_negative(scan_results: Dict) -> str:
             + _coverage_denominator_text(scan_results)
         )
     else:
-        note = (
+        note = _authed_wording(
             "No AI/ML attack surface detected on the unauthenticated "
-            "surface; AI-specific analysis not applicable. "
-            + _coverage_denominator_text(scan_results)
-        )
+            "surface; AI-specific analysis not applicable. ",
+            scan_results,
+        ) + _coverage_denominator_text(scan_results)
     return " 8. AI/ML BACKDOOR VULNERABILITY ANALYSIS\n\n" + note
 
 def _build_section_8_ai_backdoor(scan_results: Dict) -> str:
@@ -1272,6 +1330,7 @@ Answer:"""
                       enable_web_scan: bool = False,
                       target_url: str = None,
                       ai_auth_token: Optional[str] = None,
+                      auth: Optional[Dict] = None,
                       ) -> Dict:
 
         if verbose:
@@ -1281,7 +1340,8 @@ Answer:"""
             print(f"Query: {user_query}")
             if enable_web_scan:
                 print(f"Web Scan: ENABLED | Target: {target_url}"
-                      f" | AI Pipeline Auth: {'provided' if ai_auth_token else 'none'}")
+                      f" | AI Pipeline Auth: {'provided' if ai_auth_token else 'none'}"
+                      f" | Login: {auth.get('username') if auth else 'none'}")
             print("=" * 80 + "\n")
 
         if not enable_web_scan:
@@ -1289,7 +1349,10 @@ Answer:"""
         if enable_web_scan and not target_url:
             target_url = self._extract_url_from_query(user_query)
 
-        cache_key = self._generate_cache_key(user_query, include_scan=enable_web_scan)
+        cache_key = self._generate_cache_key(
+            user_query + (f" :auth={auth.get('username', '')}" if auth else ""),
+            include_scan=enable_web_scan,
+        )
 
         if use_cache:
             cached = get_cached_result(cache_key)
@@ -1321,7 +1384,7 @@ Answer:"""
                 print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
             scan_results = await scanner.scan_application(
                 target_url=target_url, max_time_minutes=15, verbose=verbose,
-                ai_auth_token=ai_auth_token,
+                ai_auth_token=ai_auth_token, auth=auth,
             )
 
         if verbose:

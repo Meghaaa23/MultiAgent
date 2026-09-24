@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+from . import auth_session as _auth
 
 class VulnStatus(str, Enum):
     CONFIRMED  = "Confirmed"
@@ -853,9 +854,9 @@ class AttackVerificationAgent:
                     def http_response(self, request, response):
                         return response
                     https_response = http_response
-                opener = urllib.request.build_opener(NoRedirect)
+                opener = urllib.request.build_opener(NoRedirect, *_auth.auth_handlers())
             else:
-                opener = urllib.request.build_opener()
+                opener = urllib.request.build_opener(*_auth.auth_handlers())
 
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (SecurityScanner)"})
             with opener.open(req, timeout=self.timeout) as resp:

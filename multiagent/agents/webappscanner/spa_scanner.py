@@ -30,6 +30,7 @@ import urllib.parse
 from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
+from . import auth_session as _auth
 
 FRAMEWORK_SIGNATURES = {
     "angular": ["ng-version", "ng-app", "__ngContext__", "app-root",
@@ -202,7 +203,9 @@ class SPAScanner:
                     headless=True,
                     args=["--no-sandbox", "--disable-dev-shm-usage"]
                 )
-                page = await browser.new_page()
+                context = await browser.new_context()
+                await _auth.prepare_context(context)
+                page = await context.new_page()
                 await page.goto(base, timeout=self.timeout_ms,
                                 wait_until="networkidle")
                 await page.wait_for_timeout(2000)
@@ -371,6 +374,7 @@ class SPAScanner:
             ctx = await browser.new_context(
                 user_agent="Mozilla/5.0 (SecurityScanner/YuraRAG)"
             )
+            await _auth.prepare_context(ctx)
 
             for route in routes[:self.max_routes]:
                 url  = route["url"]

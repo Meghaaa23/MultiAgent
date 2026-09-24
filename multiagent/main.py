@@ -326,6 +326,22 @@ async def get_team_history(session_id: str) -> List[Dict]:
                 })
     return history
 
+_AUTH_KEYS = ("username", "password", "login_url",
+              "username_selector", "password_selector", "success_indicator")
+
+
+def _auth_from_body(raw: Any) -> Optional[Dict[str, str]]:
+    """Normalise the optional login block; None unless username+password given.
+    The result holds the password — never log it or echo it back."""
+    if not isinstance(raw, dict):
+        return None
+    auth = {k: str(raw.get(k) or "").strip() for k in _AUTH_KEYS}
+    auth["password"] = str(raw.get("password") or "")  # keep exact, no strip
+    if not auth["username"] or not auth["password"]:
+        return None
+    return auth
+
+
 def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
@@ -389,6 +405,7 @@ async def query_with_full_autogen(request: Request):
         body        = await request.json()
         question    = body.get("question")
         session_id  = body.get("session_id", "default")
+        auth        = _auth_from_body(body.get("auth"))
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
 
@@ -415,12 +432,15 @@ async def query_with_full_autogen(request: Request):
                 logger.info("ROUTING → ThreatModelingAgent (web scan + AI detection)")
                 try:
                     target_url = threat_modeling_agent._extract_url_from_query(question)
+                    if auth:
+                        logger.info(f"Authenticated scan requested as {auth['username']!r}")
                     result = await threat_modeling_agent.analyze(
                         user_query=question,
                         verbose=True,
                         use_cache=False,
                         enable_web_scan=True,
                         target_url=target_url,
+                        auth=auth,
                     )
                     scan_data = (
                         result.get("reasoning_chain", {}).get("scan_results") or {}
@@ -434,6 +454,7 @@ async def query_with_full_autogen(request: Request):
                         "reasoning_chain":      result.get("reasoning_chain"),
                         "scan_performed":       result.get("web_scan_performed", False),
                         "target_url":           target_url,
+                        "auth":                 scan_data.get("auth") or {"enabled": False},
                         "vulnerabilities_found": (scan_data.get("confirmed_vulns", 0) + scan_data.get("potential_vulns", 0)),
                     "is_ai_powered":        scan_data.get("is_ai_powered", False),
                     "ai_vulns_found":       len([
@@ -517,6 +538,7 @@ async def query_with_full_autogen(request: Request):
 class StreamQueryRequest(BaseModel):
     question:   str
     session_id: Optional[str] = None
+    auth:       Optional[Dict[str, Any]] = None
 
 @app.post("/query/stream")
 async def query_stream(request: StreamQueryRequest):
@@ -525,6 +547,7 @@ async def query_stream(request: StreamQueryRequest):
         try:
             question   = request.question
             session_id = request.session_id or "default"
+            auth       = _auth_from_body(request.auth)
 
             yield _format_sse("progress", {
                 "phase": "classification", "step": 1, "total_steps": 6,
@@ -627,7 +650,11 @@ async def query_stream(request: StreamQueryRequest):
                 else:
                     yield _format_sse("progress", {
                         "phase": "active_scanning", "step": 4, "total_steps": 6,
-                        "message": f"Scanning {target_url} · detecting AI components...",
+                        "message": (
+                            f"Logging in as {auth['username']} and scanning {target_url}..."
+                            if auth else
+                            f"Scanning {target_url} · detecting AI components..."
+                        ),
                         "percent": 48,
                     })
                     await asyncio.sleep(0)
@@ -635,6 +662,7 @@ async def query_stream(request: StreamQueryRequest):
                     scan_task = asyncio.create_task(
                         scanner.scan_application(
                             target_url=target_url, max_time_minutes=15, verbose=True,
+                            auth=auth,
                         )
                     )
 
@@ -663,6 +691,18 @@ async def query_stream(request: StreamQueryRequest):
                     scan_results = await scan_task
                     vuln_count   = len(scan_results.get('vulnerabilities', []))
                     ai_powered   = scan_results.get("is_ai_powered", False)
+                    auth_info    = scan_results.get("auth") or {}
+                    if auth_info.get("enabled"):
+                        yield _format_sse("progress", {
+                            "phase": "active_scanning", "step": 4, "total_steps": 6,
+                            "message": (
+                                f"Authenticated as {auth_info.get('username')}"
+                                if auth_info.get("logged_in") else
+                                f"Login failed ({auth_info.get('error')}) — scanned unauthenticated"
+                            ),
+                            "percent": 64,
+                        })
+                        await asyncio.sleep(0)
 
                     yield _format_sse("progress", {
                         "phase": "active_scanning", "step": 4, "total_steps": 6,
@@ -710,6 +750,7 @@ async def query_stream(request: StreamQueryRequest):
                 "web_scan_performed": bool(is_web_scan and scan_results),
                 "target_url":       target_url,
                 "is_ai_powered":    (scan_results or {}).get("is_ai_powered", False),
+                "auth":             (scan_results or {}).get("auth") or {"enabled": False},
                 "cached":           False,
                 "timestamp":        datetime.now().isoformat(),
             })
@@ -735,19 +776,22 @@ async def scan_web_application(request: Request):
         target_url    = body.get("target_url")
         session_id    = body.get("session_id", "scan-default")
         ai_auth_token = body.get("ai_auth_token") or body.get("auth_token")
+        auth          = _auth_from_body(body.get("auth"))
 
         if not target_url:
             raise HTTPException(status_code=400, detail="Missing target_url")
         if not threat_modeling_agent:
             raise HTTPException(status_code=503, detail="Scanner not available")
 
-        logger.info(f"SCAN: {target_url}" + (" (AI pipeline authenticated)" if ai_auth_token else ""))
+        logger.info(f"SCAN: {target_url}"
+                    + (" (AI pipeline authenticated)" if ai_auth_token else "")
+                    + (f" (login as {auth['username']!r})" if auth else ""))
 
         result     = await threat_modeling_agent.analyze(
             user_query=f"Scan {target_url} for security vulnerabilities",
             verbose=True, use_cache=False,
             enable_web_scan=True, target_url=target_url,
-            ai_auth_token=ai_auth_token,
+            ai_auth_token=ai_auth_token, auth=auth,
         )
         scan_data  = result.get("reasoning_chain", {}).get("scan_results") or {}
 
@@ -755,6 +799,7 @@ async def scan_web_application(request: Request):
             "target_url":    target_url,
             "scan_complete": True,
             "scan_scope":    scan_data.get("scan_scope", "blackbox_unauth"),
+            "auth":          scan_data.get("auth") or {"enabled": False},
             "report":        result["report"],
             "scan_summary":  {
                 "tasks_generated":    scan_data.get("tasks_generated", 0),
