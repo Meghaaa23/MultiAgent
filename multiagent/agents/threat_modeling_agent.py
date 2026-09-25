@@ -297,6 +297,7 @@ def _auth_and_surface_block(scan_results) -> str:
             f" - Username: {a.get('username') or '?'}",
             " - Authentication status: SUCCESS",
             " - Authenticated crawling: ENABLED",
+            " - Post-login surfaces tested: YES",
             " Attack surface:",
             f" - Public pages: {public_pages}",
             f" - Authenticated pages: {auth_pages}",
@@ -316,7 +317,7 @@ def _auth_and_surface_block(scan_results) -> str:
     else:
         lines += [
             " Authentication:",
-            " - Status: NOT ATTEMPTED (no credentials supplied)",
+            " - Status: NOT PROVIDED (no credentials supplied)",
             " - Post-login surfaces tested: NO",
             " Attack surface:",
             f" - Public pages: {public_pages}",
