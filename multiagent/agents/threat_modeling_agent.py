@@ -136,6 +136,19 @@ def _is_publishable_confirmed(v: Dict) -> bool:
     method = str(ev.get("confirmation_method") or "").lower()
     if "XSS" in ftype and method not in ("js_execution",):
         return False
+
+    # A disclosure finding claims a specific value leaked (e.g. a Server
+    # banner). Unlike a *missing*-header finding, whose evidence is the header's
+    # absence, a disclosure must carry the actual disclosed value — otherwise it
+    # would print "Confirmed" beside a "no value recorded" note. Demote to the
+    # Potential queue when no value is present.
+    if "information disclosure" in ftype.lower() and "header" in ftype.lower():
+        hdrs = ev.get("response_headers") or ev.get("headers") or {}
+        if not isinstance(hdrs, dict) or not any(
+            str(val).strip() for val in hdrs.values()):
+            detail = str(v.get("details") or ev.get("detail") or "")
+            if ":" not in detail:
+                return False
     return True
 
 def _is_private_or_local_host(url: str) -> bool:
@@ -261,6 +274,56 @@ def _coverage_from_scan(scan_results) -> Dict:
         "auth_wall_dominated": dominated,
     }
 
+def _auth_and_surface_block(scan_results) -> str:
+    """Structured authentication + attack-surface block for the executive
+    summary. Proves whether authenticated functionality was actually tested.
+    The password is never read or printed here."""
+    sr = scan_results or {}
+    a = _auth_info(sr)
+    endpoints = [e for e in (sr.get("endpoints_discovered") or [])
+                 if isinstance(e, dict) and (e.get("url") or e.get("path"))]
+    total_routes = len(endpoints)
+    auth_pages = sum(
+        1 for e in endpoints
+        if e.get("access_controlled") or e.get("auth_required")
+        or e.get("redirects_to_auth") or e.get("category") == "discovered_protected"
+    )
+    public_pages = max(0, total_routes - auth_pages)
+
+    lines: List[str] = []
+    if a.get("enabled") and a.get("logged_in"):
+        lines += [
+            " Authentication:",
+            f" - Username: {a.get('username') or '?'}",
+            " - Authentication status: SUCCESS",
+            " - Authenticated crawling: ENABLED",
+            " Attack surface:",
+            f" - Public pages: {public_pages}",
+            f" - Authenticated pages: {auth_pages}",
+            f" - Total discovered routes: {total_routes}",
+        ]
+    elif a.get("enabled"):
+        lines += [
+            " Authentication:",
+            " - Status: FAILED",
+            f" - Reason: {a.get('error') or 'login could not be verified'}",
+            " - Scan continued: YES",
+            " - Post-login surfaces tested: NO",
+            " Attack surface:",
+            f" - Public pages: {public_pages}",
+            f" - Total discovered routes: {total_routes}",
+        ]
+    else:
+        lines += [
+            " Authentication:",
+            " - Status: NOT ATTEMPTED (no credentials supplied)",
+            " - Post-login surfaces tested: NO",
+            " Attack surface:",
+            f" - Public pages: {public_pages}",
+            f" - Total discovered routes: {total_routes}",
+        ]
+    return "\n" + "\n".join(lines)
+
 def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results):
     n_confirmed = len(confirmed_vulns)
     n_potential = len(set(v.get("type", "") for v in potential_vulns))
@@ -335,6 +398,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     else:
         summary += f" Top actions: {actions_text}"
     summary = _authed_wording(summary, scan_results) + _auth_status_line(scan_results)
+    summary += _auth_and_surface_block(scan_results)
 
     return f" 1. EXECUTIVE SUMMARY\n{summary}"
 

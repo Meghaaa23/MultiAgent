@@ -717,7 +717,27 @@ class ActionAgent:
         header   = "X-Powered-By" if is_xpb else "Server"
         hdr_key  = header.lower()
 
-        captured = response_headers.get(hdr_key, "").strip()
+        def _lookup(dct: Optional[Dict]) -> str:
+            if not isinstance(dct, dict):
+                return ""
+            for k, v in dct.items():
+                if str(k).lower() == hdr_key:
+                    return str(v or "").strip()
+            return ""
+
+        # The disclosed value is recorded on the finding's own evidence at
+        # detection time (headers={key: val}); recover it there when the
+        # caller's response_headers snapshot does not carry it, so a genuinely
+        # captured value is never mislabelled "NO EVIDENCE CAPTURED".
+        captured = _lookup(response_headers)
+        if not captured and isinstance(evidence, dict):
+            captured = _lookup(
+                evidence.get("response_headers") or evidence.get("headers") or {})
+        if not captured and isinstance(evidence, dict):
+            detail = str(evidence.get("detail") or "")
+            m = re.search(rf"(?i){re.escape(header)}\s*:\s*(.+)", detail)
+            if m:
+                captured = m.group(1).strip()
 
         if captured and not _server_is_leaky(captured):
             logger.debug(
