@@ -101,12 +101,7 @@ def side_effect_blocks_inject(
     surface_kind: str,
     policy: Optional[ScopePolicy] = None,
 ) -> Tuple[bool, str]:
-    """Second gate after ownership: does submit fire a real-world action?
-
-    Live support/conversations widgets deliver messages into production queues.
-    Default: block. Override with authorize_support_queue when the instance
-    routes to a test inbox the operator owns.
-    """
+    """Second gate after ownership: does submit fire a real-world action?"""
     policy = policy or ScopePolicy()
     if surface_kind == SurfaceKind.FEEDBACK.value:
         return True, "feedback_not_chat"
@@ -174,15 +169,7 @@ def classify_injection_scope(
     is_vendor_marker: bool = False,
     policy: Optional[ScopePolicy] = None,
 ) -> ScopeDecision:
-    """Map ownership + authorization policy (not a capability gate).
-
-    Tiers:
-      1. Same eTLD+1 as target → inject (own LLM on subdomain / product origin)
-      2. Known vendor widget on different eTLD+1 → skip by default;
-         inject only with include_thirdparty
-      3. Other different eTLD+1 → detect_only by default;
-         inject only with authorize_external
-    """
+    """Map ownership + authorization policy (not a capability gate)."""
     policy = policy or ScopePolicy()
     target_etld1 = registrable_domain(target_url)
     surface_etld1 = registrable_domain(surface_url) if surface_url else target_etld1

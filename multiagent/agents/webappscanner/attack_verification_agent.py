@@ -90,6 +90,17 @@ OPEN_REDIRECT_PAYLOADS = [
     "/\\evil.com",
 ]
 
+def _redirect_goes_to_host(location: str, evil_host: str) -> bool:
+    """True only when the redirect's Location actually points at ``evil_host``."""
+    if not location:
+        return False
+    loc = location.strip().replace("\\", "/")
+    m = re.match(r"(?:https?:)?//([^/?#]+)", loc, re.I)
+    if not m:
+        return False
+    host = m.group(1).split("@")[-1].split(":")[0].lower()
+    return host == evil_host or host.endswith("." + evil_host)
+
 PATH_TRAVERSAL_PAYLOADS = [
     "../../../../etc/passwd",
     "..%2F..%2F..%2Fetc%2Fpasswd",
@@ -151,21 +162,13 @@ SECURITY_HEADERS = [
     "Permissions-Policy",
 ]
 
-_SAFE_SERVER_PATTERNS = re.compile(
-    r"^(cloudflare|cloudfront|awselb|fastly|google frontend|"
-    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik)$",
-    re.I,
-)
 
 def _server_header_is_leaky(value: str) -> bool:
+    """Report a server banner only when it discloses a software *version* (what"""
     v = (value or "").strip()
     if not v:
         return False
-    if re.search(r"\d+\.\d+", v):
-        return True
-    if _SAFE_SERVER_PATTERNS.fullmatch(v):
-        return False
-    return True
+    return bool(re.search(r"\d+\.\d+", v) or re.search(r"/\s*v?\d", v))
 
 class AttackVerificationAgent:
 
@@ -181,14 +184,7 @@ class AttackVerificationAgent:
                          vuln_hints: List[str] = None,
                          shared_headers: Optional[Dict] = None,
                          verbose: bool = False) -> List[Finding]:
-        """
-        shared_headers: pre-fetched response headers for target_url, supplied
-            by the caller (WebScannerAgent) so the header/clickjacking checks
-            below use the SAME captured response as the fingerprinter and
-            Action Agent, instead of making yet another independent request
-            that could disagree (e.g. a CDN edge returning a different
-            Server header on a second hit).
-        """
+        """shared_headers: pre-fetched response headers for target_url, supplied"""
         if verbose:
             print(f"\n Attack Verification Agent")
             print(f"   Target: {target_url}")
@@ -199,7 +195,7 @@ class AttackVerificationAgent:
         results = await asyncio.gather(
             self._check_security_headers(target_url, verbose, shared_headers=shared_headers),
             self._check_urls_for_params(target_url, candidate_urls, verbose),
-            self._check_forms(candidate_forms, verbose),
+            self._check_forms(candidate_forms, verbose, base_url=target_url),
             self._check_cors(target_url, verbose),
             self._check_clickjacking(target_url, verbose, shared_headers=shared_headers),
             return_exceptions=True
@@ -455,9 +451,13 @@ class AttackVerificationAgent:
                                      urls: List[str],
                                      verbose: bool = False) -> List[Finding]:
         findings = []
+        base_host = (urllib.parse.urlparse(base_url).netloc or "").lower()
 
         for url in urls:
             parsed = urllib.parse.urlparse(url)
+            url_host = (parsed.netloc or "").lower()
+            if url_host and base_host and url_host != base_host:
+                continue
             params = urllib.parse.parse_qs(parsed.query)
             if not params:
                 continue
@@ -546,9 +546,8 @@ class AttackVerificationAgent:
                 status, headers, body = await self._get_full_response(test_url, follow_redirects=False)
                 location              = headers.get("Location", headers.get("location", ""))
 
-                if status in (301, 302, 303, 307, 308) and (
-                    "evil.com" in location or payload in location
-                ):
+                if status in (301, 302, 303, 307, 308) and \
+                        _redirect_goes_to_host(location, "evil.com"):
                     return Finding(
                         vuln_type   = "Open Redirect",
                         severity    = "Medium",
@@ -577,12 +576,21 @@ class AttackVerificationAgent:
         return None
 
     async def _check_forms(self, forms: List[Dict],
-                           verbose: bool = False) -> List[Finding]:
+                           verbose: bool = False,
+                           base_url: str = "") -> List[Finding]:
         findings = []
+        base_host = (urllib.parse.urlparse(base_url).netloc or "").lower()
 
         for form in forms:
             action = form.get("action", "")
             inputs = form.get("inputs", [])
+
+            if not isinstance(action, str) or "<" in action or ">" in action:
+                continue
+            if base_host:
+                action_host = (urllib.parse.urlparse(action).netloc or "").lower()
+                if action_host and action_host != base_host:
+                    continue
 
             def _has_csrf(inp):
                 name = (inp.get("name", "") or "").lower() if isinstance(inp, dict) else str(inp).lower()

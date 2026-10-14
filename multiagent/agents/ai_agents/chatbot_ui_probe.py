@@ -220,12 +220,7 @@ class StableLocator:
 
 @dataclass
 class ChatWidget:
-    """Detected on-page chatbot interaction surface.
-
-    Evidence tier (`tier`) and injection authorization (`injection_policy`)
-    are independent axes — a surface can be high-confidence detected and
-    still out of injection scope under the default policy.
-    """
+    """Detected on-page chatbot interaction surface."""
     input_selector: str = ""
     send_selector: str = ""
     reply_selector: str = ""
@@ -384,11 +379,7 @@ def _policy_allows_inject(c: Dict) -> bool:
     return c.get("scope") == SurfaceScope.APP_OWNED.value
 
 def component_is_injectable(c: Dict) -> bool:
-    """True when ownership policy, side-effect gate, AND evidence all pass.
-
-    Provider/iframe URL match alone is never enough — that stays passive_hint.
-    Support-queue widgets need authorize_support_queue even when ownership=inject.
-    """
+    """True when ownership policy, side-effect gate, AND evidence all pass."""
     if not isinstance(c, dict):
         return False
     if c.get("type") and c.get("type") != "chatbot_ui":
@@ -530,11 +521,7 @@ def classify_injection_severity(
     treatment_text: str,
     differential: bool,
 ) -> Tuple[bool, str, InjectionSeverity]:
-    """Confirm injection only on control/treatment differential.
-
-    Severity ladder (distinct observables):
-      echo < system-prompt disclosure < unauthorized tool call / data egress
-    """
+    """Confirm injection only on control/treatment differential."""
     control = (control_text or "").strip()
     treatment = (treatment_text or "").strip()
     if not treatment:
@@ -1018,12 +1005,7 @@ class ChatbotUIProbe:
 
     @staticmethod
     def _side_effect_gate(cand: Dict[str, Any]) -> Tuple[bool, bool, str]:
-        """Return (observe_ok, submit_ok, reason).
-
-        observe_ok: may type without Enter (network-first).
-        submit_ok: may press Enter / click send — structural chat context only,
-        never sensitive form semantics.
-        """
+        """Return (observe_ok, submit_ok, reason)."""
         input_type = (cand.get("input_type") or "").lower()
         if input_type in _SENSITIVE_TYPE:
             return False, False, f"sensitive_input_type:{input_type}"
@@ -1186,11 +1168,7 @@ class ChatbotUIProbe:
         )
 
     async def _maybe_open_launcher(self, page) -> bool:
-        """Click chat launcher bubble so the conversation panel can mount.
-
-        HubSpot/Intercom/etc. only create the message textarea after the
-        launcher is opened — often in a freshly mounted frame.
-        """
+        """Click chat launcher bubble so the conversation panel can mount."""
         for launcher in (
             'button[aria-label*="chat" i]',
             'button[aria-label*="message" i]',
@@ -1242,11 +1220,7 @@ class ChatbotUIProbe:
     async def _discover_editables_across_frames(
         self, page, page_url: str,
     ) -> List[ChatWidget]:
-        """After launcher open, find editables in page + frames (behavioral).
-
-        Does not trust discovery-time frame URLs — the conversation panel may
-        mount in a different frame than the loader/transport iframe.
-        """
+        """After launcher open, find editables in page + frames (behavioral)."""
         found: List[ChatWidget] = []
         roots = [("page", page, "")]
         for frame in page.frames:
@@ -1745,11 +1719,7 @@ def ui_result_to_findings(
     result: ChatbotUIProbeResult,
     target_url: str,
 ) -> Tuple[List[Dict], List[Dict]]:
-    """Map UI probe result into confirmed/potential vuln finding dicts.
-
-    Weak passive hints and third-party widgets are informational only —
-    they must not become Medium "Potential Prompt Injection" findings.
-    """
+    """Map UI probe result into confirmed/potential vuln finding dicts."""
     confirmed: List[Dict] = []
     potential: List[Dict] = []
     if not result.detected and not result.injected:

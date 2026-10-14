@@ -235,10 +235,7 @@ def is_static_asset(url: str = "", content_type: str = "") -> bool:
     return False
 
 class EndpointDiscoveryAgent:
-    """
-    Discovers API endpoints via passive parsing + JS extraction + path probing.
-    All requests are GET-only (read-only).  No payload injection at this stage.
-    """
+    """Discovers API endpoints via passive parsing + JS extraction + path probing."""
 
     def __init__(self, timeout: int = 5, max_probe_paths: int = 60):
         self.timeout          = timeout
@@ -247,14 +244,9 @@ class EndpointDiscoveryAgent:
         self._soft404_lengths:    List[int]  = []
         self._soft404_bodies:     List[str]  = []
 
-  
+
     async def calibrate(self, base: str) -> None:
-        """
-        Enable soft-404 mode only when unknown paths return a same-path 200
-        with a reusable body baseline (true SPA/catch-all).
-        Off-path redirects alone do NOT enable soft mode — classic PHP apps
-        often redirect unknown URLs to login without being SPAs.
-        """
+        """Enable soft-404 mode only when unknown paths return a same-path 200"""
         rand_paths = [
             f"/{hashlib.sha1(f'{base}{i}'.encode()).hexdigest()[:16]}-zz{i}"
             for i in range(3)
@@ -291,11 +283,7 @@ class EndpointDiscoveryAgent:
             )
 
     def _select_probe_paths(self, page_html: str = "") -> List[str]:
-        """
-        Product-agnostic probe list: prefer SSR/PHP paths when HTML/stack
-        signals a classic app; prefer API paths when JS/API signals dominate.
-        Always mix both families within the budget.
-        """
+        """Product-agnostic probe list: prefer SSR/PHP paths when HTML/stack"""
         html = page_html or ""
         html_l = html.lower()
         php_signal = (
@@ -385,10 +373,7 @@ class EndpointDiscoveryAgent:
     async def discover(self, target_url: str,
                        page_html: str = "",
                        verbose: bool = False) -> List[Dict]:
-        """
-        Run all three discovery strategies and return deduplicated,
-        verified endpoints.
-        """
+        """Run all three discovery strategies and return deduplicated,"""
         if verbose:
             print(f"\n  Endpoint Discovery Agent")
             print(f"   Target: {target_url}")
@@ -412,7 +397,7 @@ class EndpointDiscoveryAgent:
             if isinstance(r, list):
                 found.extend(r)
 
-       
+
         seen:   Dict[str, Dict] = {}
         for ep in found:
             url = ep.get("url", "")
@@ -426,7 +411,7 @@ class EndpointDiscoveryAgent:
                 seen[norm] = ep
         unique: List[Dict] = list(seen.values())
 
- 
+
         if verbose:
             print(f"    Verifying {len(unique)} endpoints...")
 
@@ -440,7 +425,7 @@ class EndpointDiscoveryAgent:
             else:
                 verified.append(ep)
 
-    
+
         verified.sort(key=lambda x: (not x.get("interesting"), x.get("url", "")))
 
         try:
@@ -526,7 +511,7 @@ class EndpointDiscoveryAgent:
         return []
 
     async def _verify_endpoint(self, ep: Dict) -> Dict:
-   
+
         url    = ep.get("url", "")
         status = ep.get("status")
 
@@ -546,7 +531,7 @@ class EndpointDiscoveryAgent:
             ep["admin_panel"]  = False
             ep["verification"] = "Static asset — excluded from endpoint table"
             return ep
-        
+
         if status == 200:
             body       = await self._fetch_text(url) or ""
             body_lower = body.lower()
@@ -704,7 +689,7 @@ class EndpointDiscoveryAgent:
         except Exception:
             return url.rstrip("/")
 
- 
+
 
     async def _strategy_passive_files(self, base: str,
                                        verbose: bool = False) -> List[Dict]:
@@ -782,11 +767,7 @@ class EndpointDiscoveryAgent:
         return endpoints
 
     async def _parse_swagger(self, base: str) -> List[Dict]:
-        """
-        First-class OpenAPI/Swagger discovery: fetch machine-readable specs
-        (Accept: application/json), and also follow /api/docs|/swagger UI
-        pages to their underlying spec URL.
-        """
+        """First-class OpenAPI/Swagger discovery: fetch machine-readable specs"""
         endpoints: List[Dict] = []
         swagger_paths = [
             "/swagger.json", "/openapi.json",
@@ -865,10 +846,7 @@ class EndpointDiscoveryAgent:
 
     @classmethod
     def _extract_embedded_openapi_specs(cls, html: str) -> List[Dict]:
-        """
-        Best-effort extract of OpenAPI/Swagger JSON objects embedded in docs HTML.
-        Does not invent specs — only parses objects that already contain paths.
-        """
+        """Best-effort extract of OpenAPI/Swagger JSON objects embedded in docs HTML."""
         if not html or len(html) < 40:
             return []
         specs: List[Dict] = []
@@ -1235,7 +1213,7 @@ class EndpointDiscoveryAgent:
             if final_url and final_url != url:
                 asked  = (urlsplit(url).path or "/").rstrip("/") or "/"
                 landed = (urlsplit(final_url).path or "/").rstrip("/") or "/"
-           
+
                 is_slash_redirect = (
                     landed == asked + "/" or asked == landed + "/"
                 )
@@ -1426,13 +1404,7 @@ class EndpointDiscoveryAgent:
             return None
 
     def _sync_head(self, url: str):
-        """
-        Return (status, headers, final_url) using HEAD then GET fallback.
-
-        final_url is the URL after all redirects — used by _probe_path to
-        detect catch-all / soft-404 sites that redirect unknown paths to an
-        existing page (e.g. a blog article) while returning HTTP 200.
-        """
+        """Return (status, headers, final_url) using HEAD then GET fallback."""
         for method in ("HEAD", "GET"):
             try:
                 req = urllib.request.Request(

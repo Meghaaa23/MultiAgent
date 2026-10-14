@@ -1,9 +1,4 @@
-"""Response-adaptive technique selection for injection scans.
-
-Chooses the next payload technique from the static catalog based on the
-previous oracle outcome. Does not invent templates or mark findings —
-the canary/classifier remains the only success judge.
-"""
+"""Response-adaptive technique selection for injection scans."""
 from __future__ import annotations
 
 from collections import defaultdict, deque

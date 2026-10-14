@@ -55,10 +55,7 @@ def _format_confirmed_stack(stack: Dict) -> str:
     return result
 
 def _evidence_has_substance(ev: Dict) -> bool:
-    """
-    True only when the evidence blob contains something a reviewer can verify.
-    Empty / placeholder evidence must never ship as Confirmed/HIGH.
-    """
+    """True only when the evidence blob contains something a reviewer can verify."""
     if not isinstance(ev, dict) or not ev:
         return False
     method = str(ev.get("confirmation_method") or "").lower()
@@ -103,13 +100,7 @@ def _norm_conf_label(val) -> str:
     return s
 
 def _is_publishable_confirmed(v: Dict) -> bool:
-    """
-    Publisher gate: only report Confirmed findings with High confidence
-    and verified, non-empty evidence. No site/app hardcoding — evidence-driven only.
-
-    XSS Confirmed requires js_execution proof; HTTP/DOM reflection alone is
-    demoted to the Potential queue (general rule — not app-specific).
-    """
+    """Publisher gate: only report Confirmed findings with High confidence"""
     if not isinstance(v, dict):
         return False
     if _norm_conf_label(v.get("status")) != "confirmed":
@@ -137,11 +128,6 @@ def _is_publishable_confirmed(v: Dict) -> bool:
     if "XSS" in ftype and method not in ("js_execution",):
         return False
 
-    # A disclosure finding claims a specific value leaked (e.g. a Server
-    # banner). Unlike a *missing*-header finding, whose evidence is the header's
-    # absence, a disclosure must carry the actual disclosed value — otherwise it
-    # would print "Confirmed" beside a "no value recorded" note. Demote to the
-    # Potential queue when no value is present.
     if "information disclosure" in ftype.lower() and "header" in ftype.lower():
         hdrs = ev.get("response_headers") or ev.get("headers") or {}
         if not isinstance(hdrs, dict) or not any(
@@ -235,10 +221,7 @@ def _auth_status_line(scan_results) -> str:
 
 
 def _coverage_from_scan(scan_results) -> Dict:
-    """
-    Black-box unauth coverage signal: how much of the discovered surface
-    was actually assessed vs auth-gated / not tested.
-    """
+    """Black-box unauth coverage signal: how much of the discovered surface"""
     sr = scan_results or {}
     not_assessed = list(sr.get("not_assessed_endpoints") or [])
     endpoints = list(sr.get("endpoints_discovered") or [])
@@ -275,9 +258,7 @@ def _coverage_from_scan(scan_results) -> Dict:
     }
 
 def _auth_and_surface_block(scan_results) -> str:
-    """Structured authentication + attack-surface block for the executive
-    summary. Proves whether authenticated functionality was actually tested.
-    The password is never read or printed here."""
+    """Structured authentication + attack-surface block for the executive"""
     sr = scan_results or {}
     a = _auth_info(sr)
     endpoints = [e for e in (sr.get("endpoints_discovered") or [])
@@ -404,7 +385,7 @@ def _build_section_1(confirmed_vulns, potential_vulns, target_url, scan_results)
     return f" 1. EXECUTIVE SUMMARY\n{summary}"
 
 def _tech_matches_cve_query(tech_name: str, cve_query: str) -> bool:
- 
+
     tn = (tech_name or "").strip().lower()
     cq = (cve_query or "").strip().lower()
     if not tn or not cq:
@@ -997,11 +978,76 @@ def _build_section_6(confirmed_vulns, potential_vulns):
         lines.append("No findings requiring remediation.")
     return "\n".join(lines)
 
+def _build_section_7_coverage(scan_results: Optional[Dict]) -> str:
+    """Everything the crawl and testers observed: tasks, navigation graph,"""
+    sr = scan_results or {}
+    em = sr.get("eval_metrics") or {}
+    cov = sr.get("coverage_assessment") or {}
+    urls = [u for u in (sr.get("discovered_urls") or []) if isinstance(u, str)]
+    forms = [f for f in (sr.get("discovered_forms") or []) if isinstance(f, dict)]
+    endpoints = [e for e in (sr.get("endpoints_discovered") or []) if isinstance(e, dict)]
+
+    lines = [" 7. SCAN COVERAGE & CRAWL DATA"]
+
+    lines.append(
+        f" Crawl: {sr.get('tasks_generated', 0)} task(s) generated, "
+        f"{sr.get('tasks_executed', 0)} executed. "
+        f"Navigation graph: {int(em.get('nav_states') or 0)} state(s), "
+        f"{int(em.get('nav_edges') or 0)} edge(s), "
+        f"{int(em.get('nav_unique_urls') or 0)} unique URL(s). "
+        f"Inter-state flows: {int(em.get('interstate_flows') or 0)} "
+        f"(unescaped: {int(em.get('interstate_unescaped') or 0)})."
+    )
+    cpct = cov.get("coverage_percent")
+    if cpct is not None:
+        lines.append(
+            f" Endpoint coverage: {cpct}% "
+            f"(assessed {cov.get('assessed_count', 0)} of "
+            f"{cov.get('discovered_count', len(endpoints))})."
+        )
+
+    lines.append("")
+    lines.append(" Test attempts by class (attempted / confirmed / potential):")
+    for label, pfx in (
+        ("Prompt injection", "prompt_injection"), ("XSS", "xss"),
+        ("SQL injection", "sqli"), ("CSRF", "csrf"),
+    ):
+        a = int(em.get(f"{pfx}_attempted") or 0)
+        c = int(em.get(f"{pfx}_confirmed") or 0)
+        p = int(em.get(f"{pfx}_potential") or 0)
+        if a or c or p:
+            lines.append(f"  - {label}: {a} / {c} / {p}")
+
+    lines.append("")
+    lines.append(f" Discovered URLs ({len(urls)}):")
+    for u in urls[:150]:
+        lines.append(f"  - {u}")
+    if len(urls) > 150:
+        lines.append(f"  ... and {len(urls) - 150} more")
+
+    lines.append("")
+    lines.append(f" Discovered forms ({len(forms)}):")
+    for f in forms[:60]:
+        method = str(f.get("method", "get")).upper()
+        action = f.get("action", "")
+        fields = ", ".join(x for x in (f.get("fields") or []) if x) or "(none)"
+        lines.append(f"  - [{method}] {action} | fields: {fields}")
+    if len(forms) > 60:
+        lines.append(f"  ... and {len(forms) - 60} more")
+
+    interesting = [e for e in endpoints if e.get("interesting")]
+    if interesting:
+        lines.append("")
+        lines.append(f" Interesting endpoints ({len(interesting)}):")
+        for e in interesting[:80]:
+            url = e.get("url") or e.get("path") or ""
+            cat = e.get("category") or ""
+            lines.append(f"  - {url}" + (f" [{cat}]" if cat else ""))
+
+    return "\n".join(lines)
+
 def _build_section_8_ai_negative(scan_results: Dict) -> str:
-    """
-    When no AI surface is escalated, still emit §8 with a denominator —
-    silence is not a negative result under the coverage-honesty invariant.
-    """
+    """When no AI surface is escalated, still emit §8 with a denominator —"""
     brand_only = bool((scan_results or {}).get("ai_brand_only"))
     live = bool((scan_results or {}).get("has_live_surface"))
     if brand_only and not live:
@@ -1448,7 +1494,7 @@ Answer:"""
             if verbose:
                 print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
             scan_results = await scanner.scan_application(
-                target_url=target_url, max_time_minutes=15, verbose=verbose,
+                target_url=target_url, verbose=verbose,
                 ai_auth_token=ai_auth_token, auth=auth,
             )
 
@@ -1862,10 +1908,11 @@ Answer:"""
         section_4   = _build_section_4(potential_vulns, scan_results)    or ""
         section_5   = _build_section_5(stride_threats, confirmed_vulns)  or ""
         section_6   = _build_section_6(confirmed_vulns, potential_vulns) or ""
+        section_7   = _build_section_7_coverage(scan_results) if scan_results else ""
 
         final = "\n\n".join([
             s for s in [section_1, section_2, section_3, section_3b,
-                        section_4, section_5, section_6]
+                        section_4, section_5, section_6, section_7]
             if s
         ])
 
@@ -1894,6 +1941,7 @@ Answer:"""
             ("4",  "Potential Vulns",     section_4),
             ("5",  "STRIDE Model",        section_5),
             ("6",  "Remediation Roadmap", section_6),
+            ("7",  "Scan Coverage & Crawl Data", section_7),
             ("8",  "AI/ML Analysis",      section_8),
             ("9",  "AI Infra Attacks",    section_9),
         ]:

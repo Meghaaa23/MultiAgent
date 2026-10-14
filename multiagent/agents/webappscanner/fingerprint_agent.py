@@ -57,11 +57,7 @@ def _normalise_category(wappalyzer_cat_name: str) -> str:
     return _CAT_MAP.get(wappalyzer_cat_name, "Other")
 
 def _collapse_premium_duplicates(techs: List[Dict]) -> List[Dict]:
-    """
-    Collapse "<X> Premium" + "<X>" at the same (or missing) version into one
-    stack entry so CVE rows are not double-counted (e.g. Yoast SEO).
-    Prefer the non-Premium name; keep the higher confidence / versioned row.
-    """
+    """Collapse "<X> Premium" + "<X>" at the same (or missing) version into one"""
     if not techs:
         return techs
     by_name = {
@@ -481,14 +477,7 @@ def _rule_vuln_hints(detected: List[Dict]) -> List[str]:
     return hints[:5]
 
 def merge_url_stack_signals(stack: Dict, urls: List[str]) -> Dict:
-    """
-    Promote URL-path stack signals (e.g. .mvc → Spring/Java/Tomcat) from
-    discovered endpoints into an already-built fingerprint stack.
-
-    Fingerprinting runs on the seed URL before discovery; WebGoat's seed
-    `/WebGoat` has no `.mvc`, so Java/Tomcat were buried as LLM hints while
-    Bootstrap from Wappalyzer was surfaced. Merge after discovery.
-    """
+    """Promote URL-path stack signals (e.g. .mvc → Spring/Java/Tomcat) from"""
     if not isinstance(stack, dict):
         return stack or {}
     stack = dict(stack)

@@ -1,26 +1,4 @@
-"""
-Universal SPA Scanner
-=====================
-Discovers and scans Angular / React / Vue / Next.js / Nuxt / Svelte SPAs
-without ANY hardcoded routes or application names.
-
-Route discovery (in priority order):
-  1. <a href> links from Playwright-rendered homepage
-  2. JS bundle route config patterns (Angular/React/Vue Router)
-  3. robots.txt Disallow entries
-  4. sitemap.xml <loc> entries
-  5. API endpoint URLs from fetch()/axios() in JS bundles
-  6. Fallback: /login /register /search /contact (only if < 3 routes found)
-
-Form extraction methods:
-  A. Standard <form> elements (includes hidden inputs for CSRF detection)
-  B. Angular reactive forms ([formcontrolname])
-  C. Angular Material (mat-form-field)
-  D. Generic visible inputs (React/Vue data-testid, aria-label)
-
-Server-side frameworks (WordPress, Django, Rails, Drupal) are detected
-and skipped — they render real HTML and don't need Playwright route scanning.
-"""
+"""Universal SPA Scanner"""
 
 import re
 import asyncio
@@ -85,10 +63,7 @@ GENERIC_READY_SELECTORS = [
 ]
 
 class SPAScanner:
-    """
-    Universal SPA Scanner.
-    Framework-agnostic — no hardcoded app names or routes.
-    """
+    """Universal SPA Scanner."""
 
     def __init__(self, timeout_ms: int = 8000, max_routes: int = 6):
         self.timeout_ms = timeout_ms
@@ -101,10 +76,7 @@ class SPAScanner:
             logger.warning("Playwright not installed — SPA scanning disabled")
 
     async def scan(self, base_url: str, verbose: bool = False) -> Dict:
-        """
-        Entry point. Returns:
-          { is_spa, framework, routes_found, routes_visited, forms, urls }
-        """
+        """Entry point. Returns:"""
         base = _normalise_base(base_url)
 
         status, raw_html, raw_headers = _fetch(base)
@@ -150,10 +122,7 @@ class SPAScanner:
 
     async def _discover_routes(self, base: str, raw_html: str,
                                 verbose: bool) -> List[Dict]:
-        """
-        Discover routes from the app itself.
-        Returns list of route dicts sorted by priority (form-likely first).
-        """
+        """Discover routes from the app itself."""
         discovered: Set[str] = set()
 
         rendered = await self._extract_rendered_hrefs(base, verbose)
@@ -486,10 +455,7 @@ async def _dismiss_overlays(page) -> None:
 
 async def _extract_forms(page, page_url: str,
                           framework: str) -> List[Dict]:
-    """
-    Extract forms from a rendered page.
-    Includes hidden inputs so CSRF tokens (authenticity_token, _token) are visible.
-    """
+    """Extract forms from a rendered page."""
     try:
         return await page.evaluate(f"""() => {{
             const results = [];

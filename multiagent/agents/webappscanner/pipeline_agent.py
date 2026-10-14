@@ -38,15 +38,7 @@ _CVE_WORTHY_CATEGORIES = {"CMS"}
 _CVE_WORTHY_WITH_VERSION = {"Framework", "Server"}
 
 def _normalise_package_name(keyword: str, ecosystem: str) -> str:
-    """Map a fingerprinted component name to its registry package name using
-    only structural conventions — no per-product lookup table.
-
-    Rules:
-      * take the first whitespace-delimited token (drops an appended version)
-      * lowercase for case-insensitive ecosystems
-      * for npm, a trailing runtime suffix like ".js" is dropped (the npm
-        package for a "<name>.js" framework is conventionally "<name>")
-    """
+    """Map a fingerprinted component name to its registry package name using"""
     name = (keyword or "").strip().split()[0] if keyword.strip() else ""
     if not name:
         return name
@@ -66,7 +58,7 @@ class CVEVerificationPipeline:
         self.web_search  = web_search_function
         self.nvd_api_key = nvd_api_key or os.environ.get("NVD_API_KEY", "")
         self._cache: Dict[str, List[Dict]] = {}
-    
+
     async def lookup(self, stack: Dict, verbose: bool = False) -> Optional[List[Dict]]:
         print("\n========== ENTERED CVE LOOKUP ==========")
         print("Stack received:")
@@ -83,7 +75,7 @@ class CVEVerificationPipeline:
 
         queries = self._build_queries(stack)
         print("\n===== STACK PASSED TO CVE PIPELINE =====")
-       
+
         pprint(stack)
 
         print("\n===== GENERATED QUERIES =====")
@@ -100,7 +92,7 @@ class CVEVerificationPipeline:
         tasks = []
 
         for q in queries:
-           
+
             tasks.append(
                 self._fetch_nvd(
                 keyword=q["keyword"],
@@ -108,7 +100,7 @@ class CVEVerificationPipeline:
                 verbose=verbose,
                 )
             )
-            
+
         tasks += [self._fetch_osv(q["keyword"], stack, verbose) for q in queries]
 
         results_nested = await asyncio.gather(*tasks, return_exceptions=True)
@@ -238,7 +230,7 @@ class CVEVerificationPipeline:
                             name = " ".join(parts[:i])
                             break
 
-                   
+
                 queries.append({"keyword": f"{name.strip()} {ver.strip()}".strip(), "version": ver.strip()})
                 queries.append({"keyword": name.strip(), "version": ver.strip()})
             elif tl not in _GENERIC_RUNTIMES:
@@ -261,7 +253,7 @@ class CVEVerificationPipeline:
                 unique.append(q)
 
         return unique
-            
+
 
     def _normalize_product(self, text: str) -> str:
         text = text.lower()
@@ -269,14 +261,11 @@ class CVEVerificationPipeline:
         return " ".join(text.split())
 
     def _product_matches(self, keyword: str, description: str, affected: str) -> bool:
-        """
-        Return True only if the detected product actually appears in the
-        NVD description/configuration.
-        """
+        """Return True only if the detected product actually appears in the"""
 
         product = self._normalize_product(keyword)
 
-       
+
         product = re.sub(r"\b\d+(\.\d+)*\b", "", product).strip()
 
         searchable = self._normalize_product(
@@ -284,8 +273,8 @@ class CVEVerificationPipeline:
         )
 
         return product in searchable
-    
-       
+
+
     def _version_matches(
         self,
         detected_version: str,
@@ -328,7 +317,7 @@ class CVEVerificationPipeline:
 
             except InvalidVersion:
                 return True
-        
+
         m = re.search(
             r"from\s+versions?\s+(\d+(?:\.\d+)+)\s+until\s+(\d+(?:\.\d+)+)",
             text
@@ -343,7 +332,7 @@ class CVEVerificationPipeline:
 
             except InvalidVersion:
                 return True
-        
+
         m = re.search(
             r"from\s+(\d+(?:\.\d+)+)\s+through\s+(\d+(?:\.\d+)+)",
             text
@@ -383,12 +372,12 @@ class CVEVerificationPipeline:
             try:
                 affected_version = Version(m.group(1))
 
-            
+
                 return detected == affected_version
 
             except InvalidVersion:
                 return True
-       
+
         m = re.search(r"through\s+(\d+(?:\.\d+)+)", text)
         if m:
             print("Matched THROUGH:", m.group(1))
@@ -417,7 +406,7 @@ class CVEVerificationPipeline:
             return result
 
         print("No version pattern matched -> ACCEPT")
-        return True   
+        return True
 
     async def _fetch_nvd(self, keyword: str, detected_version: str = "", verbose: bool = False) -> Optional[List[Dict]]:
         cache_key = f"nvd:{keyword}:{detected_version}"
@@ -448,7 +437,7 @@ class CVEVerificationPipeline:
             data            = json.loads(raw)
             vulnerabilities = data.get("vulnerabilities", [])
 
-            
+
             _min_year = datetime.datetime.now(datetime.timezone.utc).year - 10
 
             for item in vulnerabilities:

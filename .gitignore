@@ -54,3 +54,9 @@ multi-agent-llm/.angular/
 *.sqlite
 *.sock
 
+
+# Local Claude Code tooling
+.claude/
+
+# Vendored Autogen fork - unused by scanner, not part of SURFACE
+multiagent/Autogen/

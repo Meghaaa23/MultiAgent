@@ -1,28 +1,4 @@
-"""
-Authenticated-scan support.
-
-Logs in once with the operator-supplied credentials (real browser, so SPA and
-server-rendered login forms both work), captures the resulting session
-(cookies, web-storage tokens, and the Authorization header the app itself
-sends), and makes that session available to every scanner component:
-
-  * urllib  — a global handler attaches Cookie / Authorization to requests
-              for the target host only (never to third-party hosts).
-  * Playwright — ``prepare_context()`` seeds cookies + storage and scopes
-              the Authorization header to the target host via routing.
-  * AI agents — ``request_headers()`` feeds their existing ``auth_headers``.
-
-Login-form detection is behavioural (a visible password input plus its
-nearest identity field and submit control) — nothing is keyed on app names.
-
-Session hygiene:
-  * Requests to logout-looking URLs are sent WITHOUT the session (urllib)
-    or aborted (browser), so the scanner cannot sign itself out.
-  * ``ensure_alive()`` re-checks a probe URL whose response differs between
-    authenticated and anonymous requests, and re-logs-in if it flips.
-  * The password is held only in memory for re-login and never appears in
-    ``summary()``, ``repr()``, logs, or the report.
-"""
+"""Authenticated-scan support."""
 
 from __future__ import annotations
 
@@ -47,8 +23,6 @@ LOGIN_TEXT_RE = re.compile(r"\b(log[\s\-]?in|sign[\s\-]?in|signin|login)\b", re.
 ACCOUNT_TEXT_RE = re.compile(r"\b(account|my account|user)\b", re.I)
 JWT_RE = re.compile(r"^eyJ[\w-]+\.[\w-]+\.[\w-]*$")
 
-# Generic login-path conventions tried only when no login_url was given and
-# the landing page has no password field or login link.
 COMMON_LOGIN_PATHS = [
     "/login", "/signin", "/sign-in", "/sign_in", "/user/login",
     "/users/sign_in", "/account/login", "/accounts/login/", "/auth/login",
@@ -91,13 +65,13 @@ class AuthSession:
     success_indicator: str = ""
 
     logged_in: bool = False
-    method: str = "none"              # form_login | none
-    login_page_url: str = ""          # page where the form was actually found
+    method: str = "none"
+    login_page_url: str = ""
     landing_url: str = ""
     cookies: List[Dict] = field(default_factory=list)
     storage_origins: List[Dict] = field(default_factory=list)
     headers: Dict[str, str] = field(default_factory=dict)
-    auth_header_source: str = ""      # observed | web_storage
+    auth_header_source: str = ""
     error: str = ""
     relogin_count: int = 0
     probe_url: str = ""
@@ -105,7 +79,6 @@ class AuthSession:
 
     _password: str = field(default="", repr=False)
 
-    # ── outbound material ────────────────────────────────────────────────
     def cookie_header(self) -> str:
         return "; ".join(
             f"{c['name']}={c['value']}" for c in self.cookies
@@ -136,7 +109,6 @@ class AuthSession:
             "error":              self.error,
         }
 
-    # ── liveness / re-login ──────────────────────────────────────────────
     async def ensure_alive(self, verbose: bool = False) -> bool:
         if not self.logged_in or self.method != "form_login":
             return self.logged_in
@@ -172,7 +144,6 @@ class AuthSession:
         return True
 
 
-# ── process-wide registry keyed by target host ───────────────────────────
 _ACTIVE: Dict[str, AuthSession] = {}
 _PREV_OPENER = None
 _INSTALLED = False
@@ -292,7 +263,6 @@ def _storage_seed_script(origins: List[Dict]) -> str:
     )
 
 
-# ── probing (sync, run in executor) ──────────────────────────────────────
 def _probe_signature(url: str, headers: Optional[Dict[str, str]]) -> Tuple:
     """(status, final_path, has_password_input) — bypasses the global handler."""
     opener = urllib.request.build_opener()
@@ -320,7 +290,6 @@ def _pick_probe(candidates: List[str], auth_headers: Dict[str, str]) -> Tuple[st
     return "", None
 
 
-# ── login ────────────────────────────────────────────────────────────────
 _FIND_FORM_JS = r"""
 ({userSel, passSel}) => {
   const visible = el => {
@@ -413,6 +382,22 @@ async def _click_login_link(page) -> bool:
     return False
 
 
+_SETUP_URL_RE = re.compile(
+    r"/(?:setup|install|installer|installation|configure|config|wizard)"
+    r"(?:\.php|\.jsp|\.aspx)?(?:/|$|\?)", re.I)
+_SETUP_CONTENT_MARKERS = (
+    "create / reset database", "create/reset database", "installation wizard",
+    "setup wizard", "run the installer", "database setup",
+    "installation is not complete", "please complete the installation",
+)
+
+def _looks_like_setup_or_install(url: str, content: str) -> bool:
+    """True when a page is an application setup/installation/initialization page."""
+    if url and _SETUP_URL_RE.search(url):
+        return True
+    low = (content or "").lower()
+    return any(m in low for m in _SETUP_CONTENT_MARKERS)
+
 async def login(target_url: str, username: str, password: str,
                 login_url: str = "", username_selector: str = "",
                 password_selector: str = "", success_indicator: str = "",
@@ -466,7 +451,6 @@ async def login(target_url: str, username: str, password: str,
             page = await context.new_page()
             page.on("request", _on_request)
 
-            # 1. locate the login form
             found = False
             if login_url:
                 found = await _goto(page, login_url) and await _find_login_form(page, sess)
@@ -493,7 +477,6 @@ async def login(target_url: str, username: str, password: str,
 
             before_cookies = {c["name"] for c in await context.cookies()}
 
-            # 2. fill + submit
             user_loc = page.locator('[data-scan-auth="user"]')
             if username and await user_loc.count():
                 await user_loc.first.fill(username, timeout=4000)
@@ -509,7 +492,6 @@ async def login(target_url: str, username: str, password: str,
                 pass
             await page.wait_for_timeout(1500)
 
-            # 3. decide success
             content = ""
             try:
                 content = await page.content()
@@ -526,6 +508,15 @@ async def login(target_url: str, username: str, password: str,
             new_cookie = any(c["name"] not in before_cookies for c in after_cookies)
             state = await context.storage_state()
             storage_token = _token_from_storage(state.get("origins") or [], target_host)
+
+            if _looks_like_setup_or_install(page.url, content):
+                sess.error = (
+                    f"Login reached an application setup/initialization page "
+                    f"({page.url}). Initialize the app (e.g. create its database) "
+                    f"before authenticated scanning."
+                )
+                await browser.close()
+                return sess
 
             if success_indicator:
                 ok = success_indicator.lower() in content.lower()
@@ -545,7 +536,6 @@ async def login(target_url: str, username: str, password: str,
                 await browser.close()
                 return sess
 
-            # 4. let the app make authenticated calls so we can observe them
             page.on("response", _on_response)
             sess.landing_url = page.url
             await _goto(page, target_url)

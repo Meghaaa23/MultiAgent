@@ -1,8 +1,16 @@
 
 
 import os
+import sys
 import asyncio
 import json
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from typing import Optional, Dict, List, Any
 from enum import Enum
 from datetime import datetime
@@ -97,6 +105,18 @@ app = FastAPI(
     description="AutoGen + Threat Modeling + Web Scanning + AI Backdoor Analysis",
     version="7.0.0",
 )
+
+@app.on_event("startup")
+async def _note_browser_loop_mode() -> None:
+    """Playwright needs a subprocess-capable loop. On Windows `uvicorn --reload`"""
+    import sys as _sys
+    if _sys.platform != "win32":
+        return
+    loop_name = type(asyncio.get_event_loop()).__name__
+    if "Selector" in loop_name:
+        logger.info(
+            "[startup] Event loop is %s (typical under --reload); browser-driven "
+            "crawling will run on a Proactor compatibility thread.", loop_name)
 
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
@@ -331,12 +351,11 @@ _AUTH_KEYS = ("username", "password", "login_url",
 
 
 def _auth_from_body(raw: Any) -> Optional[Dict[str, str]]:
-    """Normalise the optional login block; None unless username+password given.
-    The result holds the password — never log it or echo it back."""
+    """Normalise the optional login block; None unless username+password given."""
     if not isinstance(raw, dict):
         return None
     auth = {k: str(raw.get(k) or "").strip() for k in _AUTH_KEYS}
-    auth["password"] = str(raw.get("password") or "")  # keep exact, no strip
+    auth["password"] = str(raw.get("password") or "")
     if not auth["username"] or not auth["password"]:
         return None
     return auth
@@ -391,12 +410,7 @@ async def health_check():
 
 @app.post("/query/")
 async def query_with_full_autogen(request: Request):
-    """
-    Main query endpoint.
-
-    Route A — Web scan request (URL present) → ThreatModelingAgent
-    Route B — General / security question → direct LLM answer
-    """
+    """Main query endpoint."""
     try:
         logger.info("=" * 80)
         logger.info("QUERY REQUEST")
@@ -539,6 +553,7 @@ class StreamQueryRequest(BaseModel):
     question:   str
     session_id: Optional[str] = None
     auth:       Optional[Dict[str, Any]] = None
+    max_time_minutes: Optional[int] = None
 
 @app.post("/query/stream")
 async def query_stream(request: StreamQueryRequest):
@@ -659,9 +674,11 @@ async def query_stream(request: StreamQueryRequest):
                     })
                     await asyncio.sleep(0)
 
+                    _budget = request.max_time_minutes
                     scan_task = asyncio.create_task(
                         scanner.scan_application(
-                            target_url=target_url, max_time_minutes=15, verbose=True,
+                            target_url=target_url,
+                            max_time_minutes=_budget, verbose=True,
                             auth=auth,
                         )
                     )

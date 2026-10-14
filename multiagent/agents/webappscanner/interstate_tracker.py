@@ -1,11 +1,4 @@
-"""Black Widow pillar 3 — inter-page data dependencies.
-
-During the shared crawl session the agent plants unique benign tokens
-(not XSS/SQLi payloads) into text fields. Later pages are scanned for
-those tokens. A hit on a different URL is a stored data flow: the
-surface YuraScanner never models and the reason Black Widow finds
-stored XSS. We reuse the same flows to rank SQLi and CSRF surfaces.
-"""
+"""Black Widow pillar 3 — inter-page data dependencies."""
 
 from __future__ import annotations
 
@@ -69,12 +62,56 @@ class TaintFlow:
 
 
 def stored_xss_payload(marker: str) -> str:
-    """HTML-breakout payload whose success is document.title == marker.
-
-    Planted only after a benign token already proved a source→sink flow,
-    so the attack value is not the thing used to discover the dependency.
-    """
+    """HTML-breakout payload whose success is document.title == marker."""
     return f'"><svg/onload=document.title="{marker}">'
+
+
+XSS_ORACLE_SOURCE = """
+window.xss = function (id) {
+  var marker = String(id || "");
+  try { document.title = marker; } catch (e) {}
+  window.__xss_hit = marker;
+};
+"""
+
+_SAFE_XSS_TYPES = frozenset({
+    "", "text", "search", "email", "url", "textarea", "password",
+})
+_AGGRESSIVE_XSS_TYPES = frozenset({
+    "hidden", "radio", "checkbox", "select", "select-one", "select-multiple", "file",
+})
+_SKIP_XSS_TYPES = frozenset({
+    "submit", "button", "image", "reset",
+})
+
+
+def xss_oracle_payload(marker: str) -> str:
+    """Payload that calls the in-page xss(id) function."""
+    safe = (marker or "").replace("\\", "").replace('"', "")
+    return f'"><img src=x onerror=xss("{safe}")>'
+
+
+def iter_xss_fields(fields: Sequence[Dict]) -> List[Tuple[str, str, str]]:
+    """(phase, name, type) with safe inputs before hidden/select/file."""
+    safe: List[Tuple[str, str, str]] = []
+    aggressive: List[Tuple[str, str, str]] = []
+    for field in fields or []:
+        if not isinstance(field, dict):
+            continue
+        name = field.get("name") or ""
+        if not name:
+            continue
+        itype = (field.get("type") or "text").lower()
+        low = name.lower()
+        if any(k in low for k in ("csrf", "token", "nonce", "authenticity")):
+            continue
+        if itype in _SKIP_XSS_TYPES:
+            continue
+        if itype in _AGGRESSIVE_XSS_TYPES:
+            aggressive.append(("aggressive", name, itype))
+        else:
+            safe.append(("safe", name, itype if itype in _SAFE_XSS_TYPES else "text"))
+    return safe + aggressive
 
 
 def stored_xss_executed(title: str, marker: str) -> bool:
@@ -237,6 +274,9 @@ def rank_forms(forms: Sequence[Dict], flows: Sequence[TaintFlow]) -> List[Dict]:
             score += 3
         elif method == "post":
             score += 1
+        trace = form.get("reach_trace") or []
+        if trace:
+            score += 2 + min(len(trace), 4)
         scored.append((score, i, form))
     scored.sort(key=lambda x: (-x[0], x[1]))
     return [form for _, _, form in scored]
@@ -264,11 +304,7 @@ def rank_urls(urls: Sequence[str], flows: Sequence[TaintFlow]) -> List[str]:
 
 
 def stored_reflection_findings(flows: Sequence[TaintFlow]) -> List[Dict]:
-    """Unescaped inter-page canaries are stored-reflection surfaces.
-
-    These are Potential only: a benign token appeared on another page
-    without HTML encoding. Confirmation still goes through the XSS engine.
-    """
+    """Unescaped inter-page canaries are stored-reflection surfaces."""
     findings: List[Dict] = []
     seen: set = set()
     for flow in flows:
@@ -365,4 +401,8 @@ def class_coverage_metrics(
         "interstate_tokens_planted": int(inter.get("tokens_planted") or 0),
         "interstate_flows": int(inter.get("flows") or 0),
         "interstate_unescaped": int(inter.get("unescaped_flows") or 0),
+        "traces_recorded": int(nav.get("traces_recorded") or 0),
+        "frontier_taken": int(nav.get("frontier_taken") or 0),
+        "frontier_remaining": int(nav.get("frontier_remaining") or 0),
+        "replay_probes": int(nav.get("replay_probes") or 0),
     }

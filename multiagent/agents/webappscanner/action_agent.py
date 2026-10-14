@@ -164,33 +164,13 @@ _EFFORT_MINUTES = {
     "default":                           30,
 }
 
-_SAFE_SERVER_PATTERNS = re.compile(
-    r"^(cloudflare|cloudfront|awselb|fastly|google frontend|"
-    r"nginx|apache|lighttpd|iis|openresty|caddy|envoy|traefik)$",
-    re.I,
-)
 
 def _server_is_leaky(value: str) -> bool:
-    """
-    Return True only when the Server header value discloses a version or
-    meaningful software detail that could aid targeted CVE exploitation.
-
-    Examples:
-      "cloudflare"           → False  (CDN label, no version)
-      "nginx"                → False  (no version)
-      "nginx/1.18.0"         → True   (version exposed)
-      "Apache/2.4.51 (Ubuntu)" → True
-      "Microsoft-IIS/10.0"   → True
-      "WP Rocket 3.19.4"     → True
-    """
+    """Return True only when the Server header value discloses a version or"""
     v = value.strip()
     if not v:
         return False
-    if re.search(r"\d+\.\d+", v):
-        return True
-    if _SAFE_SERVER_PATTERNS.fullmatch(v):
-        return False
-    return True
+    return bool(re.search(r"\d+\.\d+", v) or re.search(r"/\s*v?\d", v))
 
 class ActionAgent:
 
@@ -199,14 +179,7 @@ class ActionAgent:
                     stack: Dict,
                     verbose: bool = False,
                     response_headers: Optional[Dict] = None) -> List[Dict]:
-        """
-        Generate PoC + fix snippets for every confirmed finding.
-
-        response_headers — the actual HTTP response headers from the target
-            (keyed lowercase).  Used by _action_info_disclosure_header() to
-            embed the real captured Server / X-Powered-By value in the PoC
-            and to gate the finding (only fire when the value is actually leaky).
-        """
+        """Generate PoC + fix snippets for every confirmed finding."""
         if verbose:
             print(f"\n  Action Agent — generating PoCs and fix snippets")
 
@@ -339,14 +312,7 @@ class ActionAgent:
             return self._action_generic(vuln_type, severity, location, evidence)
 
     def _evidence_block(self, evidence: Dict, fallback_note: str) -> str:
-        """
-        Render whatever was actually captured upstream (status code, raw
-        request line, raw response snippet, timestamp) as a verbatim block.
-
-        If nothing was captured, return an explicit, unambiguous statement
-        that no live evidence is attached — never a string that could be
-        mistaken for an observed value.
-        """
+        """Render whatever was actually captured upstream (status code, raw"""
         if not evidence:
             return f"[NO EVIDENCE CAPTURED — {fallback_note}]"
 
@@ -372,7 +338,7 @@ class ActionAgent:
                                 stack_keywords: List[str],
                                 evidence: Optional[Dict] = None,
                                 response_headers: Optional[Dict] = None) -> Dict:
-      
+
         header       = vuln_type.replace("Missing Security Header:", "").strip()
         stack_key    = self._best_stack_for_header(stack_keywords)
         header_lower = header.lower()
@@ -381,7 +347,7 @@ class ActionAgent:
 
         status_code = evidence.get("response_status") or evidence.get("status_code")
 
-       
+
         if not hdrs and status_code is None:
             evidence_block = (
                 "Request:\n"
@@ -712,7 +678,7 @@ class ActionAgent:
                                         stack_keywords: List[str],
                                         response_headers: Dict,
                                         evidence: Optional[Dict] = None) -> Optional[Dict]:
-     
+
         is_xpb   = "x-powered-by" in vuln_type.lower()
         header   = "X-Powered-By" if is_xpb else "Server"
         hdr_key  = header.lower()
@@ -725,10 +691,6 @@ class ActionAgent:
                     return str(v or "").strip()
             return ""
 
-        # The disclosed value is recorded on the finding's own evidence at
-        # detection time (headers={key: val}); recover it there when the
-        # caller's response_headers snapshot does not carry it, so a genuinely
-        # captured value is never mislabelled "NO EVIDENCE CAPTURED".
         captured = _lookup(response_headers)
         if not captured and isinstance(evidence, dict):
             captured = _lookup(
@@ -746,7 +708,7 @@ class ActionAgent:
             )
             return None
 
-         
+
         if captured:
             shows_line = f" Captured: {header}: {captured}"
             evidence_captured = True
@@ -783,7 +745,7 @@ class ActionAgent:
 
         return {
             "finding_type":   vuln_type,
-    
+
             "severity":       "Low" if evidence_captured else "Low (unconfirmed)",
             "location":       location,
             "attack_poc":     poc,
@@ -1086,7 +1048,7 @@ class ActionAgent:
                     f"\n\nConfidence:\n"
                     f"  {confidence}"
                 )
-                
+
             evidence_captured = True
         else:
             evidence_comment = (

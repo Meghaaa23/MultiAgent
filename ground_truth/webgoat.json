@@ -1,0 +1,37 @@
+{
+  "target": "webgoat",
+  "url": "http://localhost:3002/WebGoat",
+  "url_aliases": ["http://localhost:3002/WebGoat", "http://localhost:8080/WebGoat"],
+  "app": "OWASP WebGoat v2025.3",
+  "server_observed": "embedded Spring/Tomcat (no Server header)",
+  "scope": "authenticated",
+  "auth": {
+    "required_for_lessons": true,
+    "login_path": "/WebGoat/login",
+    "registration_path": "/WebGoat/registration",
+    "note": "Register a user, then log in. Each lesson is a guided, multi-step exercise; most are not reachable or confirmable by an unauthenticated black-box crawl."
+  },
+  "expected_findings": [
+    {"id": "wg-sqli", "type": "sqli", "name": "SQL Injection (intro/advanced/mitigation lessons)", "path": "/WebGoat/SqlInjection/attack", "parameter": "account,query", "method": "POST", "severity": "high", "cwe": "CWE-89", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-xss", "type": "xss-reflected", "name": "Cross-Site Scripting (reflected/DOM/stored lessons)", "path": "/WebGoat/CrossSiteScripting", "parameter": "field1,QTY", "method": "POST", "severity": "medium", "cwe": "CWE-79", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-path-traversal", "type": "path-traversal", "name": "Path Traversal", "path": "/WebGoat/PathTraversal", "parameter": "fullName,file", "method": "POST", "severity": "high", "cwe": "CWE-22", "owasp": "A01:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-xxe", "type": "xxe", "name": "XML External Entity", "path": "/WebGoat/xxe", "parameter": "body(xml)", "method": "POST", "severity": "high", "cwe": "CWE-611", "owasp": "A05:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-deserialization", "type": "insecure-deserialization", "name": "Insecure Deserialization", "path": "/WebGoat/InsecureDeserialization/task", "parameter": "token", "method": "POST", "severity": "high", "cwe": "CWE-502", "owasp": "A08:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-jwt", "type": "jwt", "name": "JWT weaknesses (none-alg / weak key)", "path": "/WebGoat/JWT", "parameter": "token", "method": "POST", "severity": "high", "cwe": "CWE-347", "owasp": "A02:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-idor", "type": "idor", "name": "Insecure Direct Object Reference", "path": "/WebGoat/IDOR", "parameter": "userId", "method": "GET", "severity": "medium", "cwe": "CWE-639", "owasp": "A01:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-csrf", "type": "csrf", "name": "Cross-Site Request Forgery", "path": "/WebGoat/csrf", "parameter": null, "method": "POST", "severity": "medium", "cwe": "CWE-352", "owasp": "A01:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-ssrf", "type": "ssrf", "name": "Server-Side Request Forgery", "path": "/WebGoat/SSRF/task", "parameter": "url", "method": "POST", "severity": "high", "cwe": "CWE-918", "owasp": "A10:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-missing-ac", "type": "idor", "name": "Missing Function-Level Access Control", "path": "/WebGoat/access-control", "parameter": null, "method": "GET", "severity": "high", "cwe": "CWE-284", "owasp": "A01:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-auth-bypass", "type": "weak-auth", "name": "Authentication bypass / insecure password reset", "path": "/WebGoat/PasswordReset", "parameter": "securityQuestion", "method": "POST", "severity": "high", "cwe": "CWE-640", "owasp": "A07:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "wg-vuln-components", "type": "insecure-deserialization", "name": "Vulnerable/outdated components (XStream etc.)", "path": "/WebGoat/VulnerableComponents", "parameter": "token", "method": "POST", "severity": "high", "cwe": "CWE-1104", "owasp": "A06:2021", "auth_required": true, "blackbox_detectable": false, "required": false, "source": "documented"},
+    {"id": "wg-client-side", "type": "weak-auth", "name": "Client-side filtering / bypass restrictions", "path": "/WebGoat/ClientSideFiltering", "parameter": null, "method": "GET", "severity": "medium", "cwe": "CWE-602", "owasp": "A04:2021", "auth_required": true, "blackbox_detectable": false, "required": false, "source": "documented"},
+    {"id": "wg-missing-headers", "type": "missing_header", "name": "Missing security headers", "path": "/WebGoat", "parameter": null, "method": "GET", "severity": "low", "cwe": "CWE-693", "owasp": "A05:2021", "auth_required": false, "blackbox_detectable": true, "required": false, "source": "confirmed_live", "evidence_hint": "X-Frame-Options, X-Content-Type-Options and Content-Security-Policy absent on the base response."},
+    {"id": "wg-actuator-open", "type": "sensitive-exposure", "name": "Unauthenticated Spring Boot Actuator index", "path": "/WebGoat/actuator", "parameter": null, "method": "GET", "severity": "medium", "cwe": "CWE-200", "owasp": "A05:2021", "auth_required": false, "blackbox_detectable": true, "required": true, "source": "confirmed_live", "evidence_hint": "GET /WebGoat/actuator returns HTTP 200 with a JSON _links index of actuator endpoints."},
+    {"id": "wg-actuator-env", "type": "sensitive-exposure", "name": "Actuator /env exposes configuration/property sources", "path": "/WebGoat/actuator/env", "parameter": null, "method": "GET", "severity": "high", "cwe": "CWE-200", "owasp": "A05:2021", "auth_required": false, "blackbox_detectable": true, "required": true, "source": "confirmed_live", "evidence_hint": "GET /WebGoat/actuator/env returns HTTP 200 with propertySources (command-line args, system properties)."},
+    {"id": "wg-actuator-configprops", "type": "sensitive-exposure", "name": "Actuator /configprops exposes bound configuration", "path": "/WebGoat/actuator/configprops", "parameter": null, "method": "GET", "severity": "high", "cwe": "CWE-200", "owasp": "A05:2021", "auth_required": false, "blackbox_detectable": true, "required": false, "source": "confirmed_live"}
+  ],
+  "must_not_report": [
+    {"type": "server_header", "path": "/WebGoat/", "reason": "No Server header is emitted; a server-version-disclosure finding here is a false positive."}
+  ],
+  "notes": "Teaching platform: nearly every finding needs a registered session plus guided multi-step interaction, so recall_blackbox is expected to be near zero. Use recall_all only when scanning authenticated with lesson-aware interaction. Lesson paths are representative for WebGoat 2025.x; confirm against this build."
+}

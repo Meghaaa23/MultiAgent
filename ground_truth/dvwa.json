@@ -1,0 +1,38 @@
+{
+  "target": "dvwa",
+  "url": "http://localhost:3001",
+  "url_aliases": ["http://localhost:3001", "http://localhost:8001"],
+  "app": "Damn Vulnerable Web Application (DVWA) v1.10",
+  "server_observed": "Apache/2.4.25 (Debian)",
+  "scope": "authenticated",
+  "auth": {
+    "required_for_modules": true,
+    "login_path": "/login.php",
+    "example_credentials": "admin / password",
+    "setup_path": "/setup.php",
+    "note": "Create/reset the database at /setup.php, then log in. Set DVWA Security to 'low' for the documented behaviour."
+  },
+  "expected_findings": [
+    {"id": "dvwa-sqli", "type": "sqli", "name": "SQL Injection", "path": "/vulnerabilities/sqli/", "parameter": "id", "method": "GET", "severity": "high", "cwe": "CWE-89", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-sqli-blind", "type": "sqli-blind", "name": "SQL Injection (Blind)", "path": "/vulnerabilities/sqli_blind/", "parameter": "id", "method": "GET", "severity": "high", "cwe": "CWE-89", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-cmdi", "type": "cmdi", "name": "Command Injection", "path": "/vulnerabilities/exec/", "parameter": "ip", "method": "POST", "severity": "critical", "cwe": "CWE-78", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-xss-reflected", "type": "xss-reflected", "name": "Reflected XSS", "path": "/vulnerabilities/xss_r/", "parameter": "name", "method": "GET", "severity": "medium", "cwe": "CWE-79", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-xss-stored", "type": "xss-stored", "name": "Stored XSS (guestbook)", "path": "/vulnerabilities/xss_s/", "parameter": "mtxMessage,txtName", "method": "POST", "severity": "high", "cwe": "CWE-79", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-xss-dom", "type": "xss-dom", "name": "DOM XSS", "path": "/vulnerabilities/xss_d/", "parameter": "default", "method": "GET", "severity": "medium", "cwe": "CWE-79", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-csrf", "type": "csrf", "name": "CSRF (password change)", "path": "/vulnerabilities/csrf/", "parameter": "password_new,password_conf", "method": "GET", "severity": "medium", "cwe": "CWE-352", "owasp": "A01:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-lfi", "type": "lfi", "name": "File Inclusion (LFI/RFI)", "path": "/vulnerabilities/fi/", "parameter": "page", "method": "GET", "severity": "high", "cwe": "CWE-98", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-file-upload", "type": "file-upload", "name": "Unrestricted File Upload", "path": "/vulnerabilities/upload/", "parameter": "uploaded", "method": "POST", "severity": "high", "cwe": "CWE-434", "owasp": "A04:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-weak-session", "type": "weak-session", "name": "Weak Session IDs", "path": "/vulnerabilities/weak_id/", "parameter": null, "method": "POST", "severity": "medium", "cwe": "CWE-330", "owasp": "A07:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-brute-force", "type": "weak-auth", "name": "Brute Force / no anti-automation", "path": "/vulnerabilities/brute/", "parameter": "username,password", "method": "GET", "severity": "medium", "cwe": "CWE-307", "owasp": "A07:2021", "auth_required": true, "blackbox_detectable": false, "required": true, "source": "documented"},
+    {"id": "dvwa-brute-xss", "type": "xss-reflected", "name": "Reflected XSS on brute-force username", "path": "/vulnerabilities/brute/", "parameter": "username", "method": "GET", "severity": "medium", "cwe": "CWE-79", "owasp": "A03:2021", "auth_required": true, "blackbox_detectable": false, "required": false, "source": "documented", "evidence_hint": "YuraScanner confirms reflected XSS via username param here."},
+    {"id": "dvwa-captcha", "type": "weak-auth", "name": "Insecure CAPTCHA bypass", "path": "/vulnerabilities/captcha/", "parameter": null, "method": "POST", "severity": "medium", "cwe": "CWE-287", "owasp": "A07:2021", "auth_required": true, "blackbox_detectable": false, "required": false, "source": "documented"},
+    {"id": "dvwa-csp", "type": "missing_header", "name": "CSP Bypass lesson", "path": "/vulnerabilities/csp/", "parameter": null, "method": "POST", "severity": "medium", "cwe": "CWE-693", "owasp": "A05:2021", "auth_required": true, "blackbox_detectable": false, "required": false, "source": "documented"},
+    {"id": "dvwa-default-creds", "type": "default-credentials", "name": "Default credentials admin/password", "path": "/login.php", "parameter": "username,password", "method": "POST", "severity": "high", "cwe": "CWE-1392", "owasp": "A07:2021", "auth_required": false, "blackbox_detectable": false, "required": false, "source": "confirmed_live"},
+    {"id": "dvwa-missing-headers", "type": "missing_header", "name": "Missing security headers (CSP, X-Frame-Options, HSTS, X-Content-Type-Options)", "path": "/", "parameter": null, "method": "GET", "severity": "low", "cwe": "CWE-693", "owasp": "A05:2021", "auth_required": false, "blackbox_detectable": true, "required": true, "source": "confirmed_live"},
+    {"id": "dvwa-server-header", "type": "server_header", "name": "Server version disclosure (Apache/2.4.25)", "path": "/", "parameter": null, "method": "GET", "severity": "low", "cwe": "CWE-200", "owasp": "A05:2021", "auth_required": false, "blackbox_detectable": true, "required": true, "source": "confirmed_live"}
+  ],
+  "must_not_report": [
+    {"type": "sqli", "path": "/login.php", "reason": "DVWA login is not SQL-injectable at default; SQLi lives in the sqli modules."}
+  ],
+  "notes": "13 intentional modules, all behind login at low security. Unauthenticated, only the missing headers and Apache version banner are reachable. For a YuraScanner-style result, log in and set security to low."
+}

@@ -9,17 +9,17 @@ from typing import Dict, Iterable, List, Optional, Tuple
 class EvidenceClass(str, Enum):
     BEHAVIORAL = "behavioral"
     LIVE_SURFACE = "live_surface"
-  
+
     ROUTE_CONFIRMED = "route_confirmed"
     PASSIVE_STRUCTURAL = "passive_structural"
     PASSIVE_HINT = "passive_hint"
-  
+
     PASSIVE = "passive_hint"
     BRAND = "brand"
 
 class Detection(str, Enum):
     CONFIRMED = "confirmed"
-  
+
     ROUTE_CONFIRMED = "route_confirmed"
     PROBABLE = "probable"
     POSSIBLE = "possible"
@@ -129,7 +129,7 @@ class DetectionResult:
     is_ai: bool
     has_behavioral: bool
     has_live_surface: bool
-   
+
     has_route_confirmed: bool
     brand_only: bool
     classes: Dict[str, List[str]]
@@ -174,7 +174,7 @@ def score_evidence(keys: Iterable[str]) -> DetectionResult:
     return DetectionResult(
         detection=detection,
         confidence=_CONFIDENCE[detection],
-       
+
         is_ai=has_live_surface,
         has_behavioral=has_behavioral,
         has_live_surface=has_live_surface,
@@ -188,8 +188,7 @@ def has_live_surface_evidence(keys: Iterable[str]) -> bool:
     return bool(group.behavioral or group.live_surface)
 
 def has_route_confirmed_evidence(keys: Iterable[str]) -> bool:
-    """True when a route/handler was confirmed (structured 4xx, schema-
-    declared operation) even though no model output was ever observed."""
+    """True when a route/handler was confirmed (structured 4xx, schema-"""
     return bool(group_evidence(keys).route_confirmed)
 
 def has_behavioral_evidence(keys: Iterable[str]) -> bool:
@@ -230,14 +229,7 @@ _AUTH_BODY_MESSAGE_KEYS = (
 def extract_auth_reason(
     status_code: int, body: str = "", headers: Optional[Dict] = None,
 ) -> Tuple[str, str]:
-    """Classify a 401/403 response into (auth_status, reason).
-
-    auth_status: "authentication_required" (401) | "access_forbidden" (403) | ""
-    reason: short machine-readable code, e.g. "account_banned", parsed from
-    a JSON body's message-shaped field or common phrasing; falls back to
-    "invalid_or_missing_credentials" (401) / "forbidden" (403) when nothing
-    more specific is found. Returns ("", "") for any other status code.
-    """
+    """Classify a 401/403 response into (auth_status, reason)."""
     if status_code == 401:
         auth_status = "authentication_required"
     elif status_code == 403:

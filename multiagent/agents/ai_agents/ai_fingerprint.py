@@ -58,13 +58,7 @@ KNOWN_CAPABILITIES = {
     "audio", "embedding", "multi_agent", "mcp", "workflow",
 }
 
-# High-specificity inference-protocol field names. Every entry names a field
-# that is idiosyncratic to LLM/inference response envelopes. Deliberately
-# excluded: bare "model"/"models"/"data"/"object":"list"/"done" — those occur
-# in unrelated JSON APIs (a catalog's {"model":"Civic"}, Stripe's
-# {"object":"list"}, a job API's {"done":true}) and would confirm AI on shape
-# alone. Those shapes are only accepted by _has_ai_protocol_structure(), which
-# requires them to co-occur with corroborating inference fields.
+
 AI_RESPONSE_BODY_PATTERNS = [
     r'"choices"\s*:\s*\[',
     r'"prompt_tokens"\s*:',
@@ -80,10 +74,7 @@ AI_RESPONSE_BODY_PATTERNS = [
     r'"generated_text"\s*:',
 ]
 
-# (Removed OPENAI_JSON_KEYS: a flat "any of these keys is present" test
-# confirmed AI on generic JSON that merely shared a key name with LLM APIs —
-# data/message/response/error/model. Shape is now judged by
-# _has_ai_protocol_structure(), which requires inference-specific structure.)
+
 
 GENERIC_CHAT_PROBE = json.dumps({
     "messages": [{"role": "user", "content": "Hi"}],
@@ -135,7 +126,6 @@ AI_RESPONSE_HEADERS = [
     "x-inference-id", "x-model-name", "x-prediction-id",
 ]
 
-# Client-side inference features observed in JS — not product/SDK names.
 _JS_INFERENCE_FEATURES: Tuple[str, ...] = (
     "useChat(",
     "useCompletion(",
@@ -234,11 +224,7 @@ def _looks_static_storage_error(ct: str, body: str) -> bool:
 def _looks_api_method_rejection(
     ct: str, body: str, headers: Optional[Dict] = None,
 ) -> bool:
-    """True when HTTP 405 still looks like an application API handler.
-
-    Rejects static OSS/S3 XML and HTML shells. Accepts JSON APIs and
-    responses that advertise an Allow header.
-    """
+    """True when HTTP 405 still looks like an application API handler."""
     if _looks_html_body(ct, body):
         return False
     if _looks_static_storage_error(ct, body):
@@ -291,11 +277,7 @@ def _looks_api_auth_rejection(
     return isinstance(data, (dict, list))
 
 def _is_meaningful_ai_meta_content(content: str) -> bool:
-    """True when meta content is real AI product copy, not a URL/domain hit.
-
-    Rejects og:url / og:image style values where 'ai' only appears in a
-    hostname (e.g. https://wink.ai/logo.png).
-    """
+    """True when meta content is real AI product copy, not a URL/domain hit."""
     text = html_lib.unescape((content or "").strip())
     if len(text) < 8:
         return False
@@ -320,12 +302,7 @@ def _is_meaningful_ai_meta_content(content: str) -> bool:
     return False
 
 def _has_ai_protocol_structure(data) -> bool:
-    """True only when the parsed JSON has structure specific to an inference
-    response: a chat/completion choices array, a token-accounting usage block,
-    an embedding vector, a model list, an Ollama generate/chat/tags envelope,
-    or a tool-call/generated-text field. Generic keys (data/message/response/
-    error) do not qualify — a bare error object or an arbitrary list of records
-    is not evidence that a model produced output."""
+    """True only when the parsed JSON has structure specific to an inference"""
     if not isinstance(data, dict):
         return False
 
@@ -356,13 +333,11 @@ def _has_ai_protocol_structure(data) -> bool:
         if data.get("object") == "list" and ("id" in d0 or "model" in d0):
             return True
 
-    # Ollama generate/chat: model identity plus a completion marker.
     if "model" in data and ("done" in data or "created_at" in data) and (
         "response" in data or isinstance(data.get("message"), dict)
         or "eval_count" in data):
         return True
 
-    # Ollama /api/tags: a models list of model descriptors.
     models = data.get("models")
     if isinstance(models, list) and models and isinstance(models[0], dict) and any(
         k in models[0] for k in ("name", "model", "modified_at", "digest")):
@@ -402,11 +377,7 @@ def _is_soft_404_json(body: str) -> bool:
     return "not found" in msg and len(data) <= 3
 
 def _looks_non_api_document(path: str) -> bool:
-    """True for static/doc file shapes — never inference APIs.
-
-    Shape filter only (extensions / well-known doc basenames). Does not
-    invent or prioritize application endpoints to probe.
-    """
+    """True for static/doc file shapes — never inference APIs."""
     pl = (path or "").lower().split("?")[0].split("#")[0]
     if not pl:
         return True
@@ -426,10 +397,7 @@ _INFERENCE_SEGMENTS = frozenset({
 })
 
 def _is_inference_path(path: str) -> bool:
-    """True when a discovered path's segments look like an inference handler.
-
-    Does not invent URLs — only classifies paths already found on the app.
-    """
+    """True when a discovered path's segments look like an inference handler."""
     p = (path or "").lower().split("?")[0].split("#")[0]
     if not p or _looks_non_api_document(p):
         return False
@@ -1195,10 +1163,6 @@ class AIFingerprintAgent:
         if m_title:
             page_title = re.sub(r"\s+", " ", html_lib.unescape(m_title.group(1))).strip()
             title_low = page_title.lower()
-            # Word-boundary match: the short keyword "ai" must not fire on
-            # "Mail", "Domain" or "Maintenance". This is a brand-tier hint and
-            # never confirms AI on its own, but boundary matching keeps it from
-            # adding noise to every unrelated dashboard title.
             if any(re.search(rf"\b{re.escape(kw)}\b", title_low)
                    for kw in AI_TITLE_KEYWORDS):
                 evidence.append(EvidenceItem.make(
@@ -1528,11 +1492,7 @@ class AIFingerprintAgent:
     def _extract_js_chunk_urls(
         self, js: str, base: str, source_url: str = "",
     ) -> List[str]:
-        """Discover additional JS chunks referenced by a bundle.
-
-        Relative imports resolve against the bundle URL (CDN-safe), not only
-        the page origin.
-        """
+        """Discover additional JS chunks referenced by a bundle."""
         if not js:
             return []
         text = self._unescape_js_strings(js)
@@ -1572,16 +1532,7 @@ class AIFingerprintAgent:
         return out
 
     def _extract_api_paths_from_js(self, js: str) -> List[str]:
-        """Discover app API routes from JS without a hardcoded endpoint catalog.
-
-        Handles literal calls plus common SPA base-URL patterns, e.g.:
-          fetch("/api/chat")
-          `${BASE_URL}/api/messages`
-          BASE_URL + "/api/ask"
-          "\\/api\\/messages" (minified escaped slashes)
-          request.get(`${baseUrl}/v1/chat/completions`)
-          https://chat.example.com/api/chat (absolute, host from app JS)
-        """
+        """Discover app API routes from JS without a hardcoded endpoint catalog."""
         found: Set[str] = set()
         js = self._unescape_js_strings(js)
 
@@ -1712,10 +1663,7 @@ class AIFingerprintAgent:
         *,
         limit: int = 15,
     ) -> List[str]:
-        """Absolute API URLs from JS on allowlisted related hosts (not page origin).
-
-        Discovers-first only: never invents paths. Prefer /api and /vN; cap count.
-        """
+        """Absolute API URLs from JS on allowlisted related hosts (not page origin)."""
         page_host = (urllib.parse.urlparse(page_base).netloc or "").lower()
         allowed: Set[str] = set()
         for origin in related_bases or []:
@@ -2402,7 +2350,6 @@ class AIFingerprintAgent:
                     f"SSE at {path}", "probe", endpoint=url))
                 endpoints.append(url)
 
-            # NOTE: bare Transfer-Encoding: chunked is CDN/static noise and must
 
             if (category == "schema" and ai_shaped and url not in endpoints):
                 evidence.append(EvidenceItem.make(
@@ -2528,14 +2475,7 @@ class AIFingerprintAgent:
         self, candidate_endpoints: List[str], verbose: bool,
         openapi_schema: Optional[Dict] = None,
     ) -> Dict:
-        """Shape-adaptive behavioral confirmation.
-
-        For each candidate endpoint, discover a request-body shape the backend
-        actually accepts (OpenAPI-derived first, then a generic ladder of chat/
-        prompt/input/query/text shapes), then reuse that shape to ask a model-
-        identity question. This detects AI backends regardless of whether they
-        speak the OpenAI chat schema — no per-application assumptions.
-        """
+        """Shape-adaptive behavioral confirmation."""
         evidence:      List[EvidenceItem] = []
         model_reported: str              = ""
         loop = asyncio.get_event_loop()
@@ -2624,20 +2564,10 @@ class AIFingerprintAgent:
 
             def _payload(content: str, _builder=builder) -> bytes:
                 shaped = _builder(content)
-                # Never inject a guessable model name: an endpoint that merely
-                # reflects the request must not be able to hand one back to us
-                # and have it counted as a self-report.
                 if isinstance(shaped, dict):
                     shaped.pop("model", None)
                 return json.dumps(shaped).encode()
 
-            # --- Instruction-following: table-free behavioral confirmation ---
-            # A random canary that cannot be guessed or matched against any
-            # table. Only a backend that follows the natural-language
-            # instruction returns it. An endpoint that echoes the request also
-            # contains the canary, so we additionally require the instruction
-            # wrapper text to be absent from the reply — an echo carries it,
-            # an instruction-follower does not.
             canary = f"AIPROBE{secrets.token_hex(3).upper()}"
             instr = (f"Repeat the following token exactly and output nothing "
                      f"else: {canary}")
@@ -2659,14 +2589,11 @@ class AIFingerprintAgent:
             except Exception as e:
                 logger.debug(f"Instruction probe failed on {endpoint}: {e}")
 
-            # --- Model self-report: corroboration only, echo-guarded ---
             identity_q = "What model or system are you? Answer in one short sentence."
             try:
                 status, _resp_headers, body = await _post(endpoint, _payload(identity_q))
                 if status in (200, 201):
                     text = _extract(body)
-                    # A reply that merely reflects our question back is not a
-                    # self-report; require the prompt not to appear verbatim.
                     if identity_q.lower() not in text.lower():
                         for pattern in MODEL_NAME_PATTERNS:
                             m = re.search(pattern, text, re.I)

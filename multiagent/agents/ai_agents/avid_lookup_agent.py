@@ -306,7 +306,6 @@ class AVIDLookupAgent:
                     relevant.append(entry)
                     continue
 
-            # Only attach an advisory when this app's own surface mentions it.
             subject_tokens = [
                 tok for tok in re.findall(r"[a-z][a-z0-9_.-]{3,}", blob)
                 if tok not in {

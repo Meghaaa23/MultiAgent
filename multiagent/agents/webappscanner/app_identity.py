@@ -74,10 +74,7 @@ def _from_powered_by(html: str, headers: Dict) -> Tuple[Optional[str], Optional[
     return None, None, ""
 
 def _title_segment_brand_score(candidate: str) -> int:
-    """
-    Rank page-title segments for product identity.
-    Prefer short brand tokens (AnythingLLM) over marketing slogans.
-    """
+    """Rank page-title segments for product identity."""
     s = (candidate or "").strip()
     if not s or not _looks_like_app_name(s):
         return -1
@@ -159,10 +156,7 @@ def _from_data_attributes(html: str) -> Tuple[Optional[str], Optional[str], str]
     return None, None, ""
 
 def _from_wp_json(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
-    """
-    WordPress REST root + generator — definitive CMS identity when exposed.
-    Also notes /wp-json/wp/v2/users reachability for author enumeration surface.
-    """
+    """WordPress REST root + generator — definitive CMS identity when exposed."""
     base = base_url.rstrip("/")
     name: Optional[str] = "WordPress"
     version: Optional[str] = None
@@ -296,10 +290,7 @@ def _from_robots_txt(base_url: str) -> Tuple[Optional[str], Optional[str], str]:
 def _pick_preferred_wappalyzer_app(
     wappalyzer_technologies: List,
 ) -> Optional[Dict]:
-    """
-    Choose the strongest app-level tech from Wappalyzer output.
-    Prefer CMS; never wipe an existing best signal via for/else.
-    """
+    """Choose the strongest app-level tech from Wappalyzer output."""
     preferred: Optional[Dict] = None
     for tech in wappalyzer_technologies or []:
         if not isinstance(tech, dict):
@@ -329,13 +320,7 @@ async def detect_app_identity(
     wappalyzer_cms: Optional[str] = None,
     verbose: bool = False,
 ) -> AppIdentity:
-    """
-    Derive authoritative app name/version for CVE targeting.
-
-    ``wappalyzer_technologies`` is the fingerprint stack list (dicts with
-    name/version/category). ``wappalyzer_cms`` is an optional CMS name hint
-    kept for backward compatibility.
-    """
+    """Derive authoritative app name/version for CVE targeting."""
     if not isinstance(response_headers, dict):
         response_headers = dict(response_headers)
     response_headers = {k.lower(): v for k, v in response_headers.items()}

@@ -1,11 +1,4 @@
-"""
-Redis Manager - Handles state management, caching, and pub/sub messaging
-Features:
-- Agent state tracking
-- Result caching with TTL
-- Event publishing
-- Graceful degradation when Redis unavailable
-"""
+"""Redis Manager - Handles state management, caching, and pub/sub messaging"""
 import os
 import json
 import logging
@@ -20,26 +13,15 @@ logger = logging.getLogger(__name__)
 redis_client = None
 
 def initialize_redis() -> bool:
-    """
-    Initialize Redis connection with proper error handling.
-    
-    Returns:
-        True if connection successful, False otherwise
-    
-    Configuration:
-        - Supports both REDIS_URL (full connection string) or individual params
-        - Timeout: 5 seconds for connection and operations
-        - Auto-retry: No (fails fast)
-        - Graceful degradation: System continues without Redis if connection fails
-    """
+    """Initialize Redis connection with proper error handling."""
     global redis_client
-    
+
     try:
         REDIS_URL = os.getenv("REDIS_URL")
-        
+
         if REDIS_URL:
             redis_client = redis.Redis.from_url(
-                REDIS_URL, 
+                REDIS_URL,
                 decode_responses=True,
                 socket_connect_timeout=5,
                 socket_timeout=5
@@ -50,7 +32,7 @@ def initialize_redis() -> bool:
             port = int(os.getenv("REDIS_PORT", 6379))
             password = os.getenv("REDIS_PASSWORD", None)
             db = int(os.getenv("REDIS_DB", 0))
-            
+
             redis_client = redis.Redis(
                 host=host,
                 port=port,
@@ -61,17 +43,17 @@ def initialize_redis() -> bool:
                 socket_timeout=5
             )
             connection_info = f"{host}:{port}"
-        
+
         redis_client.ping()
         logger.info(f" Redis connected successfully to {connection_info}")
         return True
-    
+
     except redis.ConnectionError as e:
         logger.warning(f"  Redis connection failed: {e}")
         logger.warning("  Continuing without Redis - caching will be disabled")
         redis_client = None
         return False
-    
+
     except Exception as e:
         logger.error(f" Unexpected error during Redis initialization: {e}")
         redis_client = None
@@ -80,12 +62,7 @@ def initialize_redis() -> bool:
 initialize_redis()
 
 def is_redis_available() -> bool:
-    """
-    Check if Redis is available and connected.
-    
-    Returns:
-        True if Redis is available, False otherwise
-    """
+    """Check if Redis is available and connected."""
     if redis_client is None:
         return False
     try:
@@ -95,23 +72,11 @@ def is_redis_available() -> bool:
         return False
 
 def set_agent_state(agent_name: str, state: Dict[str, Any]) -> bool:
-    """
-    Store or update an agent's current state.
-    
-    Args:
-        agent_name: Name of the agent (e.g., "pdf_agent")
-        state: Dictionary containing state information
-    
-    Returns:
-        True if successful, False otherwise
-    
-    Example:
-        set_agent_state("pdf_agent", {"status": "running", "file": "doc.pdf"})
-    """
+    """Store or update an agent's current state."""
     if not is_redis_available():
         logger.debug(f"Skipping state storage for {agent_name} (Redis unavailable)")
         return False
-    
+
     try:
         key = f"agent:{agent_name}:state"
         redis_client.set(key, json.dumps(state))
@@ -122,18 +87,10 @@ def set_agent_state(agent_name: str, state: Dict[str, Any]) -> bool:
         return False
 
 def get_agent_state(agent_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Retrieve the stored state for a specific agent.
-    
-    Args:
-        agent_name: Name of the agent
-    
-    Returns:
-        State dictionary if found, None otherwise
-    """
+    """Retrieve the stored state for a specific agent."""
     if not is_redis_available():
         return None
-    
+
     try:
         key = f"agent:{agent_name}:state"
         val = redis_client.get(key)
@@ -143,23 +100,11 @@ def get_agent_state(agent_name: str) -> Optional[Dict[str, Any]]:
         return None
 
 def publish_event(channel: str, message: str) -> bool:
-    """
-    Publish a message to a Redis Pub/Sub channel.
-    
-    Args:
-        channel: Channel name (e.g., "agent_updates")
-        message: Message to publish
-    
-    Returns:
-        True if successful, False otherwise
-    
-    Example:
-        publish_event("agent_updates", "pdf_agent completed processing")
-    """
+    """Publish a message to a Redis Pub/Sub channel."""
     if not is_redis_available():
         logger.debug(f"Skipping event publish to {channel} (Redis unavailable)")
         return False
-    
+
     try:
         redis_client.publish(channel, message)
         logger.debug(f"Published event → {channel}: {message}")
@@ -169,24 +114,11 @@ def publish_event(channel: str, message: str) -> bool:
         return False
 
 def cache_result(key: str, value: str, ttl: int = 3600) -> bool:
-    """
-    Cache a result temporarily with TTL (Time To Live).
-    
-    Args:
-        key: Cache key (e.g., "pdf:/path/file.pdf")
-        value: Value to cache (typically text content)
-        ttl: Time to live in seconds (default: 1 hour)
-    
-    Returns:
-        True if successful, False otherwise
-    
-    Example:
-        cache_result("pdf:/uploads/doc.pdf", "extracted text...", ttl=3600)
-    """
+    """Cache a result temporarily with TTL (Time To Live)."""
     if not is_redis_available():
         logger.debug(f"Skipping cache for {key} (Redis unavailable)")
         return False
-    
+
     try:
         redis_client.set(key, value, ex=ttl)
         logger.debug(f"Cached key {key} (TTL={ttl}s, size={len(value)} bytes)")
@@ -196,18 +128,10 @@ def cache_result(key: str, value: str, ttl: int = 3600) -> bool:
         return False
 
 def get_cached_result(key: str) -> Optional[str]:
-    """
-    Return cached value if available.
-    
-    Args:
-        key: Cache key
-    
-    Returns:
-        Cached value if found, None otherwise
-    """
+    """Return cached value if available."""
     if not is_redis_available():
         return None
-    
+
     try:
         return redis_client.get(key)
     except Exception as e:
@@ -215,18 +139,10 @@ def get_cached_result(key: str) -> Optional[str]:
         return None
 
 def delete_key(key: str) -> bool:
-    """
-    Remove a key from Redis.
-    
-    Args:
-        key: Key to delete
-    
-    Returns:
-        True if successful, False otherwise
-    """
+    """Remove a key from Redis."""
     if not is_redis_available():
         return False
-    
+
     try:
         redis_client.delete(key)
         logger.debug(f"Deleted key {key}")
@@ -236,23 +152,11 @@ def delete_key(key: str) -> bool:
         return False
 
 def clear_all_cache(pattern: str = "*") -> int:
-    """
-    Clear all keys matching the pattern.
-    
-    Args:
-        pattern: Pattern to match (default: "*" for all keys)
-    
-    Returns:
-        Number of keys deleted
-    
-    Example:
-        clear_all_cache("pdf:*")  # Clear all PDF caches
-        clear_all_cache()          # Clear everything
-    """
+    """Clear all keys matching the pattern."""
     if not is_redis_available():
         logger.warning("Cannot clear cache (Redis unavailable)")
         return 0
-    
+
     try:
         keys = redis_client.keys(pattern)
         if keys:
@@ -265,15 +169,10 @@ def clear_all_cache(pattern: str = "*") -> int:
         return 0
 
 def get_cache_stats() -> Dict[str, Any]:
-    """
-    Get statistics about cached items.
-    
-    Returns:
-        Dictionary with cache statistics
-    """
+    """Get statistics about cached items."""
     if not is_redis_available():
         return {"available": False, "error": "Redis unavailable"}
-    
+
     try:
         info = redis_client.info()
         return {
@@ -288,13 +187,5 @@ def get_cache_stats() -> Dict[str, Any]:
         return {"available": False, "error": str(e)}
 
 def clear_agent_state(agent_name: str) -> bool:
-    """
-    Clear the state for a specific agent.
-    
-    Args:
-        agent_name: Name of the agent
-    
-    Returns:
-        True if successful, False otherwise
-    """
+    """Clear the state for a specific agent."""
     return delete_key(f"agent:{agent_name}:state")

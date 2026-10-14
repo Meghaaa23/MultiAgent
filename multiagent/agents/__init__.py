@@ -1,8 +1,4 @@
-"""
-Multi-Agent System for Threat Modeling and Web Scanning.
-
-Import submodules directly for heavy agents; this package exports QA and Redis helpers.
-"""
+"""Multi-Agent System for Threat Modeling and Web Scanning."""
 
 from .qa_agent import answer_question_from_db, set_config
 from .redis_manager import (

@@ -63,11 +63,7 @@ def _build_evidence_gated_stride(target_url, response_headers,
                                   discovered_params, discovered_forms,
                                   cors_mode, stack,
                                   headers_capture_failed: bool = False) -> List[Dict]:
-    """
-    cors_mode: None | "wildcard" | "reflected" | "credentialed"
-    Only reflected/credentialed CORS enter publisher STRIDE; bare ACAO=*
-    without credentials is Low and omitted (honesty — not cookie theft).
-    """
+    """cors_mode: None | "wildcard" | "reflected" | "credentialed" """
     threats = []
     hdrs    = {k.lower(): v for k, v in (response_headers or {}).items()}
     xfo     = hdrs.get("x-frame-options", "")
@@ -151,17 +147,11 @@ class WebScannerAgent:
         print(" WebScannerAgent initialized ")
 
     async def scan_application(self, target_url: str,
-                               max_time_minutes: int = 15,
+                               max_time_minutes: Optional[int] = None,
                                verbose: bool = False,
                                ai_auth_token: Optional[str] = None,
                                auth: Optional[Dict] = None) -> Dict:
-        """
-        auth (optional): {"username", "password", "login_url",
-        "username_selector", "password_selector", "success_indicator"}.
-        When given, the scanner logs in first and every component reuses the
-        session; if login fails the scan continues unauthenticated and the
-        report says why.
-        """
+        """auth (optional): {"username", "password", "login_url","""
         session: Optional[_auth.AuthSession] = None
         if auth and auth.get("username") and auth.get("password"):
             base = _resolve_docker_url(target_url.split("#")[0].rstrip("/"))
@@ -194,7 +184,7 @@ class WebScannerAgent:
                 _auth.deactivate(session)
 
     async def _scan_application(self, target_url: str,
-                                max_time_minutes: int = 15,
+                                max_time_minutes: Optional[int] = None,
                                 verbose: bool = False,
                                 ai_auth_token: Optional[str] = None,
                                 session: Optional["_auth.AuthSession"] = None) -> Dict:
@@ -211,8 +201,6 @@ class WebScannerAgent:
         ai_fingerprinter = self.ai_fingerprinter
         ai_infra_agent   = self.ai_infra_agent
         ai_vuln_tester   = self.ai_vuln_tester
-        # urllib calls pick the login session up via the global handler;
-        # the httpx-based infra agent needs it passed explicitly.
         infra_headers = {
             **(session.request_headers() if authed else {}),
             **(ai_auth_headers or {}),
@@ -241,7 +229,7 @@ class WebScannerAgent:
                   + (f"Authenticated (as {session.username!r})" if authed
                      else "Black-box unauthenticated"))
             print(f"  Target : {target_url}")
-            print(f"  Budget : {max_time_minutes} minutes")
+            print("  Budget : coverage-based (runs until surface saturation; no time limit)")
             print("  Crawl  : Deep (shared "
                   + ("authenticated" if authed else "anonymous") + " session)")
             print(f"  AI Pipeline Auth : {'provided' if ai_auth_headers else 'none (unauthenticated)'}")
@@ -292,7 +280,7 @@ class WebScannerAgent:
                     wappalyzer_technologies=stack.get("technologies", []),
                     verbose=verbose,
                 )
-            
+
                 if app_identity and app_identity.name:
                     from .app_identity import _is_infra_or_framework_name
                     product_name = app_identity.name
@@ -334,7 +322,7 @@ class WebScannerAgent:
             except Exception as e:
                 logger.debug(f"App identity failed: {e}")
 
-      
+
         await _keep_session()
         if verbose:
             print("Endpoint Discovery...")
@@ -345,7 +333,7 @@ class WebScannerAgent:
             )
             for ep in discovered_endpoints:
                 if ep.get("url") and ep.get("interesting") and ep.get("method") == "GET":
-                   
+
                     if ep.get("category") != "discovered_protected":
                         all_urls.append(ep["url"])
             from .vulnerability_tester import synthesize_injectable_urls
@@ -379,7 +367,7 @@ class WebScannerAgent:
                   f"({interesting} interesting, {protected} access-controlled)"
                   + (" [soft-404 filter active]" if soft_mode else "") + "\n")
 
-      
+
         await _keep_session()
         if verbose:
             print("AI/ML Component Detection...")
@@ -516,20 +504,15 @@ class WebScannerAgent:
             deep=True,
         )
 
-        elapsed_so_far = (datetime.now() - start).total_seconds()
-        crawl_budget_s = max(
-            60.0,
-            (max_time_minutes * 60.0) * 0.70 - elapsed_so_far,
-        )
         nav_graph: Dict = {}
+        paper_coverage: Dict = {}
         interstate: Dict = {}
         interstate_flows: List = []
         crawl = await self.browser.deep_crawl(
             tasks=tasks,
             base_url=target_url,
-            max_tasks=15,
+            max_tasks=len(tasks) or 15,
             max_steps_per_task=18,
-            time_budget_seconds=crawl_budget_s,
             verbose=verbose,
         )
         tasks_executed = int(crawl.get("tasks_executed") or 0)
@@ -539,6 +522,7 @@ class WebScannerAgent:
         crawl_apis = list(crawl.get("api_urls") or [])
         all_urls.extend(crawl_apis)
         nav_graph = crawl.get("nav_graph") or {}
+        paper_coverage = crawl.get("paper_coverage") or {}
         interstate = crawl.get("interstate") or {}
         interstate_flows = interstate.get("flows") or []
         crawl_findings = list(crawl.get("crawl_findings") or [])
@@ -561,10 +545,18 @@ class WebScannerAgent:
                 f"   Deep crawl: {tasks_executed}/{len(tasks)} tasks "
                 f"({tasks_progressed} with new surface) | "
                 f"{len(all_forms)} forms | {len(all_urls)} URLs | "
-                f"{len(crawl_apis)} network APIs\n"
+                f"{len(crawl_apis)} network APIs | "
+                f"states={((nav_graph.get('summary') or {}).get('states') or 0)} "
+                f"edges={((nav_graph.get('summary') or {}).get('edges') or 0)} "
+                f"frontier={((nav_graph.get('summary') or {}).get('frontier_taken') or 0)} "
+                f"traces={((nav_graph.get('summary') or {}).get('traces_recorded') or 0)} "
+                f"replay={((nav_graph.get('summary') or {}).get('replay_probes') or 0)} "
+                f"xss_in_page={paper_coverage.get('xss_confirmed_in_page') or 0} "
+                f"(safe={paper_coverage.get('xss_safe_phase') or 0} "
+                f"aggressive={paper_coverage.get('xss_aggressive_phase') or 0})\n"
             )
 
-   
+
         await _keep_session()
         if verbose:
             print("SPA Scanning...")
@@ -594,15 +586,12 @@ class WebScannerAgent:
         except Exception as e:
             logger.warning(f"SPA scanning failed: {e}")
 
-       
+
         await _keep_session()
         if verbose:
             print("Vulnerability Testing...")
         skipped_password_forms: List[Dict] = []
         if authed:
-            # Forms with 2+ password inputs are change-password / sign-up
-            # forms; fuzzing them could rotate the scan account's password
-            # and end the authenticated session.
             def _pw_fields(form):
                 return sum(
                     1 for i in (form.get("inputs") or form.get("fields") or [])
@@ -666,7 +655,7 @@ class WebScannerAgent:
             p = sum(1 for f in raw_findings if f.get("status") == "Potential")
             print(f"  {c} confirmed, {p} potential\n")
 
-     
+
         await _keep_session()
         if verbose:
             print(" Attack Verification...")
@@ -962,6 +951,7 @@ class WebScannerAgent:
             "coverage_assessment":    coverage_assessment,
             "eval_metrics":           eval_metrics,
             "nav_graph":              nav_graph,
+            "paper_coverage":         paper_coverage,
             "interstate":             interstate,
             "vulnerabilities":        all_findings,
             "stride_threats":         stride_threats,
@@ -971,6 +961,20 @@ class WebScannerAgent:
             "tasks_executed":         tasks_executed,
             "forms_discovered":       len(all_forms),
             "forms_testing":          forms_testing,
+            "discovered_urls":        list(all_urls),
+            "discovered_forms":       [
+                {
+                    "action": f.get("action", "") if isinstance(f, dict) else "",
+                    "method": (f.get("method", "get") if isinstance(f, dict) else "get"),
+                    "fields": [
+                        i.get("name", "") for i in (
+                            (f.get("fields") or f.get("inputs") or [])
+                            if isinstance(f, dict) else [])
+                        if isinstance(i, dict) and i.get("name")
+                    ],
+                }
+                for f in (all_forms or [])
+            ],
             "urls_discovered":        len(all_urls),
             "scan_duration":          round(duration, 1),
             "scan_scope":             scan_scope,
@@ -1002,15 +1006,7 @@ class WebScannerAgent:
         }
 
     async def _get_real_headers(self, url: str, verbose: bool = False) -> tuple:
-        """
-        Fetch the target's response headers once, to be shared as ground
-        truth across the AI fingerprinter, STRIDE builder, and Action Agent.
-
-        Returns (headers_dict, capture_failed_bool). A failure is logged
-        (not swallowed) so a downstream "no evidence captured" placeholder
-        can be traced back to its actual cause instead of looking like a
-        mystery three call-layers later.
-        """
+        """Fetch the target's response headers once, to be shared as ground"""
         loop = asyncio.get_event_loop()
         headers, error = await loop.run_in_executor(
             None, lambda: self._sync_headers(url)
@@ -1114,8 +1110,21 @@ def _dedup_urls(urls: List[str]) -> List[str]:
 def _dedup_forms(forms: List[Dict]) -> List[Dict]:
     seen, result = set(), []
     for form in forms:
-        key = form.get("action", "") or str(form)
+        if not isinstance(form, dict):
+            continue
+        action = form.get("action", "")
+        key = action if isinstance(action, str) and action else str(form)
         if key not in seen:
             seen.add(key)
             result.append(form)
+            continue
+        incoming = form.get("reach_trace") or []
+        for i, kept in enumerate(result):
+            kept_action = kept.get("action", "")
+            kept_key = kept_action if isinstance(kept_action, str) and kept_action else str(kept)
+            if kept_key != key:
+                continue
+            if len(incoming) > len(kept.get("reach_trace") or []):
+                result[i] = form
+            break
     return result

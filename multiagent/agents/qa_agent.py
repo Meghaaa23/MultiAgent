@@ -19,10 +19,7 @@ def set_vectorstore(vectorstore=None):
     logger.info("QA Agent: vector store disabled")
 
 async def answer_question_from_db(question: str, filenames: Optional[List[str]] = None) -> str:
-    """
-    Compatibility stub. Document/KB retrieval has been removed.
-    Callers should rely on the LLM (and web search / active scanning elsewhere).
-    """
+    """Compatibility stub. Document/KB retrieval has been removed."""
     logger.info("QA Agent: no document store configured; skipping retrieval")
     return (
         "No document knowledge base is configured. "
