@@ -58,6 +58,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 from ..webappscanner import auth_session as _auth
+from ..webappscanner import ssrf_guard
 
 try:
     from .ai_evidence_scoring import EvidenceClass
@@ -747,6 +748,7 @@ class ChatbotUIProbe:
                 extra_http_headers=self.auth_headers or None,
             )
             await _auth.prepare_context(context)
+            await ssrf_guard.install_browser_guard(context)
             page = await context.new_page()
             net = _NetworkWatcher(page)
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
@@ -1497,6 +1499,7 @@ class ChatbotUIProbe:
                 extra_http_headers=self.auth_headers or None,
             )
             await _auth.prepare_context(context)
+            await ssrf_guard.install_browser_guard(context)
             page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
             await page.wait_for_timeout(1000)

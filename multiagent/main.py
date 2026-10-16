@@ -4,6 +4,7 @@ import os
 import sys
 import asyncio
 import json
+import secrets
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -15,12 +16,14 @@ from typing import Optional, Dict, List, Any
 from enum import Enum
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from agents.threat_modeling_agent import ThreatModelingAgent
+from agents.webappscanner.ssrf_guard import SSRFBlocked
+from agents.webappscanner import scan_limits
 import logging
 import traceback
 
@@ -56,6 +59,25 @@ from openai import AzureOpenAI
 llama_base_url = os.getenv("LLAMA_BASE_URL", "http://localhost:8080")
 llama_model    = os.getenv("LLAMA_MODEL_NAME", "Qwen-2.5")
 
+# Per-LLM-call timeout and retry budget. With the scan itself run-to-completion
+# (no SCAN_TIMEOUT_SECONDS), these bound a single hung model request so one
+# stuck call cannot stall the whole scan. 90s matches YuraScanner's apiTimeout;
+# the SDK applies exponential backoff + Retry-After across retries.
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+llm_call_timeout = _env_float("LLM_CALL_TIMEOUT_SECONDS", 90.0)
+llm_max_retries  = _env_int("LLM_MAX_RETRIES", 4)
+
 local_client = OpenAI(
     base_url=f"{llama_base_url}/v1",
     api_key="not-needed",
@@ -72,6 +94,8 @@ azure_client = AzureOpenAI(
     api_key=azure_api_key,
     azure_endpoint=azure_endpoint,
     api_version=azure_api_version,
+    timeout=llm_call_timeout,
+    max_retries=llm_max_retries,
 ) if azure_api_key and azure_endpoint else None
 
 active_provider = os.getenv("ACTIVE_MODEL_PROVIDER", "azure")
@@ -100,10 +124,88 @@ def get_config_list():
 client      = local_client
 config_list = get_config_list()
 
+# ---------------------------------------------------------------------------
+# Authentication (F2 remediation) + caller identity (F3)
+#
+# A single, central Bearer-token guard applied to every route via the FastAPI
+# ``dependencies=[...]`` constructor argument. Only ``GET /health`` is public
+# (so container / load-balancer health checks keep working). Tokens come
+# exclusively from the environment (API_AUTH_TOKEN, plus an optional
+# comma-separated API_AUTH_TOKENS for distinct callers) and are never hardcoded
+# or shipped to the frontend. If no token is configured the guard fails closed
+# (503) so a missing config can never silently disable auth.
+#
+# For F3, the matched token also establishes a stable, server-derived caller
+# identity (a salted hash of the token, never the raw token) stored on
+# request.state.caller_id and used for session ownership. Deployments with a
+# single shared token keep exactly the F2 behavior and have a single caller
+# identity; adding tokens via API_AUTH_TOKENS yields distinct callers.
+# ---------------------------------------------------------------------------
+API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN")
+
+# Paths reachable without a credential. Keep this minimal.
+_PUBLIC_PATHS = frozenset({"/health"})
+
+
+def _valid_tokens() -> List[str]:
+    """Current set of accepted tokens, read from the environment."""
+    tokens: List[str] = []
+    single = os.getenv("API_AUTH_TOKEN")
+    if single and single.strip():
+        tokens.append(single.strip())
+    for t in (os.getenv("API_AUTH_TOKENS") or "").split(","):
+        t = t.strip()
+        if t:
+            tokens.append(t)
+    return tokens
+
+
+async def require_auth(request: Request) -> None:
+    """Central Bearer-token check for all non-public endpoints."""
+    if request.url.path in _PUBLIC_PATHS:
+        return
+
+    tokens = _valid_tokens()
+    if not tokens:
+        # Fail closed: refuse protected traffic until the operator configures a
+        # token rather than defaulting to an open, unauthenticated service.
+        logger.error(
+            "No API token configured; refusing protected request to %s",
+            request.url.path,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Server authentication is not configured (API_AUTH_TOKEN unset).",
+        )
+
+    header = request.headers.get("Authorization", "")
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or malformed Authorization header (expected 'Bearer <token>').",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    presented = token.strip()
+    # Constant-time comparison against each accepted token to avoid timing leaks.
+    matched = False
+    for valid in tokens:
+        if secrets.compare_digest(presented, valid):
+            matched = True
+            break
+    if not matched:
+        raise HTTPException(status_code=403, detail="Invalid API credentials.")
+
+    # F3: derive a stable, non-reversible caller identity from the credential.
+    request.state.caller_id = scan_limits.caller_key(header)
+
+
 app = FastAPI(
     title="Multi-Agent Threat Modeling System with Web Scanning + AI Backdoor Detection",
     description="AutoGen + Threat Modeling + Web Scanning + AI Backdoor Analysis",
     version="7.0.0",
+    dependencies=[Depends(require_auth)],
 )
 
 @app.on_event("startup")
@@ -130,6 +232,46 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+# ---------------------------------------------------------------------------
+# Safe error handling (F6 remediation)
+#
+# Clients get stable, generic messages for unexpected failures; the full
+# exception and traceback are logged server-side only. Intentional HTTP errors
+# (HTTPException: 400/401/403/404/429/503/504 with their safe, authored
+# messages) are dispatched by FastAPI's own HTTPException handler and are not
+# affected by the catch-all below.
+# ---------------------------------------------------------------------------
+GENERIC_ERROR = "Internal server error"
+
+
+def _safe_error_message(exc: Exception) -> str:
+    """Client-safe text: the authored message for known-safe errors, else generic.
+
+    Used where an error must be reported inside a 200/stream body (so it cannot
+    be an HTTPException). Never returns raw exception text for unknown errors.
+    """
+    if isinstance(exc, SSRFBlocked):
+        return "Target host is not permitted by the server's SSRF egress policy."
+    if isinstance(exc, scan_limits.ScanBusy):
+        return "Scanner is at capacity; try again shortly."
+    if isinstance(exc, scan_limits.ScanTimeout):
+        return "Scan exceeded its time budget."
+    if isinstance(exc, scan_limits.RateLimited):
+        return "Scan rate limit exceeded. Please slow down."
+    return GENERIC_ERROR
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    # Defense-in-depth: any exception that escapes an endpoint becomes a generic
+    # 500. The real error + traceback go to server logs only.
+    logger.error(
+        "Unhandled error on %s %s: %s\n%s",
+        request.method, request.url.path, type(exc).__name__,
+        traceback.format_exc(),
+    )
+    return JSONResponse(status_code=500, content={"detail": GENERIC_ERROR})
 
 from agents.qa_agent import set_config
 
@@ -260,7 +402,7 @@ class LocalLlamaChatCompletionClient:
         except Exception as e:
             logger.exception(f"LLM call failed: {e}")
             return CreateResult(
-                content=f"Error: {str(e)}",
+                content="The language model request could not be completed.",
                 usage=RequestUsage(prompt_tokens=0, completion_tokens=0),
                 finish_reason=FinishReason.UNKNOWN, cached=False,
             )
@@ -273,6 +415,59 @@ model_client = LocalLlamaChatCompletionClient(_init_client, _init_model)
 
 session_teams: Dict[str, RoundRobinGroupChat] = {}
 session_histories: Dict[str, List[Dict[str, str]]] = {}
+
+# ---------------------------------------------------------------------------
+# Session ownership (F3 remediation)
+#
+# session_id is supplied by the client and must NOT be treated as proof of
+# ownership. Every session is bound to the server-derived caller identity
+# (request.state.caller_id, set by require_auth) that first created it. A
+# caller may only access sessions it owns. Unknown or ownerless (legacy)
+# sessions fail closed, and denied access returns 404 so the existence of
+# another caller's session is never confirmed.
+# ---------------------------------------------------------------------------
+session_owners: Dict[str, str] = {}
+
+
+def _caller_id(request: Request) -> str:
+    cid = getattr(request.state, "caller_id", None)
+    if not cid:
+        # require_auth always sets this for protected routes; fail closed.
+        raise HTTPException(status_code=401, detail="Unauthenticated.")
+    return cid
+
+
+def _session_denied() -> HTTPException:
+    # Uniform, non-disclosing response for any ownership failure.
+    return HTTPException(status_code=404, detail="Session not found.")
+
+
+def _authorize_session(session_id: str, caller_id: str, *, create: bool) -> None:
+    """Enforce that ``caller_id`` owns ``session_id``.
+
+    create=True (query/scan/write paths): claim a brand-new session for the
+    caller; reject if it belongs to someone else or is an ownerless legacy
+    session. create=False (read/list/delete): reject anything not owned.
+    """
+    owner = session_owners.get(session_id)
+    if owner is not None:
+        if owner != caller_id:
+            raise _session_denied()
+        return
+    # No recorded owner.
+    if session_id in session_histories or session_id in session_teams:
+        # Pre-existing session without ownership metadata -> fail closed.
+        raise _session_denied()
+    if create:
+        session_owners[session_id] = caller_id
+        return
+    raise _session_denied()
+
+
+def _default_session_id(prefix: str, caller_id: str) -> str:
+    """Caller-scoped default so callers that omit session_id never collide."""
+    return f"{prefix}:{caller_id}"
+
 
 SYSTEM_PROMPT = (
     "You are an intelligent cybersecurity assistant. "
@@ -364,6 +559,32 @@ def _auth_from_body(raw: Any) -> Optional[Dict[str, str]]:
 def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
+
+async def _await_with_heartbeat(coro, *, phase: str, step: int, total_steps: int,
+                                message: str, percent: int, interval: float = 5.0):
+    """Await a long coroutine while keeping the SSE connection warm.
+
+    Yields ``("beat", sse_str)`` every ``interval`` seconds the coroutine is
+    still running, then ``("done", result)`` once. ``asyncio.shield`` keeps the
+    periodic timeout from cancelling the real work.
+
+    Without this, a multi-minute phase (deep crawl, hybrid research, report
+    synthesis) sends no bytes; an idle reverse proxy or socket then drops the
+    stream, the client falls back to the blocking endpoint, and the whole
+    pipeline re-runs — surfacing as "0 Unknown Error" in the browser.
+    """
+    task = asyncio.create_task(coro)
+    while True:
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), timeout=interval)
+            yield ("done", result)
+            return
+        except asyncio.TimeoutError:
+            yield ("beat", _format_sse("progress", {
+                "phase": phase, "step": step, "total_steps": total_steps,
+                "message": message, "percent": percent,
+            }))
+
 @app.get("/")
 async def root():
     return {
@@ -418,10 +639,14 @@ async def query_with_full_autogen(request: Request):
 
         body        = await request.json()
         question    = body.get("question")
-        session_id  = body.get("session_id", "default")
+        caller_id   = _caller_id(request)
+        session_id  = body.get("session_id") or _default_session_id("default", caller_id)
         auth        = _auth_from_body(body.get("auth"))
         if not question:
             raise HTTPException(status_code=400, detail="Missing question")
+
+        # F3: bind/verify session ownership (claims a new session for this caller).
+        _authorize_session(session_id, caller_id, create=True)
 
         logger.info(f"Question: {question}")
         logger.info(f"Session:  {session_id}")
@@ -444,6 +669,16 @@ async def query_with_full_autogen(request: Request):
 
             if is_web_scan:
                 logger.info("ROUTING → ThreatModelingAgent (web scan + AI detection)")
+                try:
+                    scan_limits.check_rate_limit(
+                        scan_limits.caller_key(request.headers.get("Authorization"))
+                    )
+                except scan_limits.RateLimited as e:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Scan rate limit exceeded. Please slow down.",
+                        headers={"Retry-After": str(e.retry_after)},
+                    )
                 try:
                     target_url = threat_modeling_agent._extract_url_from_query(question)
                     if auth:
@@ -486,17 +721,24 @@ async def query_with_full_autogen(request: Request):
                         else len(scan_data.get("strategic_recommendations") or [])
                     ),
                     })
+                except scan_limits.ScanBusy as e:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Scanner is at capacity; try again shortly.",
+                        headers={"Retry-After": str(e.retry_after)},
+                    )
+                except scan_limits.ScanTimeout as e:
+                    raise HTTPException(status_code=504, detail="Scan exceeded its time budget.")
                 except Exception as e:
                     logger.error(f"Web scan failed: {e}\n{traceback.format_exc()}")
                     return JSONResponse({
                         "answer": (
-                            f"Web scan failed: {e}\n\n"
+                            "The web scan could not be completed. "
                             "Falling back to a general security answer.\n\n"
                             + await answer_with_llm(question, session_id)
                         ),
                         "session_id": session_id,
                         "route": "scan_error_fallback",
-                        "error": str(e),
                     }, status_code=200)
 
         try:
@@ -520,16 +762,10 @@ async def query_with_full_autogen(request: Request):
                                 final_answer = content
                                 break
                 if not final_answer:
-                    final_answer = f"Error generating response: {e}"
+                    final_answer = "A response could not be generated. Please try again."
             except Exception as e2:
-                logger.error(f"AutoGen fallback failed: {e2}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        f"LLM call failed: {e}. AutoGen fallback failed: {e2}. "
-                        "Check AZURE_OPENAI_* or local llama.cpp settings."
-                    ),
-                )
+                logger.error(f"AutoGen fallback failed: {e2}\n{traceback.format_exc()}")
+                raise HTTPException(status_code=500, detail=GENERIC_ERROR)
 
         history = await get_team_history(session_id)
         logger.info(f"QUERY COMPLETE — {len(final_answer)} chars")
@@ -547,22 +783,33 @@ async def query_with_full_autogen(request: Request):
         raise
     except Exception as e:
         logger.error(f"QUERY FAILED: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=GENERIC_ERROR)
 
 class StreamQueryRequest(BaseModel):
     question:   str
     session_id: Optional[str] = None
     auth:       Optional[Dict[str, Any]] = None
-    max_time_minutes: Optional[int] = None
 
 @app.post("/query/stream")
-async def query_stream(request: StreamQueryRequest):
+async def query_stream(request: StreamQueryRequest, http: Request):
 
     async def event_generator():
         try:
             question   = request.question
-            session_id = request.session_id or "default"
+            try:
+                caller_id = _caller_id(http)
+            except HTTPException:
+                yield _format_sse("error", {"message": "Unauthenticated."})
+                return
+            session_id = request.session_id or _default_session_id("default", caller_id)
             auth       = _auth_from_body(request.auth)
+
+            # F3: bind/verify session ownership before any session read/write.
+            try:
+                _authorize_session(session_id, caller_id, create=True)
+            except HTTPException:
+                yield _format_sse("error", {"message": "Session not found."})
+                return
 
             yield _format_sse("progress", {
                 "phase": "classification", "step": 1, "total_steps": 6,
@@ -587,6 +834,21 @@ async def query_stream(request: StreamQueryRequest):
             })
             await asyncio.sleep(0)
 
+            # F5: rate-limit expensive scan initiation (per authenticated caller).
+            if is_security and is_web_scan:
+                try:
+                    scan_limits.check_rate_limit(
+                        scan_limits.caller_key(http.headers.get("Authorization"))
+                    )
+                except scan_limits.RateLimited as e:
+                    yield _format_sse("error", {
+                        "message": (
+                            f"Scan rate limit exceeded. Retry after "
+                            f"{e.retry_after}s."
+                        )
+                    })
+                    return
+
             if not is_security or (is_security and not is_web_scan):
                 yield _format_sse("progress", {
                     "phase": "report_generation", "step": 2, "total_steps": 3,
@@ -597,8 +859,8 @@ async def query_stream(request: StreamQueryRequest):
                 try:
                     final_answer = await answer_with_llm(question, session_id)
                 except Exception as e:
-                    logger.error(f"Stream LLM error: {e}")
-                    final_answer = f"Error generating response: {str(e)}"
+                    logger.error(f"Stream LLM error: {e}\n{traceback.format_exc()}")
+                    final_answer = "A response could not be generated. Please try again."
 
                 yield _format_sse("progress", {
                     "phase": "report_generation", "step": 3, "total_steps": 3,
@@ -615,37 +877,21 @@ async def query_stream(request: StreamQueryRequest):
                 })
                 return
 
-            yield _format_sse("progress", {
-                "phase": "knowledge_gathering", "step": 2, "total_steps": 6,
-                "message": "Decomposing security question...", "percent": 15,
-            })
-            await asyncio.sleep(0)
-
-            decomposition = await threat_modeling_agent.decompose_query(question)
-            sub_q_count   = (
-                len(decomposition.get('task_1_system_understanding', []))
-                + len(decomposition.get('task_2_security_analysis', []))
-            )
-
-            target_url   = threat_modeling_agent._extract_url_from_query(question)
-            known_vulns  = await threat_modeling_agent.search_known_vulnerabilities_web(
-                question, target_url, verbose=True
-            )
+            # Active web scan: the report is built entirely from the scanner's
+            # evidence, so we skip the decompose -> web-search -> STRIDE-LLM chain.
+            # It produced nothing synthesize_comprehensive_report reads, and its
+            # silent web-search phase was the main source of the SSE gap that
+            # dropped the stream and forced the blocking /query/ fallback
+            # ("0 Unknown Error"). Straight to scanning (with 5s heartbeats).
+            target_url = threat_modeling_agent._extract_url_from_query(question)
 
             yield _format_sse("progress", {
-                "phase": "knowledge_gathering", "step": 2, "total_steps": 6,
-                "message": f"{sub_q_count} sub-questions · {len(known_vulns)} CVE references",
-                "percent": 35,
-            })
-            await asyncio.sleep(0)
-
-            research = await threat_modeling_agent.research_sub_questions_hybrid(
-                decomposition, verbose=True
-            )
-
-            yield _format_sse("progress", {
-                "phase": "knowledge_gathering", "step": 3, "total_steps": 6,
-                "message": "Knowledge gathering complete", "percent": 45,
+                "phase": "active_scanning", "step": 2, "total_steps": 4,
+                "message": (
+                    f"Preparing active scan of {target_url}..."
+                    if target_url else "Preparing active scan..."
+                ),
+                "percent": 15,
             })
             await asyncio.sleep(0)
 
@@ -654,55 +900,54 @@ async def query_stream(request: StreamQueryRequest):
                 scanner = threat_modeling_agent.ensure_web_scanner()
                 if not scanner:
                     yield _format_sse("progress", {
-                        "phase": "active_scanning", "step": 4, "total_steps": 6,
+                        "phase": "active_scanning", "step": 2, "total_steps": 4,
                         "message": (
-                            "Active scanner unavailable — generating report from "
-                            "web research only. Check backend logs / Playwright install."
+                            "Active scanner unavailable — check backend logs / "
+                            "Playwright install."
                         ),
                         "percent": 60,
                     })
                     await asyncio.sleep(0)
                 else:
                     yield _format_sse("progress", {
-                        "phase": "active_scanning", "step": 4, "total_steps": 6,
+                        "phase": "active_scanning", "step": 2, "total_steps": 4,
                         "message": (
                             f"Logging in as {auth['username']} and scanning {target_url}..."
                             if auth else
                             f"Scanning {target_url} · detecting AI components..."
                         ),
-                        "percent": 48,
+                        "percent": 20,
                     })
                     await asyncio.sleep(0)
 
-                    _budget = request.max_time_minutes
                     scan_task = asyncio.create_task(
                         scanner.scan_application(
                             target_url=target_url,
-                            max_time_minutes=_budget, verbose=True,
+                            verbose=True,
                             auth=auth,
                         )
                     )
 
                     heartbeats = [
                         "Fingerprinting tech stack...",
+                        "Discovering endpoints...",
                         "Detecting AI/ML components...",
-                        "Querying AVID database...",
-                        "Testing ML endpoints...",
+                        "Deep crawling (shared session)...",
                         "Testing XSS / SQLi...",
                         "Verifying findings...",
                     ]
-                    hb_idx, base_pct = 0, 50
+                    hb_idx, base_pct = 0, 25
                     while not scan_task.done():
                         await asyncio.sleep(5)
                         if scan_task.done():
                             break
                         yield _format_sse("progress", {
-                            "phase": "active_scanning", "step": 4, "total_steps": 6,
+                            "phase": "active_scanning", "step": 2, "total_steps": 4,
                             "message": heartbeats[hb_idx % len(heartbeats)],
-                            "percent": min(63, base_pct + 2),
+                            "percent": min(80, base_pct + 2),
                         })
                         hb_idx   += 1
-                        base_pct  = min(63, base_pct + 2)
+                        base_pct  = min(80, base_pct + 2)
                         await asyncio.sleep(0)
 
                     scan_results = await scan_task
@@ -711,50 +956,47 @@ async def query_stream(request: StreamQueryRequest):
                     auth_info    = scan_results.get("auth") or {}
                     if auth_info.get("enabled"):
                         yield _format_sse("progress", {
-                            "phase": "active_scanning", "step": 4, "total_steps": 6,
+                            "phase": "active_scanning", "step": 2, "total_steps": 4,
                             "message": (
                                 f"Authenticated as {auth_info.get('username')}"
                                 if auth_info.get("logged_in") else
                                 f"Login failed ({auth_info.get('error')}) — scanned unauthenticated"
                             ),
-                            "percent": 64,
+                            "percent": 82,
                         })
                         await asyncio.sleep(0)
 
                     yield _format_sse("progress", {
-                        "phase": "active_scanning", "step": 4, "total_steps": 6,
+                        "phase": "active_scanning", "step": 2, "total_steps": 4,
                         "message": (
                             f"Scan complete · {vuln_count} vulns · "
                             + ("AI components detected" if ai_powered else "no AI detected")
                         ),
-                        "percent": 65,
+                        "percent": 84,
                     })
                     await asyncio.sleep(0)
 
-            formatted_research = threat_modeling_agent.format_research_hybrid(research)
-
             yield _format_sse("progress", {
-                "phase": "report_generation", "step": 5, "total_steps": 6,
-                "message": "Applying STRIDE + ATLAS threat model...", "percent": 70,
+                "phase": "report_generation", "step": 3, "total_steps": 4,
+                "message": "Synthesizing evidence-based report...", "percent": 88,
             })
             await asyncio.sleep(0)
 
-            threat_model = await threat_modeling_agent.apply_stride_framework(
-                question, formatted_research, known_vulns, scan_results
-            )
+            final_report, report_sections = None, None
+            async for _kind, _val in _await_with_heartbeat(
+                threat_modeling_agent.synthesize_comprehensive_report(
+                    question, None, [], scan_results, target_url
+                ),
+                phase="report_generation", step=3, total_steps=4,
+                message="Synthesizing evidence-based report...", percent=92,
+            ):
+                if _kind == "beat":
+                    yield _val
+                else:
+                    final_report, report_sections = _val
 
             yield _format_sse("progress", {
-                "phase": "report_generation", "step": 5, "total_steps": 6,
-                "message": "Synthesizing final report...", "percent": 82,
-            })
-            await asyncio.sleep(0)
-
-            final_report, report_sections = await threat_modeling_agent.synthesize_comprehensive_report(
-                question, threat_model, known_vulns, scan_results, target_url
-            )
-
-            yield _format_sse("progress", {
-                "phase": "report_generation", "step": 6, "total_steps": 6,
+                "phase": "report_generation", "step": 4, "total_steps": 4,
                 "message": "Report ready!", "percent": 100,
             })
             await asyncio.sleep(0)
@@ -774,7 +1016,9 @@ async def query_stream(request: StreamQueryRequest):
 
         except Exception as e:
             logger.error(f"Stream error: {e}\n{traceback.format_exc()}")
-            yield _format_sse("error", {"message": str(e)})
+            # Known-safe errors (SSRF/busy/timeout/rate-limit) keep their authored
+            # message; anything else becomes a generic message. Never raw str(e).
+            yield _format_sse("error", {"message": _safe_error_message(e)})
 
     return StreamingResponse(
         event_generator(),
@@ -791,7 +1035,8 @@ async def scan_web_application(request: Request):
     try:
         body          = await request.json()
         target_url    = body.get("target_url")
-        session_id    = body.get("session_id", "scan-default")
+        caller_id     = _caller_id(request)
+        session_id    = body.get("session_id") or _default_session_id("scan", caller_id)
         ai_auth_token = body.get("ai_auth_token") or body.get("auth_token")
         auth          = _auth_from_body(body.get("auth"))
 
@@ -799,6 +1044,22 @@ async def scan_web_application(request: Request):
             raise HTTPException(status_code=400, detail="Missing target_url")
         if not threat_modeling_agent:
             raise HTTPException(status_code=503, detail="Scanner not available")
+
+        # F3: a caller may only use session IDs it owns (scan results are not
+        # stored server-side per session, but this keeps the label consistent
+        # and prevents referencing another caller's session id).
+        _authorize_session(session_id, caller_id, create=True)
+
+        try:
+            scan_limits.check_rate_limit(
+                scan_limits.caller_key(request.headers.get("Authorization"))
+            )
+        except scan_limits.RateLimited as e:
+            raise HTTPException(
+                status_code=429,
+                detail="Scan rate limit exceeded. Please slow down.",
+                headers={"Retry-After": str(e.retry_after)},
+            )
 
         logger.info(f"SCAN: {target_url}"
                     + (" (AI pipeline authenticated)" if ai_auth_token else "")
@@ -873,9 +1134,24 @@ async def scan_web_application(request: Request):
 
     except HTTPException:
         raise
+    except SSRFBlocked as e:
+        logger.warning(f"SCAN BLOCKED by SSRF policy: {e}")
+        raise HTTPException(
+            status_code=403,
+            detail="Target host is not permitted by the server's SSRF egress policy.",
+        )
+    except scan_limits.ScanBusy as e:
+        raise HTTPException(
+            status_code=503,
+            detail="Scanner is at capacity; try again shortly.",
+            headers={"Retry-After": str(e.retry_after)},
+        )
+    except scan_limits.ScanTimeout as e:
+        logger.warning(f"SCAN TIMEOUT: {e}")
+        raise HTTPException(status_code=504, detail="Scan exceeded its time budget.")
     except Exception as e:
-        logger.error(f"SCAN FAILED: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"SCAN FAILED: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=GENERIC_ERROR)
 
 @app.post("/threat-modeling/")
 async def threat_modeling_query(request: Request):
@@ -909,10 +1185,14 @@ async def threat_modeling_query(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"THREAT-MODELING FAILED: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=GENERIC_ERROR)
 
 @app.get("/session/{session_id}/history")
-async def get_session_history(session_id: str):
+async def get_session_history(session_id: str, request: Request):
+    # F3: only the owning caller may read a session's history (404 otherwise,
+    # so another caller's session existence is never confirmed).
+    _authorize_session(session_id, _caller_id(request), create=False)
     history  = await get_team_history(session_id)
     qa_pairs = [
         {"turn": (i // 2) + 1,
@@ -929,14 +1209,21 @@ async def get_session_history(session_id: str):
     }
 
 @app.post("/clear-session/{session_id}")
-async def clear_session(session_id: str):
+async def clear_session(session_id: str, request: Request):
+    # F3: only the owning caller may clear a session.
+    _authorize_session(session_id, _caller_id(request), create=False)
     clear_session_team(session_id)
+    session_owners.pop(session_id, None)
     return {"message": f"Session {session_id} cleared", "success": True}
 
 @app.get("/sessions")
-async def list_active_sessions():
+async def list_active_sessions(request: Request):
+    # F3: enumerate only the authenticated caller's own sessions.
+    caller_id = _caller_id(request)
     sessions = []
-    for sid in session_teams:
+    for sid, owner in session_owners.items():
+        if owner != caller_id:
+            continue
         history = await get_team_history(sid)
         sessions.append({
             "session_id":     sid,
@@ -971,9 +1258,37 @@ async def get_model_settings():
         }
     }
 
+def _require_admin(request: Request) -> None:
+    """Authorize a deployment-wide (admin) operation (F4).
+
+    Changing the global model provider is a deployment-level action, not an
+    ordinary scanner operation. It requires a separate privileged credential
+    (API_ADMIN_TOKEN) presented in the X-Admin-Token header, in addition to the
+    normal F2 authentication already enforced by require_auth. This is NOT the
+    session-ownership mechanism and does NOT accept any client-supplied role.
+
+    Fails closed: if API_ADMIN_TOKEN is unset, the operation is refused. The
+    response never reveals whether an admin token is configured, and the token
+    is never logged.
+    """
+    admin_token = os.getenv("API_ADMIN_TOKEN")
+    presented = request.headers.get("X-Admin-Token", "")
+    if (not admin_token) or (not presented) or (
+        not secrets.compare_digest(presented, admin_token)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Administrative privileges are required for this operation.",
+        )
+
+
 @app.post("/settings/model")
-async def update_model_settings(body: ModelSettingsUpdate):
+async def update_model_settings(body: ModelSettingsUpdate, request: Request):
     global active_provider, model_client, config_list
+    # F4: deployment-wide model switching is an admin-only operation. Ordinary
+    # authenticated callers (API_AUTH_TOKEN/API_AUTH_TOKENS) cannot change it.
+    _require_admin(request)
+
     if body.provider not in ["local", "azure"]:
         raise HTTPException(status_code=400, detail="Provider must be 'local' or 'azure'")
     if body.provider == "azure" and not azure_client:
@@ -985,20 +1300,24 @@ async def update_model_settings(body: ModelSettingsUpdate):
     active_client, active_model = get_active_client()
     model_client = LocalLlamaChatCompletionClient(active_client, active_model)
 
-    session_teams.clear()
+    # F4: do NOT clear other callers' sessions as a side effect of a config
+    # change. The primary answer path reads the active provider fresh on each
+    # call, and the scanner uses its own client fixed at init, so no global
+    # session reset is needed. Per-caller clearing remains via /clear-session.
 
-    logger.info(f"Model provider switched to: {active_provider}")
+    logger.info(f"Model provider switched to: {active_provider} (admin)")
     return {
         "success":         True,
         "active_provider": active_provider,
         "model_name":      active_model,
-        "sessions_cleared": True,
     }
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 8001))
+    # Bind to loopback by default; set HOST=0.0.0.0 explicitly to expose it
+    # (e.g. inside a container behind a published port / reverse proxy).
+    host = os.getenv("HOST", "127.0.0.1")
     logger.info(f"Starting on {host}:{port}")
     uvicorn.run(
         app, host=host, port=port,

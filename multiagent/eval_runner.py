@@ -82,7 +82,6 @@ def matches(finding_c, finding_path, exp_c, exp_path):
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("app", choices=list(TARGETS))
-    ap.add_argument("--minutes", type=int, default=8)
     ap.add_argument("--user"); ap.add_argument("--password")
     a = ap.parse_args()
 
@@ -100,9 +99,9 @@ async def main():
         auth = {"username": a.user, "password": a.password,
                 "login_url": "", "success_indicator": ""}
 
-    print(f"\n### Scanning {a.app} ({url}) cap={a.minutes}min auth={'yes' if auth else 'no'}")
+    print(f"\n### Scanning {a.app} ({url}) auth={'yes' if auth else 'no'}")
     res = await scanner.scan_application(
-        target_url=url, max_time_minutes=a.minutes, verbose=True, auth=auth)
+        target_url=url, verbose=True, auth=auth)
 
     vulns = res.get("vulnerabilities") or []
     found = [(canon(v.get("type")), v.get("location") or url, v.get("status"), v.get("type"))

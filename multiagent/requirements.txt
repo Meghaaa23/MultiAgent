@@ -1,34 +1,51 @@
---extra-index-url https://download.pytorch.org/whl/cpu
+# ============================================================================
+# Production dependencies (F8: supply-chain hardened)
+#
+# Every package the application imports at import time is declared here and
+# pinned to an exact version for reproducibility. Transitive dependencies are
+# resolved by pip and captured in requirements.lock.txt, which the Docker image
+# installs from for a deterministic build.
+#
+# Removed in F8 (verified not imported anywhere in the app — no static and no
+# dynamic imports) and/or ambiguous:
+#   autogen==0.11.2        ambiguous: resolved to AG2 (ag2). The app imports the
+#                          Microsoft autogen-agentchat / autogen-core packages,
+#                          never the top-level AG2 `autogen` module.
+#   transformers, Pillow, pytesseract, SpeechRecognition, PyMuPDF, tiktoken,
+#   langchain, langchain-community, langchain-core, langchain-text-splitters,
+#   python-multipart, playwright-stealth, autogen-ext
+#                          not imported by the application; several carried
+#                          known advisories now eliminated by removal.
+#
+# Optional extras (NOT required; the app degrades gracefully without them):
+#   sentence-transformers, numpy
+#     Only used by SemanticScorer when enable_embeddings=True. The scanner runs
+#     with enable_embeddings=False and falls back to Jaccard similarity, so
+#     these (and torch) are intentionally excluded from the production image.
+#     Install separately to enable embedding-based scoring.
+# ============================================================================
 
+# --- Web framework / server ---
 fastapi==0.134.0
 uvicorn==0.41.0
+pydantic==2.13.5
+
+# --- LLM / agents (Microsoft AutoGen: app imports autogen_agentchat + autogen_core) ---
 openai==2.24.0
-python-dotenv==1.2.1
-python-multipart==0.0.22
+autogen-agentchat==0.7.5
+autogen-core==0.7.5
 
-autogen==0.11.2
-autogen_ext==0.7.5
-autogen-agentchat
+# --- Config ---
+python-dotenv==1.2.2          # was 1.2.1; fixes PYSEC-2026-2270
 
-transformers==5.2.0
-Pillow==12.1.1
-pytesseract==0.3.13
-SpeechRecognition==3.14.5
-
-PyMuPDF==1.27.1
-tiktoken==0.12.0
-
-langchain==0.3.27
-langchain-community==0.3.27
-langchain-core==0.3.83
-langchain-text-splitters==0.3.11
-
-
+# --- Browser automation / scanning ---
 playwright==1.40.0
-playwright-stealth==1.0.6
 
+# --- HTTP / DB / parsing / search / utils (previously only transitive) ---
+httpx==0.28.1                 # imported directly by Ai_Infra_agent
+sqlalchemy==2.1.0             # imported directly by pipeline_agent
+packaging==25.0               # imported directly by pipeline_agent
 redis==7.2.1
 beautifulsoup4==4.14.3
-
-requests
-ddgs
+ddgs==9.16.0                  # was unpinned
+requests==2.34.2              # was unpinned (used by scripts/test.py)

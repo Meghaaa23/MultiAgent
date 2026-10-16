@@ -1,5 +1,6 @@
 import re
 import json
+import shlex
 import logging
 import textwrap
 from typing import Dict, List, Optional, Tuple
@@ -303,11 +304,11 @@ class ActionAgent:
         elif "CSRF" in vuln_type:
             return self._action_csrf(location, stack_keywords, evidence)
         elif "Sensitive File" in vuln_type or "Protected Administrative" in vuln_type:
-            return self._action_sensitive_file(vuln_type, location, stack_keywords, evidence)
+            return self._action_sensitive_file(vuln_type, severity, location, stack_keywords, evidence)
         elif "Admin Configuration" in vuln_type or (
             "Information Disclosure" in vuln_type and "header" not in vuln_type.lower()
         ):
-            return self._action_sensitive_file(vuln_type, location, stack_keywords, evidence)
+            return self._action_sensitive_file(vuln_type, severity, location, stack_keywords, evidence)
         else:
             return self._action_generic(vuln_type, severity, location, evidence)
 
@@ -849,62 +850,135 @@ class ActionAgent:
     def _action_sqli(self, vuln_type: str, location: str,
                      parameter: str, evidence: Dict,
                      stack_keywords: List[str]) -> Dict:
-        evidence = evidence or {}
-        method = evidence.get("confirmation_method", "pattern")
-        tech   = "T" if method == "timing" else "E"
+        """Build a PoC that mirrors how the finding was actually confirmed.
 
+        The repro is derived from the recorded confirmation method and the
+        exact payload the scanner sent — never a canned sqlmap line that does
+        not carry the working payload.
+        """
+        evidence = evidence or {}
+        method       = str(evidence.get("confirmation_method") or "pattern").lower()
+        payload      = evidence.get("injected_payload")
+        test_url     = evidence.get("test_url")
+        http_method  = (evidence.get("http_method") or "POST").upper()
+        request_body = evidence.get("request_body") if isinstance(
+            evidence.get("request_body"), dict) else None
         timing_delta = evidence.get("timing_delta_seconds")
-        error_text   = (
-            evidence.get("db_error_snippet")
-            or evidence.get("response_body_snippet")
-            or evidence.get("body_snippet")
-            or ""
-        )
-        evidence_captured = True
-        if method == "timing" and timing_delta is not None:
-            evidence_note = f"# Captured timing delta: {timing_delta}s on sleep payload"
-        elif error_text:
-            evidence_note = f"# Captured DB error in response: {error_text[:200]}"
+        error_text   = evidence.get("db_error_snippet") or ""
+        diff_text    = evidence.get("response_body_snippet") or evidence.get("body_snippet") or ""
+
+        def _curl_body_post(url: str, body: Dict) -> str:
+            parts = [f'curl -s -i -X {http_method} "{url}" \\']
+            fields = list(body.items())
+            for i, (k, v) in enumerate(fields):
+                tail = " \\" if i < len(fields) - 1 else ""
+                parts.append(f'  --data-urlencode {shlex.quote(f"{k}={v}")}{tail}')
+            return "\n".join(parts)
+
+        poc_type = "command"
+        param_name = parameter or "q"
+
+        if method == "auth_bypass":
+            evidence_captured = True
+            evidence_note = (
+                "# Authentication bypass confirmed: the injected request returned a "
+                "valid session/token while an identical request with a bogus "
+                "identity did not.\n"
+                f"# Differential: {str(diff_text)[:200]}"
+            )
+            if request_body:
+                repro = _curl_body_post(location, request_body)
+            elif payload is not None:
+                field = evidence.get("identity_field") or parameter or "username"
+                repro = _curl_body_post(location, {field: payload, "password": "x"})
+            else:
+                repro = f'# Replay {http_method} {location} with the identity field set to a tautology payload'
+            poc = f"{evidence_note}\n{repro}"
+
+        elif method == "timing" and timing_delta is not None:
+            evidence_captured = True
+            evidence_note = (
+                f"# Time-based blind SQLi: response delayed ~{timing_delta}s vs baseline "
+                f"on the sleep payload below."
+            )
+            tech = "T"
+            if payload is not None:
+                data_arg = shlex.quote(f"{param_name}={payload}")
+                repro = (
+                    f'sqlmap -u "{location}" \\\n'
+                    f'  --data={data_arg} \\\n'
+                    f"  --technique={tech} --batch --dbs"
+                )
+            else:
+                repro = f'sqlmap -u "{location}" --technique={tech} --batch --dbs'
+            poc = f"{evidence_note}\n{repro}"
+
+        elif error_text or method in ("pattern", "boolean"):
+            evidence_captured = bool(error_text or diff_text)
+            if error_text:
+                evidence_note = f"# Captured DB error in response: {str(error_text)[:200]}"
+            elif method == "boolean":
+                bc = evidence.get("baseline_result_count")
+                ic = evidence.get("inject_result_count")
+                evidence_note = (
+                    "# Boolean-based SQLi: tautology payload changed the result set "
+                    f"(baseline items={bc}, injected items={ic})."
+                )
+            else:
+                evidence_note = "# Confirmed by response-content differential."
+            if test_url:
+                repro = f'curl -s -i "{test_url}"'
+            elif request_body:
+                repro = _curl_body_post(location, request_body)
+            elif payload is not None:
+                tech = "E"
+                data_arg = shlex.quote(f"{param_name}={payload}")
+                repro = (
+                    f'sqlmap -u "{location}" \\\n'
+                    f'  --data={data_arg} \\\n'
+                    f"  --technique={tech} --batch --dbs"
+                )
+            else:
+                repro = f'sqlmap -u "{location}" --batch --dbs'
+            poc = f"{evidence_note}\n{repro}"
+
         else:
             evidence_captured = False
-            evidence_note = (
-                "# [NO EVIDENCE CAPTURED — neither a timing delta nor a DB error "
-                "string was recorded; this finding is pattern-based only]"
+            poc = (
+                "# [NO EVIDENCE CAPTURED — no payload, timing delta, or DB error was "
+                "recorded for this finding]\n"
+                f'# Target: {location}'
             )
-
-        poc = (
-            f"{evidence_note}\n"
-            "sqlmap -u " + '"' + location + '"' + " \\\n"
-            '  --data="' + parameter + '=test" \\\n'
-            "  --technique=" + tech + " --batch --dbs"
-        )
 
         if "django" in stack_keywords:
             fix_snippet = textwrap.dedent("""\
-                # Django ORM is safe by default:
-                User.objects.filter(username=username)
+                # Django ORM parameterises automatically:
+                User.objects.filter(username=username, password=hashed)
                 # For raw SQL:
-                cursor.execute("SELECT * FROM t WHERE id = %s", [user_id])""")
+                cursor.execute("SELECT * FROM users WHERE email = %s", [email])""")
             fix_language = "python"
-            fix_context  = "Django ORM query"
+            fix_context  = "Django ORM / parameterised query"
         elif "php" in stack_keywords:
             fix_snippet = textwrap.dedent("""\
-                $stmt = $pdo->prepare("SELECT * FROM users WHERE name = ?");
-                $stmt->execute([$name]);""")
+                $stmt = $pdo->prepare("SELECT * FROM users WHERE email = ?");
+                $stmt->execute([$email]);""")
             fix_language = "php"
-            fix_context  = "Database query"
+            fix_context  = "Parameterised query"
         else:
-            fix_snippet  = "connection.query('SELECT * FROM users WHERE id = ?', [userId]);"
+            fix_snippet = textwrap.dedent("""\
+                // Bind user input as parameters; never concatenate it into SQL.
+                db.query('SELECT * FROM users WHERE email = ?', [email]);
+                // With an ORM (e.g. Sequelize): User.findOne({ where: { email } });""")
             fix_language = "javascript"
-            fix_context  = "Database query"
+            fix_context  = "Parameterised query"
 
         return {
             "finding_type":   vuln_type,
             "severity":       "Critical",
             "location":       location,
             "attack_poc":     poc,
-            "poc_type":       "command",
-            "evidence_captured": bool(timing_delta is not None or error_text),
+            "poc_type":       poc_type,
+            "evidence_captured": evidence_captured,
             "fix_snippet":    fix_snippet,
             "fix_language":   fix_language,
             "fix_context":    fix_context,
@@ -1009,13 +1083,16 @@ class ActionAgent:
             "effort_minutes": _EFFORT_MINUTES["Missing CSRF Protection"],
         }
 
-    def _action_sensitive_file(self, vuln_type: str, location: str,
+    def _action_sensitive_file(self, vuln_type: str, severity: str,
+                                location: str,
                                 stack_keywords: List[str],
                                 evidence: Optional[Dict] = None) -> Dict:
         from urllib.parse import urlparse
         evidence = evidence or {}
-        m    = re.search(r"(/\S+)", vuln_type)
-        path = m.group(1) if m else urlparse(location).path
+        # Derive the path from the confirmed URL, never from the human-readable
+        # finding title: a title like "... (Swagger/OpenAPI)" contains a bogus
+        # "/OpenAPI)" token that a title regex would mis-capture as the path.
+        path = urlparse(location).path or "/"
 
         status_code  = evidence.get("status") or evidence.get("status_code") or evidence.get("response_status")
         body_snippet = evidence.get("body_snippet") or evidence.get("response_snippet") or evidence.get("response_body_snippet")
@@ -1092,12 +1169,19 @@ class ActionAgent:
             fix_language = "text"
             fix_context  = "Web server configuration"
 
+        # Carry the detector-assigned severity through so this verification
+        # block stays consistent with the misconfiguration listing. A working
+        # access control downgrades to Low; unconfirmed findings are flagged.
+        if is_access_controlled:
+            out_severity = "Low"
+        elif evidence_captured:
+            out_severity = severity or "Medium"
+        else:
+            out_severity = f"{severity or 'Medium'} (unconfirmed)"
+
         return {
             "finding_type":   vuln_type,
-            "severity": (
-                "Low" if is_access_controlled else
-                ("High" if evidence_captured else "High (unconfirmed)")
-            ),
+            "severity":       out_severity,
             "location":       location,
             "attack_poc":     poc,
             "poc_type":       "curl",

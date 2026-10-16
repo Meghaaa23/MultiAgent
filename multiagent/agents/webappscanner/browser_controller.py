@@ -22,6 +22,8 @@ from .interstate_tracker import (
 
 logger = logging.getLogger(__name__)
 from . import auth_session as _auth
+from . import ssrf_guard
+from . import scan_limits
 
 import sys as _sys
 
@@ -123,6 +125,14 @@ class BrowserController:
         self._reach_trace: List[str] = []
         self._seed_url: str = ""
         self._trace_keys: Set[tuple] = set()
+        # Runtime browser state, distinct from import availability:
+        #   None  = no browser launch attempted yet
+        #   True  = a real browser rendered at least one page
+        #   False = a launch was attempted but failed and we fell back to urllib
+        # The import succeeding does NOT mean a browser binary is present, so
+        # downstream code must consult this, not `_has_playwright`, to know
+        # whether dynamic (SPA/JS) surface was actually covered.
+        self.browser_launch_ok: Optional[bool] = None
 
         try:
             from playwright.async_api import async_playwright
@@ -202,6 +212,7 @@ class BrowserController:
                 )
                 context = await browser.new_context()
                 await _auth.prepare_context(context)
+                await ssrf_guard.install_browser_guard(context)
                 page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(2000)
@@ -210,8 +221,11 @@ class BrowserController:
                 elements = await self._extract_elements_playwright(page)
 
                 await browser.close()
+                self.browser_launch_ok = True
                 return {"html": html, "elements": elements, "url": url}
         except Exception as e:
+            if self.browser_launch_ok is None:
+                self.browser_launch_ok = False
             if not _warn_playwright_loop_once(e):
                 logger.warning(f"Playwright capture failed: {e}")
             return await self._urllib_capture(url)
@@ -416,7 +430,7 @@ class BrowserController:
             filtered = [{"type": "link", "href": target_url}]
 
         chunk_size  = 50
-        max_chunks  = 8 if deep else 6
+        max_chunks  = scan_limits.scan_max_input_chunks() if deep else 6
         chunks      = [
             filtered[i:i + chunk_size]
             for i in range(0, len(filtered), chunk_size)
@@ -496,7 +510,8 @@ Respond with JSON only — no explanation:
                 seen.add(name)
                 unique.append(t)
 
-        return unique[:(40 if deep else 15)]
+        cap = scan_limits.scan_max_tasks() if deep else 15
+        return unique if cap is None else unique[:cap]
 
     def _deterministic_tasks(self, elements: List[Dict],
                               target_url: str) -> List[Dict]:
@@ -798,6 +813,7 @@ Output JSON only:
                 user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
             )
             await _auth.prepare_context(self._context)
+            await ssrf_guard.install_browser_guard(self._context)
             self._session_base = self._base_url(base_url)
             self._visited_urls = set()
             self._network_apis = set()
@@ -1568,7 +1584,10 @@ Output JSON only:
                 if verbose and n_probe:
                     print(f"   Replay probes: {n_probe} form(s) after action trace")
             if session_ok and self._page is not None and self.taint.sources:
-                n_obs = await self._revisit_for_taint(self._page, all_urls, max_pages=10)
+                n_obs = await self._revisit_for_taint(
+                    self._page, all_urls,
+                    max_pages=scan_limits.scan_taint_revisit_pages(),
+                )
                 if verbose and n_obs:
                     print(f"   Inter-state revisit: {n_obs} page(s) re-scanned")
         finally:
@@ -1604,6 +1623,10 @@ Output JSON only:
         task_name = task.get("name") or task.get("task", "unknown")
         url       = task.get("url") or base_url
         if self._session_base and not self._in_scope(url):
+            url = base_url
+        # Never let the crawl navigate to a logout endpoint while authenticated;
+        # it would drop the shared session. Redirect such tasks to the base URL.
+        if _auth.any_active() and _auth.is_logout_url(url):
             url = base_url
         self._current_task_name = task_name
 
@@ -1641,6 +1664,7 @@ Output JSON only:
                     user_agent="Mozilla/5.0 (SecurityScanner/DeepCrawl)"
                 )
                 await _auth.prepare_context(self._context)
+                await ssrf_guard.install_browser_guard(self._context)
                 self._session_base = self._base_url(base_url)
                 self._attach_network_listener()
                 page = await self._context.new_page()
@@ -1649,6 +1673,7 @@ Output JSON only:
 
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await self._wait_after_nav(page, 1100)
+            self.browser_launch_ok = True
             self.action_history = []
             self._seed_url = url
             self._reach_trace = []
@@ -1735,6 +1760,8 @@ Output JSON only:
                     discovered_urls.add(api)
 
         except Exception as e:
+            if self.browser_launch_ok is None:
+                self.browser_launch_ok = False
             logger.warning(f"execute_task failed for '{task_name}': {e}")
         finally:
             if owns_session:
@@ -2258,6 +2285,10 @@ Output JSON only:
         if not url:
             return False
         u = url.strip()
+        # Exclude logout endpoints from scope while authenticated so the crawl
+        # never follows a link or submits a form that ends the shared session.
+        if _auth.any_active() and _auth.is_logout_url(u):
+            return False
         if u[:1] in "#?" or (u.startswith("/") and not u.startswith("//")):
             return True
         if u.startswith("//"):

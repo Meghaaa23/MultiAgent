@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 from . import auth_session as _auth
+from . import ssrf_guard
 
 FRAMEWORK_SIGNATURES = {
     "angular": ["ng-version", "ng-app", "__ngContext__", "app-root",
@@ -174,6 +175,7 @@ class SPAScanner:
                 )
                 context = await browser.new_context()
                 await _auth.prepare_context(context)
+                await ssrf_guard.install_browser_guard(context)
                 page = await context.new_page()
                 await page.goto(base, timeout=self.timeout_ms,
                                 wait_until="networkidle")
@@ -347,6 +349,7 @@ class SPAScanner:
 
             for route in routes[:self.max_routes]:
                 url  = route["url"]
+                await ssrf_guard.install_browser_guard(ctx)
                 page = await ctx.new_page()
                 try:
                     await page.goto(url, timeout=self.timeout_ms,

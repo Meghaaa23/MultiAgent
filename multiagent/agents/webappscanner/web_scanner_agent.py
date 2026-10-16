@@ -20,6 +20,8 @@ from ..ai_agents.avid_lookup_agent         import AVIDLookupAgent
 from ..ai_agents.ai_vulnerability_test     import AIVulnerabilityTester
 from ..ai_agents.Ai_Infra_agent            import AIInfraAgent
 from . import auth_session as _auth
+from . import ssrf_guard
+from . import scan_limits
 
 logger = logging.getLogger(__name__)
 
@@ -147,11 +149,63 @@ class WebScannerAgent:
         print(" WebScannerAgent initialized ")
 
     async def scan_application(self, target_url: str,
-                               max_time_minutes: Optional[int] = None,
                                verbose: bool = False,
                                ai_auth_token: Optional[str] = None,
                                auth: Optional[Dict] = None) -> Dict:
+        # No time budget: the scan runs to completion / coverage saturation.
         """auth (optional): {"username", "password", "login_url","""
+        # --- SSRF guard (F1) ---------------------------------------------
+        # Validate the caller-supplied target(s) up front, then enforce the
+        # same policy at connect time for the whole scan. Public targets are
+        # allowed; non-public destinations only when explicitly configured in
+        # SSRF_INTERNAL_ALLOWLIST (see ssrf_guard).
+        policy = ssrf_guard.load_policy_from_env()
+        preflight = target_url.split("#")[0].rstrip("/")
+        # SSRF preflight runs BEFORE taking a concurrency slot, so a blocked
+        # target is rejected cheaply without consuming scan capacity (F1).
+        ssrf_guard.validate_url(preflight, policy)
+        if auth and auth.get("login_url"):
+            ssrf_guard.validate_url(auth["login_url"], policy)
+
+        # --- F5: bound concurrency + duration, always clean up ------------
+        # The concurrency slot is acquired before any browser/scan work. With
+        # the default MAX_CONCURRENT_SCANS=1 this serializes scans, which keeps
+        # the process-global SSRF policy (F1) and the shared BrowserController
+        # correct: one scan can never inherit another's egress policy.
+        async with scan_limits.scan_slot():
+            timeout = scan_limits.scan_timeout_seconds()
+            try:
+                with ssrf_guard.guarded_egress(policy):
+                    scan_coro = self._scan_application_guarded(
+                        target_url, verbose=verbose,
+                        ai_auth_token=ai_auth_token, auth=auth,
+                    )
+                    if timeout is None:
+                        # No time budget: run until the crawl completes on its
+                        # own and the scan exits naturally.
+                        return await scan_coro
+                    return await asyncio.wait_for(scan_coro, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Scan of %s exceeded SCAN_TIMEOUT_SECONDS=%.0f; aborting.",
+                    preflight, timeout,
+                )
+                raise scan_limits.ScanTimeout(
+                    f"Scan exceeded {timeout:.0f}s budget"
+                )
+            finally:
+                # Release the persistent deep-crawl browser/Playwright on every
+                # exit path (success, failure, timeout, cancellation). Without
+                # this the Chromium process leaked after each scan.
+                try:
+                    await self.browser.close_deep_session()
+                except Exception as exc:  # cleanup must not mask the real error
+                    logger.warning("Browser cleanup after scan failed: %s", exc)
+
+    async def _scan_application_guarded(self, target_url: str,
+                                        verbose: bool = False,
+                                        ai_auth_token: Optional[str] = None,
+                                        auth: Optional[Dict] = None) -> Dict:
         session: Optional[_auth.AuthSession] = None
         if auth and auth.get("username") and auth.get("password"):
             base = _resolve_docker_url(target_url.split("#")[0].rstrip("/"))
@@ -176,7 +230,7 @@ class WebScannerAgent:
                 print(f"   ! {session.error} - continuing unauthenticated\n")
         try:
             return await self._scan_application(
-                target_url, max_time_minutes=max_time_minutes, verbose=verbose,
+                target_url, verbose=verbose,
                 ai_auth_token=ai_auth_token, session=session,
             )
         finally:
@@ -184,7 +238,6 @@ class WebScannerAgent:
                 _auth.deactivate(session)
 
     async def _scan_application(self, target_url: str,
-                                max_time_minutes: Optional[int] = None,
                                 verbose: bool = False,
                                 ai_auth_token: Optional[str] = None,
                                 session: Optional["_auth.AuthSession"] = None) -> Dict:
@@ -512,7 +565,7 @@ class WebScannerAgent:
             tasks=tasks,
             base_url=target_url,
             max_tasks=len(tasks) or 15,
-            max_steps_per_task=18,
+            max_steps_per_task=scan_limits.scan_max_steps_per_task(),
             verbose=verbose,
         )
         tasks_executed = int(crawl.get("tasks_executed") or 0)
@@ -533,7 +586,7 @@ class WebScannerAgent:
                 target_url, crawl_apis, page_html=html or "",
             ))
 
-        all_urls  = _dedup_urls(all_urls)[:180]
+        all_urls  = _scope_urls(_dedup_urls(all_urls), target_url)[:180]
         all_forms = _dedup_forms(all_forms)[:50]
 
         all_params: Set[str] = set()
@@ -577,7 +630,7 @@ class WebScannerAgent:
                     ],
                     page_html=html or "",
                 ))
-                all_urls  = _dedup_urls(all_urls)[:160]
+                all_urls  = _scope_urls(_dedup_urls(all_urls), target_url)[:160]
                 all_forms = _dedup_forms(all_forms)[:50]
                 if verbose:
                     print(f"   SPA: {len(spa_forms)} forms, {len(spa_urls)} URLs\n")
@@ -799,9 +852,18 @@ class WebScannerAgent:
         except Exception:
             def _is_static(url="", content_type=""):
                 return False
+        _target_host = urllib.parse.urlparse(target_url).netloc.lower()
         for ep in discovered_endpoints:
+            _ep_url = ep.get("url", "") or ""
+            # Third-party hosts (analytics, geo-IP, CDNs) and unresolved template
+            # literals are not the target's attack surface.
+            if "{" in _ep_url or "}" in _ep_url:
+                continue
+            _ep_host = urllib.parse.urlparse(_ep_url).netloc.lower()
+            if _target_host and _ep_host and _ep_host != _target_host:
+                continue
             if ep.get("static_asset") or _is_static(
-                ep.get("url", ""), ep.get("content_type", "")
+                _ep_url, ep.get("content_type", "")
             ):
                 continue
             if ep.get("spa_catch_all") or ep.get("excluded"):
@@ -959,6 +1021,10 @@ class WebScannerAgent:
             "potential_count":        sum(1 for f in all_findings if f.get("status") == "Potential"),
             "tasks_generated":        len(tasks),
             "tasks_executed":         tasks_executed,
+            # True  = a real browser rendered the app (dynamic/SPA surface covered)
+            # False = browser launch failed, crawl fell back to static HTML only
+            # None  = no browser launch was attempted
+            "crawl_browser_rendered": getattr(self.browser, "browser_launch_ok", None),
             "forms_discovered":       len(all_forms),
             "forms_testing":          forms_testing,
             "discovered_urls":        list(all_urls),
@@ -1047,18 +1113,47 @@ async def _scan_spa_routes(base_url: str, verbose: bool = False):
         return [], []
 
 def _resolve_docker_url(url: str, verbose: bool = False) -> str:
+    """Translate a localhost target to the Docker host gateway.
+
+    SSRF-gated (F1): this Docker-host pivot is only performed when the active
+    scan policy authorizes internal scanning AND the localhost target is itself
+    on the operator's internal allowlist. Each candidate translation is
+    re-validated against the policy, so the gateway/service it points at must
+    also be explicitly allowlisted. Outside an authorized internal scan this is
+    a no-op and the normal egress guard applies.
+    """
     import socket, os
     if "localhost" not in url and "127.0.0.1" not in url:
         return url
+
+    policy = ssrf_guard.current_policy()
+    if policy is None or not policy.allow_internal:
+        return url
+    # The localhost target itself must be an authorized internal destination.
+    try:
+        ssrf_guard.validate_url(url, policy)
+    except ssrf_guard.SSRFBlocked:
+        return url
+
     in_docker = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
     if not in_docker:
         return url
+
+    def _accept(translated: str) -> Optional[str]:
+        # Only translate to a gateway the operator has explicitly allowlisted.
+        try:
+            ssrf_guard.validate_url(translated, policy)
+            return translated
+        except ssrf_guard.SSRFBlocked:
+            return None
+
     try:
         host_ip    = socket.gethostbyname("host.docker.internal")
-        translated = url.replace("localhost", host_ip).replace("127.0.0.1", host_ip)
-        if verbose:
-            print(f"  Docker: localhost → {host_ip}")
-        return translated
+        translated = _accept(url.replace("localhost", host_ip).replace("127.0.0.1", host_ip))
+        if translated:
+            if verbose:
+                print(f"  Docker: localhost → {host_ip}")
+            return translated
     except socket.gaierror:
         pass
     try:
@@ -1068,15 +1163,20 @@ def _resolve_docker_url(url: str, verbose: bool = False) -> str:
                 if parts[1] == "00000000":
                     gw = ".".join(str(b) for b in bytes.fromhex(parts[2])[::-1])
                     if gw and gw != "0.0.0.0":
-                        translated = url.replace("localhost", gw).replace("127.0.0.1", gw)
-                        if verbose:
-                            print(f"  Docker: localhost → gateway {gw}")
-                        return translated
+                        translated = _accept(
+                            url.replace("localhost", gw).replace("127.0.0.1", gw)
+                        )
+                        if translated:
+                            if verbose:
+                                print(f"  Docker: localhost → gateway {gw}")
+                            return translated
     except Exception:
         pass
     for candidate in ["172.17.0.1", "172.18.0.1", "10.0.0.1"]:
+        test = _accept(url.replace("localhost", candidate).replace("127.0.0.1", candidate))
+        if not test:
+            continue
         try:
-            test = url.replace("localhost", candidate).replace("127.0.0.1", candidate)
             req  = urllib.request.Request(test, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=2) as resp:
                 if resp.status < 500:
@@ -1106,6 +1206,35 @@ def _dedup_urls(urls: List[str]) -> List[str]:
             seen.add(norm)
             result.append(url)
     return result
+
+def _scope_urls(urls: List[str], base: str) -> List[str]:
+    """Keep only concrete same-host URLs.
+
+    Third-party hosts harvested from inline scripts (analytics, geo-IP, CDNs)
+    are not the target's attack surface, and template literals that still
+    carry ``{placeholder}`` tokens are not real, reachable URLs.
+    """
+    try:
+        base_host = urllib.parse.urlparse(base).netloc.lower()
+    except Exception:
+        base_host = ""
+    if not base_host:
+        return urls
+    scoped = []
+    for url in urls:
+        if not isinstance(url, str) or not url:
+            continue
+        if "{" in url or "}" in url:
+            continue
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except Exception:
+            continue
+        # Relative URLs (no netloc) are same-origin by construction.
+        if host and host != base_host:
+            continue
+        scoped.append(url)
+    return scoped
 
 def _dedup_forms(forms: List[Dict]) -> List[Dict]:
     seen, result = set(), []

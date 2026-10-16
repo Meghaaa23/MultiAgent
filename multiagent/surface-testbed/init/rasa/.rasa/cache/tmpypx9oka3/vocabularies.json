@@ -1,0 +1,50 @@
+{
+  "text": {
+    "hello": 10,
+    "hi": 12,
+    "hey": 11,
+    "good": 8,
+    "morning": 16,
+    "evening": 7,
+    "bye": 6,
+    "goodbye": 9,
+    "see": 17,
+    "you": 20,
+    "later": 15,
+    "are": 4,
+    "a": 0,
+    "bot": 5,
+    "human": 13,
+    "am": 2,
+    "i": 14,
+    "talking": 18,
+    "to": 19,
+    "an": 3,
+    "ai": 1
+  },
+  "intent": {
+    "greet": 2,
+    "goodbye": 1,
+    "bot_challenge": 0
+  },
+  "response": null,
+  "action_name": {
+    "action_listen": 6,
+    "action_restart": 7,
+    "action_session_start": 9,
+    "action_default_fallback": 4,
+    "action_deactivate_loop": 1,
+    "action_revert_fallback_events": 8,
+    "action_default_ask_affirmation": 2,
+    "action_default_ask_rephrase": 3,
+    "action_two_stage_fallback": 10,
+    "action_unlikely_intent": 11,
+    "action_back": 0,
+    "action_extract_slots": 5,
+    "utter_goodbye": 12,
+    "utter_greet": 13,
+    "utter_iamabot": 14
+  },
+  "action_text": null,
+  "intent_response_key": null
+}

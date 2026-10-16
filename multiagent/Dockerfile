@@ -51,9 +51,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Python dependencies ----
-COPY requirements.txt .
+# Install from the fully-pinned lock for a deterministic, reproducible build.
+# requirements.txt is the human-maintained intent; requirements.lock.txt is the
+# resolved transitive set (regenerate with `pip freeze` after changing intent).
+COPY requirements.txt requirements.lock.txt ./
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install --no-deps -r requirements.lock.txt
 
 # ---- Install Playwright Chromium ----
 RUN playwright install chromium && \
@@ -64,8 +67,22 @@ RUN playwright install chromium && \
 
 COPY . .
 
-# ---- Create required directories ----
-RUN mkdir -p /tmp/hf_cache
+# ---- Non-root hardening (F7) ----
+# Run the backend as a dedicated unprivileged user. The application code in
+# /app and the browsers in /ms-playwright stay root-owned and are only read /
+# executed by this user (no write needed there). All runtime writes — the
+# Chromium/Playwright profile + temp files, the HuggingFace cache, and the
+# scanner's ~/.cache and ~/.multiagent state — are directed under /tmp, which
+# the compose file mounts as a writable tmpfs so the root filesystem can be
+# read-only. HOME/XDG are set only now so earlier build steps still use /root.
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app \
+         --no-create-home --home-dir /tmp --shell /usr/sbin/nologin app
+ENV HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/.cache \
+    XDG_CONFIG_HOME=/tmp/.config
+
+USER app
 
 # ---- Health check ----
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

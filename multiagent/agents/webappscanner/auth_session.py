@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from . import ssrf_guard
 import re
 import urllib.error
 import urllib.parse
@@ -448,6 +449,7 @@ async def login(target_url: str, username: str, password: str,
                 headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
             context = await browser.new_context(user_agent=_UA)
+            await ssrf_guard.install_browser_guard(context)
             page = await context.new_page()
             page.on("request", _on_request)
 

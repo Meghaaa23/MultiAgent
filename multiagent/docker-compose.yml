@@ -15,11 +15,49 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    # --- Container hardening (F7): defense-in-depth, least privilege ---------
+    # Non-root user (matches the Dockerfile's app user, UID/GID 10001), no
+    # added privileges via setuid/setgid, all Linux capabilities dropped, and a
+    # read-only root filesystem. The only writable location is a tmpfs at /tmp
+    # (HOME/XDG caches, HuggingFace cache and the Chromium/Playwright profile
+    # all live under /tmp). No privileged mode, no cap_add, no host bind mounts.
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
     env_file:
       - .env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      # Listen on the exposed/published/health-checked port.
+      - PORT=8000
+      # App default binds to 127.0.0.1; inside the container it must listen on
+      # all interfaces to be reachable via the published port. Auth is enforced
+      # by API_AUTH_TOKEN (supply it via the .env referenced in env_file).
+      - HOST=0.0.0.0
+      # --- Scan resource limits (F5). Defaults shown; tune per deployment. ---
+      # Max scans running at once. Keep at 1: the scanner uses shared singletons
+      # (one browser) and a process-global SSRF policy, so >1 is not isolation-safe.
+      - MAX_CONCURRENT_SCANS=1
+      # Hard cap on a single scan's duration (seconds).
+      - SCAN_TIMEOUT_SECONDS=600
+      # Max seconds a request waits for a free scan slot before 503.
+      - SCAN_SLOT_ACQUIRE_TIMEOUT_SECONDS=30
+      # Per-caller scan-initiation rate limit: SCAN_RATE_LIMIT per window.
+      - SCAN_RATE_LIMIT=10
+      - SCAN_RATE_WINDOW_SECONDS=60
+      # --- Admin credential for deployment-wide changes (F4) -----------------
+      # POST /settings/model (runtime model-provider switch) requires this
+      # separate privileged token in the X-Admin-Token header. Supply it via
+      # the .env referenced in env_file (never commit a real value). When it is
+      # unset the mutation fails closed (403) and the provider stays whatever
+      # ACTIVE_MODEL_PROVIDER configured at deploy time.
+      # API_ADMIN_TOKEN=<set-in-.env>
     depends_on:
       redis:
         condition: service_healthy
@@ -37,6 +75,13 @@ services:
     image: redis:7-alpine
     container_name: multiagent-redis
     restart: unless-stopped
+    # F7 hardening: Redis needs no Linux capabilities and must not gain new
+    # privileges. The official image already runs as the unprivileged `redis`
+    # user and writes only to its /data volume.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru

@@ -2,12 +2,41 @@ import { Component, signal, ChangeDetectionStrategy, Injectable, ViewChild, Elem
 import { bootstrapApplication } from '@angular/platform-browser';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { ApplicationConfig, importProvidersFrom } from '@angular/core';
-import { HttpClientModule, HttpClient } from '@angular/common/http';
+import { ApplicationConfig } from '@angular/core';
+import { HttpClient, HttpInterceptorFn, provideHttpClient, withInterceptors } from '@angular/common/http';
 import { firstValueFrom, Observable, Subject } from 'rxjs';
 
+/**
+ * Bearer token for the backend's `require_auth` dependency. The server fails
+ * closed when `API_AUTH_TOKEN` is unset, so every `/api` call must carry a
+ * matching token. Read it at call time (not module load) so it can be set
+ * after the app boots. Kept out of the bundle: set it for local dev with
+ *   localStorage.setItem('API_AUTH_TOKEN', '<same value as backend env>')
+ * or inject `window.__API_TOKEN__` at serve time.
+ */
+export function getApiToken(): string {
+  try {
+    const win = globalThis as any;
+    const stored = typeof localStorage !== 'undefined'
+      ? localStorage.getItem('API_AUTH_TOKEN')
+      : null;
+    return (win.__API_TOKEN__ || stored || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/** Attaches `Authorization: Bearer <token>` to backend API requests. */
+export const authInterceptor: HttpInterceptorFn = (req, next) => {
+  const token = getApiToken();
+  if (token && req.url.startsWith('/api')) {
+    req = req.clone({ setHeaders: { Authorization: `Bearer ${token}` } });
+  }
+  return next(req);
+};
+
 export const appConfig: ApplicationConfig = {
-  providers: [importProvidersFrom(HttpClientModule)]
+  providers: [provideHttpClient(withInterceptors([authInterceptor]))]
 };
 
 interface ReportSection {
@@ -129,13 +158,19 @@ export class ApiService {
 
     const connectTimer = setTimeout(() => controller.abort(), 20000);
 
+    // Raw fetch bypasses HttpClient, so the auth interceptor does not apply —
+    // attach the Bearer token here too.
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream'
+    };
+    const token = getApiToken();
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'text/event-stream'
-        },
+        headers,
         body: JSON.stringify(body),
         signal: controller.signal
       });
@@ -361,7 +396,7 @@ export class ApiService {
                   [disabled]="isLoading()"
                   class="w-full flex items-center justify-between px-3 py-2 text-left text-xs font-medium text-gray-300 hover:bg-gray-700/50 rounded-lg disabled:opacity-60">
             <span>
-              Authentication (optional)
+              Authentication
               <span *ngIf="hasAuth()" class="ml-2 px-1.5 py-0.5 rounded bg-green-800 text-green-200">
                 scan as {{ auth.username }}
               </span>
@@ -371,8 +406,7 @@ export class ApiService {
 
           <div *ngIf="showAuth()" class="px-3 pb-3 pt-1 space-y-2">
             <p class="text-xs text-gray-500">
-              Credentials for the target app. The scanner logs in first and tests pages behind the login too.
-              They're sent only with this scan and aren't saved.
+              
             </p>
             <form class="grid grid-cols-1 sm:grid-cols-2 gap-2" autocomplete="off" (submit)="$event.preventDefault()">
               <input [(ngModel)]="auth.username" name="scanUser" type="text" autocomplete="off"
@@ -382,13 +416,13 @@ export class ApiService {
                      placeholder="Password" [disabled]="isLoading()"
                      class="px-3 py-2 rounded bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
               <input [(ngModel)]="auth.login_url" name="scanLoginUrl" type="url"
-                     placeholder="Login page URL (optional — auto-detected if blank)" [disabled]="isLoading()"
+                     placeholder="Login page URL " [disabled]="isLoading()"
                      class="sm:col-span-2 px-3 py-2 rounded bg-gray-800 border border-gray-600 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none" />
             </form>
 
             <button type="button" (click)="showAuthAdvanced.set(!showAuthAdvanced())"
                     class="text-xs text-blue-400 hover:text-blue-300">
-              {{ showAuthAdvanced() ? 'Hide advanced' : 'Advanced (if login is not auto-detected)' }}
+              {{ showAuthAdvanced() ? 'Hide advanced' : 'If login is not auto-detected' }}
             </button>
             <div *ngIf="showAuthAdvanced()" class="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <input [(ngModel)]="auth.username_selector" name="scanUserSel" type="text"
@@ -508,7 +542,7 @@ export class AppComponent {
     } catch (error) {
       console.error('Failed to load model settings:', error);
       this.uploadError.set(
-        'Cannot reach backend API. Start the FastAPI server on port 8000 and restart ng serve.'
+        'Cannot reach backend API. Start the FastAPI server on port 8001, make sure API_AUTH_TOKEN is set, and restart ng serve.'
       );
     }
   }
@@ -549,16 +583,33 @@ export class AppComponent {
     const auth = this.authPayload();
     this.appendMessage({
       sender: 'user',
-      text: auth ? `${question}\n\n🔐 Authenticated scan as ${auth.username}` : question
+      text: auth ? `${question}\n\n Authenticated scan as ${auth.username}` : question
     });
     this.scrollToBottom();
 
     let settled = false;
+    // Once the stream has delivered progress, we know streaming works and the
+    // scan is already running on the backend. If the stream then drops, the
+    // blocking /api/query/ fallback would re-run the entire multi-minute scan
+    // and surface as "0 Unknown Error" — so we only fall back when the stream
+    // never produced a single event (true "streaming unavailable").
+    let streamProgressed = false;
     const finish = () => {
       if (!settled) {
         settled = true;
         this.isLoading.set(false);
       }
+    };
+    const reportInterruption = () => {
+      finish();
+      this.appendMessage({
+        sender: 'agent',
+        text:
+          'The scan stream was interrupted after it started. The scan may still ' +
+          'be running on the backend — check the server logs, then re-run the ' +
+          'scan. (Not retried automatically to avoid launching a second full scan.)'
+      });
+      this.scrollToBottom();
     };
 
     try {
@@ -568,6 +619,7 @@ export class AppComponent {
         auth
       ).subscribe({
         next: (event: StreamEvent) => {
+          streamProgressed = true;
           switch (event.type) {
             case 'progress':
               this.handleProgress(event.data);
@@ -602,17 +654,25 @@ export class AppComponent {
         },
         error: async (err) => {
           console.error('Stream error:', err);
+          if (streamProgressed) {
+            reportInterruption();
+            return;
+          }
           this.analysisMessage.set('Streaming unavailable, using standard query...');
           this.analysisPercent.set(40);
           await this.fallbackQuery(question, auth);
           finish();
         },
         complete: () => {
-
-          if (!settled && this.isLoading()) {
-            this.analysisMessage.set('Completing via standard query...');
-            this.fallbackQuery(question, auth).finally(finish);
+          if (settled || !this.isLoading()) return;
+          if (streamProgressed) {
+            // Stream ended after progress but without a result event — the
+            // backend finished or died mid-scan. Don't re-run the whole scan.
+            reportInterruption();
+            return;
           }
+          this.analysisMessage.set('Completing via standard query...');
+          this.fallbackQuery(question, auth).finally(finish);
         }
       });
     } catch (err: any) {
@@ -646,7 +706,7 @@ export class AppComponent {
       const errorMessage =
         fallbackErr?.error?.detail ||
         fallbackErr?.message ||
-        'Backend unreachable. Ensure FastAPI is running on port 8000.';
+        'Backend unreachable. Ensure FastAPI is running on port 8001.';
       const detail = typeof errorMessage === 'string'
         ? errorMessage
         : JSON.stringify(errorMessage);

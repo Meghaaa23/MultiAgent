@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import asyncio
 import openai
 import hashlib
 import logging
@@ -764,6 +765,8 @@ _CONFIDENCE_LABEL = {
     "dom_reflection": "HIGH  (DOM reflection confirmed)",
     "http_body":      "HIGH  (HTTP body evidence)",
     "pattern":        "HIGH  (error pattern in response body)",
+    "boolean":        "HIGH  (boolean-differential confirmed)",
+    "auth_bypass":    "HIGH  (authentication bypass confirmed)",
     "header":         "HIGH  (direct header inspection)",
 }
 
@@ -998,6 +1001,26 @@ def _build_section_7_coverage(scan_results: Optional[Dict]) -> str:
         f"Inter-state flows: {int(em.get('interstate_flows') or 0)} "
         f"(unescaped: {int(em.get('interstate_unescaped') or 0)})."
     )
+
+    # Disclose a degraded crawl: if the browser never launched, the client-side
+    # app (SPA routes, JS-rendered forms, XHR-discovered APIs) was NOT exercised,
+    # so a low form/state count reflects missing coverage, not a clean target.
+    rendered = sr.get("crawl_browser_rendered")
+    if rendered is False:
+        lines.append(
+            " ⚠ DEGRADED CRAWL: the headless browser could not launch, so the "
+            "crawl fell back to static HTML only. Client-rendered surface "
+            "(SPA routes, JavaScript-generated forms, and XHR/fetch API calls) "
+            "was NOT exercised — treat the form/endpoint counts below as a "
+            "lower bound, not full coverage. Install the browser runtime "
+            "(e.g. `playwright install chromium`) and re-scan for dynamic "
+            "coverage."
+        )
+    elif rendered is None:
+        lines.append(
+            " Note: no browser crawl was attempted; dynamic (SPA/JavaScript) "
+            "surface was not exercised."
+        )
     cpct = cov.get("coverage_percent")
     if cpct is not None:
         lines.append(
@@ -1472,17 +1495,15 @@ Answer:"""
                 result["cached"] = True
                 return result
 
-        if verbose:
-            print("PHASE 1: KNOWLEDGE GATHERING")
-
-        decomposition = await self.decompose_query(user_query)
-        known_vulns   = await self.search_known_vulnerabilities_web(
-            user_query, target_url, verbose=verbose
-        )
-        research      = await self.research_sub_questions_hybrid(
-            decomposition, filenames=filenames, verbose=verbose
-        )
-
+        # Active scan first (when requested); the report is derived entirely from
+        # its evidence. The decompose -> web-search -> STRIDE-LLM chain only feeds
+        # the non-scan threat-modeling path, so for a web scan we skip it: its
+        # output is never read by synthesize_comprehensive_report (the report is
+        # built from scan_results, and the STRIDE section comes from
+        # scan_results["stride_threats"], produced inside the scanner). Skipping
+        # it drops ~10 web searches + 2 LLM calls that queried the public web for
+        # a localhost target and returned noise — and were the main source of the
+        # silent gap that dropped the SSE stream.
         scan_results = None
         if enable_web_scan and target_url:
             scanner = self.ensure_web_scanner()
@@ -1492,19 +1513,35 @@ Answer:"""
                     "for WebScannerAgent errors (often missing Playwright browsers)."
                 )
             if verbose:
-                print("PHASE 2: ACTIVE WEB APPLICATION SCANNING")
+                print("PHASE 1: ACTIVE WEB APPLICATION SCANNING")
             scan_results = await scanner.scan_application(
                 target_url=target_url, verbose=verbose,
                 ai_auth_token=ai_auth_token, auth=auth,
             )
 
-        if verbose:
-            print("PHASE 3: REPORT GENERATION")
+        decomposition: Dict = {}
+        known_vulns:   List[Dict] = []
+        research = None
+        threat_model = None
+        if not enable_web_scan:
+            if verbose:
+                print("PHASE 1: KNOWLEDGE GATHERING")
+            decomposition = await self.decompose_query(user_query)
+            known_vulns   = await self.search_known_vulnerabilities_web(
+                user_query, target_url, verbose=verbose
+            )
+            research      = await self.research_sub_questions_hybrid(
+                decomposition, filenames=filenames, verbose=verbose
+            )
+            formatted_research = self.format_research_hybrid(research)
+            threat_model       = await self.apply_stride_framework(
+                user_query, formatted_research, known_vulns, scan_results
+            )
 
-        formatted_research = self.format_research_hybrid(research)
-        threat_model       = await self.apply_stride_framework(
-            user_query, formatted_research, known_vulns, scan_results
-        )
+        if verbose:
+            print("PHASE 2: REPORT GENERATION" if enable_web_scan
+                  else "PHASE 3: REPORT GENERATION")
+
         final_report, report_sections = await self.synthesize_comprehensive_report(
             user_query, threat_model, known_vulns, scan_results, target_url
         )
@@ -1515,7 +1552,7 @@ Answer:"""
             "report_sections": report_sections,
             "reasoning_chain": {
                 "decomposition":         decomposition,
-                "research_summary":      self._summarize_research_hybrid(research),
+                "research_summary":      self._summarize_research_hybrid(research) if research else {},
                 "known_vulnerabilities": known_vulns,
                 "scan_results":          self._summarize_scan_results(scan_results),
                 "threat_model":          threat_model,
@@ -1607,7 +1644,10 @@ Answer:"""
 
     async def decompose_query(self, user_query: str) -> Dict:
         prompt = QUESTION_DECOMPOSITION_PROMPT.format(query=user_query)
-        response = self.openai_client.chat.completions.create(
+        # Offload the blocking (synchronous) SDK call to a worker thread so the
+        # event loop stays free to flush SSE heartbeats during this phase.
+        response = await asyncio.to_thread(
+            self.openai_client.chat.completions.create,
             model=self.llm_model,
             messages=[
                 {
@@ -1794,7 +1834,10 @@ Answer:"""
             research=formatted_research + known_vulns_text + scan_text,
         )
 
-        response = self.openai_client.chat.completions.create(
+        # Offload the blocking (synchronous) SDK call to a worker thread so the
+        # event loop stays free to flush SSE heartbeats during this phase.
+        response = await asyncio.to_thread(
+            self.openai_client.chat.completions.create,
             model=self.llm_model,
             messages=[
                 {
